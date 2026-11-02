@@ -215,6 +215,7 @@ def test_every_setting_is_either_logged_or_deliberately_withheld() -> None:
         "redis_url",
         "leomatch_bot_username",
         "deepseek_base_url",
+        "style_examples_max",
     }
 
     assert set(Settings.model_fields) == set(LOGGED_SETTINGS) | withheld
@@ -261,3 +262,39 @@ def test_an_invalid_leomatch_bot_username_is_rejected_without_echoing_it(
 
     assert "LEOMATCH_BOT_USERNAME" in str(raised.value)
     assert raw not in str(raised.value)
+
+
+def test_style_examples_max_defaults_to_eight(full_env: dict[str, str]) -> None:
+    assert load_settings(env_file=None).style_examples_max == 8
+
+
+@pytest.mark.parametrize("value", ["1", "8", "50"])
+def test_style_examples_max_can_be_overridden(
+    full_env: dict[str, str], monkeypatch: pytest.MonkeyPatch, value: str
+) -> None:
+    monkeypatch.setenv("STYLE_EXAMPLES_MAX", value)
+
+    assert load_settings(env_file=None).style_examples_max == int(value)
+
+
+def test_an_empty_style_examples_max_counts_as_unset(
+    full_env: dict[str, str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("STYLE_EXAMPLES_MAX", "")
+
+    assert load_settings(env_file=None).style_examples_max == 8
+
+
+@pytest.mark.parametrize("value", ["0", "-1", "51", "many", "2.5"])
+def test_an_invalid_style_examples_max_is_a_readable_error_without_the_value(
+    full_env: dict[str, str], monkeypatch: pytest.MonkeyPatch, value: str
+) -> None:
+    monkeypatch.setenv("STYLE_EXAMPLES_MAX", value)
+
+    with pytest.raises(ConfigError) as caught:
+        load_settings(env_file=None)
+
+    message = str(caught.value)
+    assert "STYLE_EXAMPLES_MAX" in message
+    assert f": {value}" not in message
+    assert "'" + value + "'" not in message

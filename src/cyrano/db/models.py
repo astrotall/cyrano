@@ -8,11 +8,13 @@ from enum import StrEnum
 from sqlalchemy import (
     BigInteger,
     Boolean,
+    CheckConstraint,
     DateTime,
     Enum,
     ForeignKey,
     Index,
     MetaData,
+    SmallInteger,
     Text,
     UniqueConstraint,
     func,
@@ -97,4 +99,28 @@ class MessageRow(Base):
     )
     text: Mapped[str] = mapped_column(Text)
     tg_message_id: Mapped[int] = mapped_column(BigInteger)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
+PERSONA_ROW_ID = 1
+
+
+class PersonaRow(Base):
+    __tablename__ = "persona"
+    __table_args__ = (CheckConstraint(f"id = {PERSONA_ROW_ID}", name="single_row"),)
+
+    id: Mapped[int] = mapped_column(SmallInteger, primary_key=True, autoincrement=False)
+    text: Mapped[str] = mapped_column(Text)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
+    )
+
+
+class StyleExampleRow(Base):
+    __tablename__ = "style_examples"
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+    tags: Mapped[list[str]] = mapped_column(JSONB, server_default=EMPTY_JSON_ARRAY)
+    turns: Mapped[list[dict[str, str]]] = mapped_column(JSONB)
+    content_hash: Mapped[str] = mapped_column(Text, unique=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())

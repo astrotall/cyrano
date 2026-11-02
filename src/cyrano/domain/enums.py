@@ -1,4 +1,4 @@
-"""Contact statuses, message directions and LLM vocabulary."""
+"""Contact statuses, message directions, LLM vocabulary and dialogue roles."""
 
 from __future__ import annotations
 
@@ -40,3 +40,8 @@ class Role(StrEnum):
 class LLMStep(StrEnum):
     REPLY = "reply"
     SUMMARY = "summary"
+
+
+class TurnRole(StrEnum):
+    ME = "me"
+    THEM = "them"

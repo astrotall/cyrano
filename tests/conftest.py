@@ -34,6 +34,7 @@ OPTIONAL_ENV = (
     "HTTPX_LOG_LEVEL",
     "HEARTBEAT_PATH",
     "LEOMATCH_BOT_USERNAME",
+    "STYLE_EXAMPLES_MAX",
 )
 TOUCHED_LOGGERS = ("telethon", "aiogram", "httpx", "httpcore", "arq", "arq.worker", "arq.jobs")
 SECRET_VALUES = (

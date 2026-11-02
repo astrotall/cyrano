@@ -37,8 +37,9 @@ Key principles:
   Message text, names and other personal data are never logged at INFO or above.
 
 > The project skeleton (CYR-8), the storage layer (CYR-9), the userbot intake (CYR-10), the
-> profile collection (CYR-11), the control bot with the contact card (CYR-12) and the LLM client
-> (CYR-13, not used by the app yet) exist. The flow below is the plan.
+> profile collection (CYR-11), the control bot with the contact card (CYR-12), the LLM client
+> (CYR-13) and the import of the owner persona and style examples (CYR-14) exist; the last two are
+> not used by the app yet. The flow below is the plan.
 
 ## Architecture diagram
 
@@ -204,6 +205,7 @@ import aiogram; full rules in
 | Control bot | aiogram 3 | now (owner-only, contact card with Reply and Ignore) |
 | ORM and migrations | SQLAlchemy 2.x (async), asyncpg, Alembic | now (schema and repositories, used by the intake) |
 | LLM client | DeepSeek over plain httpx, no SDK | now (client, retries, `make llm-check`; not wired into the app yet) |
+| Persona and style examples | Imported from local files, stored in PostgreSQL | now (import commands and selectors; not used by the app yet) |
 | Lint, format | Ruff | now |
 | Types | mypy strict with the Pydantic plugin | now |
 | Tests | pytest, pytest-asyncio | now |
@@ -223,7 +225,7 @@ What exists now:
 ├── pyproject.toml                # dependencies, Ruff, mypy, pytest config
 ├── uv.lock
 ├── .python-version               # 3.14
-├── Makefile                      # install, check, test, fmt, up, down, logs, migrate, revision, db-up, login, login-docker, llm-check
+├── Makefile                      # install, check, test, fmt, up, down, logs, migrate, revision, db-up, login, login-docker, llm-check, persona-import, examples-import, examples-stats
 ├── Dockerfile                    # multi-stage, non-root runtime
 ├── docker-compose.yml            # app, worker, one-shot migrate, postgres, redis
 ├── docker-compose.override.yml   # dev: Postgres and Redis on 127.0.0.1, media in ./data/media
@@ -231,20 +233,23 @@ What exists now:
 ├── alembic.ini                   # points at migrations/; no URL, it comes from Settings
 ├── migrations/
 │   ├── env.py                    # async environment, URL from Settings
-│   └── versions/                 # 0001 creates the tables and seeds the default mode
+│   └── versions/                 # 0001 creates the tables and seeds the default mode; 0002 adds persona and style_examples
+├── examples/                     # invented sample persona and style examples (the real files go to data/, never to git)
 ├── .dockerignore
 ├── .gitignore
 ├── .claude/docs/
 │   ├── architecture.md           # layers, import rules, processes, config, logging
 │   ├── contact-lifecycle.md      # statuses, transitions, message flow
+│   ├── persona-and-examples.md   # persona and style examples: formats, limits, commands, privacy
 │   ├── safety-rules.md           # S1..S10
 │   └── decisions.md              # decided and open
 ├── .github/
 │   ├── dependabot.yml            # weekly: Actions, Docker, Compose, uv
 │   └── workflows/ci.yml
 ├── src/cyrano/
-│   ├── __main__.py               # python -m cyrano [login | llm-check]
-│   ├── main.py                   # app entrypoint, login and llm-check subcommands, signals, heartbeat
+│   ├── __main__.py               # python -m cyrano [login | llm-check | persona ... | examples ...]
+│   ├── main.py                   # app entrypoint, login, llm-check, persona and examples subcommands, signals, heartbeat
+│   ├── style_cli.py              # the persona and examples commands
 │   ├── config.py                 # Settings, load_settings, ConfigError
 │   ├── logging.py                # JSON-lines logging
 │   ├── health.py                 # heartbeat file and the app healthcheck
@@ -263,6 +268,10 @@ What exists now:
 │   │   ├── profile_source.py     # ProfileSource, LeomatchSource Protocols, ProfileSourceError
 │   │   ├── leomatch.py           # parser of the Leomatch card text
 │   │   ├── profile_collector.py  # ProfileCollector: profile, photo, Leomatch text per new contact
+│   │   ├── style_files.py        # reading and validating the persona and examples files
+│   │   ├── style_import.py       # PersonaImporter, ExamplesImporter
+│   │   ├── persona_service.py    # PersonaService
+│   │   ├── style_examples.py     # ExampleSelector, example statistics
 │   │   ├── card_builder.py       # the owner's card from the stored contact
 │   │   ├── card_sender.py        # CardSender Protocol
 │   │   ├── card_announcer.py     # CardAnnouncer: card to the owner, new -> pending
@@ -438,6 +447,7 @@ The app connects to Telegram as the userbot and polls the control bot, and conne
 | `make migrate`, `make revision m="..."` | Run Alembic, or autogenerate a revision |
 | `make login` | Log the second account in locally and save the session |
 | `make login-docker` | The same inside the compose image and volume |
+| `make persona-import FILE=...`, `make examples-import FILE=...`, `make examples-stats` | Import the persona text, import style examples from JSON, print counts per tag (see [Persona and style examples](#persona-and-style-examples)) |
 | `make llm-check` | Send one tiny request to DeepSeek with the `reply` settings and print the result (see [Checking the LLM key](#checking-the-llm-key)) |
 
 ### Checking the LLM key
@@ -461,6 +471,31 @@ llm-check ok: model=deepseek-chat input_tokens=14 output_tokens=2 latency_ms=620
 rejected key (`LLMAuthError`, HTTP 401) or an unreachable provider (`LLMUnavailableError`). A request
 makes up to 3 retries with a backoff of at most 30 s and an attempt limit of 60 s, so a provider that
 never answers can take about four minutes to fail.
+
+### Persona and style examples
+
+The persona (one text that describes the owner) and the style examples (real dialogues that end
+with the owner's reply) are imported by a command and stored in PostgreSQL; the app never reads a
+file for them. Nothing in the app uses them yet. Formats, limits, selection and privacy rules:
+[.claude/docs/persona-and-examples.md](.claude/docs/persona-and-examples.md). Samples with invented
+content are in `examples/`.
+
+The real files live only in `data/` (ignored by git and Docker): `data/persona.md` and
+`data/style-examples.json`. The commands run on the host, like `make migrate`: they need a complete
+`.env`, a database that is up (`make db-up`) and the migrations applied (`make migrate`).
+
+```sh
+make persona-import FILE=data/persona.md
+make examples-import FILE=data/style-examples.json
+make examples-stats
+uv run python -m cyrano persona show                                   # length and update time, never the text
+uv run python -m cyrano examples import data/style-examples.json --replace --yes   # replace everything
+```
+
+Importing the same examples again skips the dialogues already stored. An invalid file imports
+nothing and the command prints up to 20 problems as locations and rules (for example
+`dialogues[3].turns[1].text: empty`), never the text. Every command exits with 0, or with 1 and a
+readable message on an error. `STYLE_EXAMPLES_MAX` limits how many examples one selection returns.
 
 ### Migrations
 
@@ -499,11 +534,12 @@ the default applies.
 | `LLM_REPLY_MAX_TOKENS`, `LLM_SUMMARY_MAX_TOKENS` | no | `400`, `1500` | Default limit on the length of each step's reply, a positive integer |
 | `DATABASE_URL` | yes | | PostgreSQL URL, must start with `postgresql+asyncpg://` |
 | `REDIS_URL` | yes | | Redis URL, must start with `redis://` or `rediss://` |
-| `MEDIA_DIR` | no | `media` | Where downloaded media goes: today the profile photos in `profiles/<internal contact id>.jpg` and the Leomatch card photos in `profiles/<internal contact id>-card.jpg` |
+| `MEDIA_DIR` | no | `media` | Where downloaded media goes: today the profile photos in `profiles/<internal contact id>.jpg` and the Leomatch card photos in `profiles/<internal contact id>-card-<n>.jpg` (n from 1) |
 | `LOG_LEVEL` | no | `INFO` | Level of the application log. One of `DEBUG`, `INFO`, `WARNING`, `ERROR`, `CRITICAL`, case-insensitive |
 | `TELETHON_LOG_LEVEL`, `AIOGRAM_LOG_LEVEL` | no | `WARNING` | Level of the `telethon` and `aiogram` loggers; same allowed values as `LOG_LEVEL` |
 | `HTTPX_LOG_LEVEL` | no | `WARNING` | Level of the `httpx` logger, also applied to `httpcore`; same allowed values as `LOG_LEVEL` |
 | `TIMEZONE` | no | `Europe/Moscow` | IANA zone name, validated at startup |
+| `STYLE_EXAMPLES_MAX` | no | `8` | Most style examples one selection returns, from 1 to 50. Nothing in the app selects examples yet |
 | `HEARTBEAT_PATH` | no | `<tmpdir>/cyrano-heartbeat` | Liveness file touched by the app and read by the app healthcheck |
 | `LEOMATCH_BOT_USERNAME` | no | `leomatchbot` | Username of the matching bot whose chat is searched for a new contact's profile text; a leading `@` is allowed. The default is an assumption: check the bot's real username in Telegram |
 | `POSTGRES_USER`, `POSTGRES_PASSWORD`, `POSTGRES_DB` | for Docker | | Credentials and database name of the compose Postgres; see [Variables](#variables) |
@@ -533,7 +569,7 @@ startup logic, the login flow, the intake on real PostgreSQL, the profile collec
 check, matching-bot lookup, collector, `update_identity` on real PostgreSQL) and the check that the
 userbot never sends, and for the control bot: owner-only access, the card rendering, the card sender,
 the handlers driven through the real dispatcher, the announcer and the Reply and Ignore actions on
-real PostgreSQL, and for the LLM client: the request and reply shapes, JSON validation with retries, the retry and deadline rules, the per-step settings and the logs, all against `httpx.MockTransport`. Telegram and DeepSeek are always faked: no test connects to either. All tests use fake values only.
+real PostgreSQL, and for the LLM client: the request and reply shapes, JSON validation with retries, the retry and deadline rules, the per-step settings and the logs, all against `httpx.MockTransport`, and for the persona and style examples: the file validation, the import and the replace on real PostgreSQL, the selection, the commands, migration `0002` and the sample files. Telegram and DeepSeek are always faked: no test connects to either. All tests use fake values only.
 
 Database tests run against real PostgreSQL, never SQLite, because JSONB and native enums must be
 tested for real. `TEST_DATABASE_URL` (from the environment or `.env`; the template value targets
@@ -573,5 +609,6 @@ cancels the older one.
 - [CONTRIBUTING.md](CONTRIBUTING.md): branches, commits, Jira, pull requests.
 - [.claude/docs/architecture.md](.claude/docs/architecture.md)
 - [.claude/docs/contact-lifecycle.md](.claude/docs/contact-lifecycle.md)
+- [.claude/docs/persona-and-examples.md](.claude/docs/persona-and-examples.md)
 - [.claude/docs/safety-rules.md](.claude/docs/safety-rules.md)
 - [.claude/docs/decisions.md](.claude/docs/decisions.md)

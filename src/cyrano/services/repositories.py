@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from datetime import datetime
 from typing import Protocol
 
@@ -15,6 +16,7 @@ from cyrano.domain.models import (
     Mode,
     ModeCreate,
 )
+from cyrano.domain.style import ExamplesAddResult, Persona, StyleExample, StyleExampleCreate
 
 
 class ContactRepository(Protocol):
@@ -59,3 +61,21 @@ class ModeRepository(Protocol):
     async def resolve_by_id(self, mode_id: int | None) -> Mode: ...
 
     async def resolve_by_name(self, name: str) -> Mode: ...
+
+
+class PersonaRepository(Protocol):
+    async def get(self) -> Persona | None: ...
+
+    async def replace(self, text: str) -> Persona: ...
+
+
+class StyleExampleRepository(Protocol):
+    async def add_many(
+        self, examples: Sequence[StyleExampleCreate], *, replace: bool = False
+    ) -> ExamplesAddResult: ...
+
+    async def list_all(self) -> list[StyleExample]: ...
+
+    async def count(self) -> int: ...
+
+    async def delete_all(self) -> int: ...

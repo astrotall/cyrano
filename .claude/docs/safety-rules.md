@@ -1,8 +1,9 @@
 # Safety rules
 
-**All rules below are planned until their tickets land.** As of CYR-8 nothing sends messages, so
-none of them is enforced by code yet; they are the contract that the tickets must implement and
-test. Changing or dropping a rule is a large change (see [CLAUDE.md](../../CLAUDE.md)) and ships
+**All rules below are planned until their tickets land, except where a rule says it exists.** As of
+CYR-10 nothing sends messages: the userbot only listens, and a test proves it (S1 and S2). The
+other rules are not enforced by code yet; they are the contract that the tickets must implement
+and test. Changing or dropping a rule is a large change (see [CLAUDE.md](../../CLAUDE.md)) and ships
 with the code and the test ([CONTRIBUTING.md](../../CONTRIBUTING.md)). Statuses:
 [contact-lifecycle.md](contact-lifecycle.md).
 
@@ -14,9 +15,11 @@ Tests named here are planned. They use scripted fakes and fake data only.
   when the reply is scheduled and again right before it is sent.
 - **Why:** replying to someone the owner has not approved is the worst failure of the product.
 - **Enforced where:** the status guard inside the sender (CYR-19); the scheduling check in the
-  worker job (CYR-17, CYR-19).
+  worker job (CYR-17, CYR-19). Exists today (CYR-10): the userbot sends nothing at all, so no
+  reply can reach a contact in any status; see the structural test under S2.
 - **How it is tested:** every status other than `active` gets no send; status changed from
   `active` to `paused` between scheduling and sending gets no send; contact missing at send time.
+  Exists today: the structural test "the userbot never sends" (S2).
 
 ## S2. One sender is the only way out
 
@@ -24,9 +27,18 @@ Tests named here are planned. They use scripted fakes and fake data only.
   includes replies, proactive messages and reminders to contacts.
 - **Why:** guards, limits and pacing can only be trusted if they cannot be bypassed.
 - **Enforced where:** the sender in `services` (guard CYR-19, humanization CYR-18, limits CYR-22);
-  the import rules in [architecture.md](architecture.md); review.
-- **How it is tested:** each guard has its own tests through the sender; a check that no Telethon
-  send call exists outside the sender is planned once the userbot lands (CYR-10).
+  the import rules in [architecture.md](architecture.md); review. Exists today (CYR-10): the
+  userbot is structurally unable to send. The client Protocol it is typed against
+  (`UserbotClient` in `userbot/protocols.py`) has no write method, and Telethon is imported only
+  inside `userbot/`.
+- **How it is tested:** each guard has its own tests through the sender. Exists today
+  (`tests/userbot/test_never_sends.py`): the members of `UserbotClient`, `IncomingEvent` and
+  `SenderLike` are compared with an allowlist, so a new write method fails the test; every module of
+  the userbot package is scanned for write-looking Telegram names (`send_*`, `mark_*`, `edit_*`,
+  `delete_*`, `reply`, `respond` and so on), with `send_code_request` in `login.py` as the single
+  allowed exception (it asks Telegram for a login code, it sends no message); and the handler tests
+  run with a fake client and fake events whose write methods record the attempt and raise. When the
+  sender lands (CYR-19) the scan stays and the sender's own module is the only place allowed to send.
 
 ## S3. Stop-triggers hand over
 

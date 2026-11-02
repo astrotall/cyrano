@@ -1,6 +1,6 @@
 # Architecture
 
-State as of CYR-9: the skeleton and the storage layer exist. Anything else is marked **planned**
+State as of CYR-10: the skeleton, the storage layer and the userbot intake exist. Anything else is marked **planned**
 with its ticket.
 Product and decisions: [CLAUDE.md](../../CLAUDE.md). Reasons: [decisions.md](decisions.md).
 
@@ -10,27 +10,29 @@ Source lives in `src/cyrano/`.
 
 | Package or module | Role | State |
 | --- | --- | --- |
-| `userbot/` | Telethon userbot: receives messages on the second account, converts events into plain objects, performs the actual Telegram send | empty skeleton; planned CYR-10, CYR-11 |
+| `userbot/` | The only package that imports Telethon: client, session and login, event filters, the incoming-message handler, the listener lifecycle. Receives private messages on the second account and converts events into plain objects. Planned: profile collection (CYR-11) and the actual Telegram send behind the sender (CYR-19) | exists for listening and registration (CYR-10); it sends nothing |
 | `bot/` | aiogram control bot: owner-only, contact card, Reply/Ignore buttons, notifications | empty skeleton; planned CYR-12 |
 | `llm/` | LLM client: DeepSeek over plain httpx, response parsing | empty skeleton; planned CYR-13 |
-| `db/` | SQLAlchemy models (`models.py`), engine and session factory (`session.py`), repositories (`repositories.py`) | exists; nothing calls it yet |
-| `services/` | Business logic shared by userbot, bot and worker: contact lifecycle, sender, reply pipeline. `repositories.py` holds the repository Protocols | Protocols exist; the logic is planned from CYR-12 on |
+| `db/` | SQLAlchemy models (`models.py`), engine and session factory (`session.py`), repositories (`repositories.py`) | exists; called by the intake (CYR-10) |
+| `services/` | Business logic shared by userbot, bot and worker: contact lifecycle, sender, reply pipeline. `repositories.py` holds the repository Protocols, `intake.py` the `IntakeService`, `sanitize.py` the NUL-byte removal, `contact_events.py` the `ContactEventPublisher` Protocol and its in-memory queue | Protocols, intake, sanitization and events exist (CYR-10); the rest is planned from CYR-12 on |
 | `worker/` | Arq worker: `settings.py` holds `WorkerSettings`, `startup`, `shutdown`, a placeholder `noop` job (Arq refuses to start a worker with no registered functions) | skeleton works; real jobs planned CYR-17 |
 | `config.py` | `Settings` (pydantic-settings), `load_settings`, `ConfigError` | exists |
 | `logging.py` | JSON-lines formatter, `build_log_config`, `configure_logging` | exists |
 | `health.py` | Heartbeat file, `is_alive`, `python -m cyrano.health` | exists |
-| `main.py`, `__main__.py` | App entrypoint, signal handling, heartbeat task | exists; userbot and bot are plugged in by later tickets |
+| `main.py`, `__main__.py` | App entrypoint (composition root), the `login` subcommand, signal handling, heartbeat task | exists; the userbot is plugged in (CYR-10), the bot by CYR-12 |
 | `domain/` | Leaf package, imports only pydantic and the standard library: enums, status transition rules, domain errors, Pydantic models the layers exchange | exists |
 | `prompts` | Prompt texts, few-shot data loading, trigger lists | planned, not created; the layered builder's location is decided in CYR-16 |
 
 `tests/` mirrors the packages (`tests/userbot`, `tests/bot`, `tests/llm`, `tests/domain`,
 `tests/db`, `tests/services`, `tests/worker`); the skeleton packages have empty test packages.
+`tests/userbot/fakes.py` holds the fake Telethon client, event and sender.
 
 ## Import direction
 
 Enforced by review. `tests/test_import_direction.py` also checks the part that exists: `domain`
 imports only pydantic, the standard library and itself; `db` imports neither `services` nor `llm`;
-`services` does not import `db`.
+`services` imports neither `db`, `userbot` nor `bot`; `userbot` imports none of `db`, `llm`, `bot`;
+and only the `userbot` package imports `telethon`.
 
 1. `bot`, `userbot` and `worker` may import `services`.
 2. `services` reach `llm` and `db` only through interfaces defined in `services`. The concrete
@@ -44,6 +46,8 @@ imports only pydantic, the standard library and itself; `db` imports neither `se
    stdlib-only), so `config` is not a pure leaf until that default moves.
 5. `main` is the composition root: the only place that builds concrete objects and passes them
    to the layers.
+6. Telethon is imported only inside `userbot/`. The rest of the code, tests of other layers
+   included, sees it through the Protocols in `userbot/protocols.py`.
 
 Never import upward. Whether `bot`, `userbot` and `worker` may import each other is an open
 question in [decisions.md](decisions.md).
@@ -71,7 +75,7 @@ Two Python processes, two stores, one external API each for Telegram and the LLM
 
 ```
  Telegram <--> app process (python -m cyrano)       worker process (arq)
-               userbot + control bot (planned)       delayed jobs (planned)
+               userbot (exists) + control bot (planned)   delayed jobs (planned)
                heartbeat task (exists)               placeholder job (exists)
                   |        |                            |        |
                   v        v                            v        v
@@ -81,12 +85,19 @@ Two Python processes, two stores, one external API each for Telegram and the LLM
                                                      LLM (DeepSeek)
 ```
 
-- **app**: `python -m cyrano`. Today it loads config, starts JSON logging, builds the database
-  engine (which opens no connection until something uses it), touches the heartbeat file and waits
-  for SIGTERM or SIGINT. Planned: the userbot and the control bot run on its event loop (CYR-10,
-  CYR-12). On shutdown it stops the heartbeat, removes the file and disposes the engine; planned:
-  stop the userbot and the control bot and close the Redis connections there. It has the
-  `userbot_session` volume.
+- **app**: `python -m cyrano`. It loads config, starts JSON logging and requires the session file
+  (see [Userbot](#userbot-cyr-10)). Then it builds the database engine (which opens no connection
+  until something uses it), the repositories, the `IntakeService` and the in-memory event queue,
+  touches the heartbeat file, connects the userbot, registers the handler, catches up and waits
+  for SIGTERM or SIGINT; a signal during connect or catch-up ends the start at once (see
+  [Userbot](#userbot-cyr-10)). A lost connection that Telethon cannot restore ends the process with an
+  error, and the restart policy starts it again. Planned: the control bot runs on the same event
+  loop (CYR-12). On shutdown it removes the handler, disconnects the userbot, stops the heartbeat,
+  removes the file and disposes the engine; planned: stop the control bot and close the Redis
+  connections there. It has the `userbot_session` volume.
+- **login**: `python -m cyrano login`, run on demand (`make login`, `make login-docker`). It is the
+  same image and the same `Settings` as the app, shares the `userbot_session` volume and needs no
+  database.
 - **worker**: `arq cyrano.worker.settings.WorkerSettings`. Arq imports `settings.py` itself, so a
   missing or invalid configuration ends the import with `SystemExit` and the readable `ConfigError`
   text instead of a traceback chain. Planned: runs the delayed reply job
@@ -109,6 +120,90 @@ People arrive from a matching bot. The first messages from a contact may carry t
 profile in that bot (for Leomatch); the userbot collects it together with nick, name, bio and
 photo for the card. The format and how it is parsed are specified in CYR-11. The system never
 sends anything to the matching bot.
+
+## Userbot (CYR-10)
+
+`src/cyrano/userbot/`. The one package that imports Telethon. It only listens and stores: no
+module calls `send_*`, `mark_read`, `send_read_acknowledge` or any other write method.
+
+| Module | Role |
+| --- | --- |
+| `protocols.py` | The small surface of Telethon that the code uses, as Protocols: `SenderLike`, `IncomingEvent`, `UserbotClient`, `LoginClient`. `UserbotClient` has `connect`, `disconnect`, `is_user_authorized`, `catch_up`, `add_event_handler`, `remove_event_handler`, `disconnected` and no write method; a test enforces that list |
+| `filters.py` | Pure functions: `event_rejection(event)` and `sender_rejection(sender)` return a `Rejection` or `None` |
+| `handler.py` | `IncomingHandler`: registers one `events.NewMessage(incoming=True)` handler, converts an event into `IncomingMessage`, calls the intake, catches and counts failures |
+| `client.py` | Builds the `TelegramClient` from `Settings`, session file naming and mode, `connect_authorized` with the timeout, `disconnect_client` |
+| `runner.py` | `Userbot`: start, run until stopped or disconnected, stop |
+| `login.py` | The interactive login flow with injected prompts |
+| `errors.py` | `UserbotError` and subclasses; their messages are meant to be read by the owner |
+
+- **Why Protocols.** Telethon ships no type information. The Protocols keep mypy strict on our code
+  without `Any`, let tests use plain fakes, and make "the userbot never sends" structural: the
+  client Protocol has no write method, so code typed against it cannot call one. mypy only has a
+  per-module override for `telethon` (`ignore_missing_imports`, in `pyproject.toml`).
+- **Two filter functions, not one.** `event_rejection` uses only what the event carries, so
+  groups and channels are dropped without a network call; `sender_rejection` needs the sender,
+  which the handler fetches with `get_sender()` (a read request, cached in most cases).
+- **Handler.** An event goes through both filters, then becomes an `IncomingMessage`: `tg_id`,
+  `username` (missing means `None`), `display_name` (first and last name, missing means `None`),
+  `tg_message_id`, `text` (caption or empty), `sent_at` (UTC). The handler catches every
+  `Exception` from one message and logs only the class name and counters. The intake call is
+  retried: 3 attempts in total, with the delays in `INTAKE_RETRY_DELAYS_SECONDS` (1 s, then 2 s)
+  between them, for any `Exception`; `asyncio.CancelledError` is never retried. Only the intake call
+  is retried, not the conversion of the event. Intake is idempotent, so a repeated attempt is safe.
+  Each failed attempt but the last is a WARNING with the error class and the attempt number; after
+  the last one the handler logs the ERROR and drops the message. Updates are handled one after
+  another (`sequential_updates`), so a retry delays the next update by up to 3 s. The sleep is a
+  constructor parameter so tests do not wait.
+- **Client settings.** `catch_up=True` (Telethon then loads the saved update state at connect),
+  `sequential_updates=True` (updates are handled in order), bounded retries and request timeout, all
+  named constants in `client.py`. The parent directory of `USERBOT_SESSION_PATH` is created before
+  the client is built; Telethon does not create it.
+- **Session file.** Telethon appends `.session` to `USERBOT_SESSION_PATH`; `session_file()` mirrors
+  that. The file is a secret: whoever has it controls the second account. `login` creates it with
+  umask `077` and sets mode `0600` after a successful login. It is git-ignored and
+  docker-ignored.
+- **Startup** (in this order, in `main.run`): the session file must exist, otherwise the app exits
+  with code 1 and the message "run `make login`" before any client exists, so before any network
+  call. Then the handler is registered (before connecting, so no update can arrive without a
+  handler), the client connects within `CONNECT_TIMEOUT_SECONDS` (30 s; a timeout and a refused
+  connection are readable fatal errors), a session that is not authorized is the same kind of
+  error, and then `catch_up()` is called. Normal startup never prompts for input.
+- **Signals during startup.** `Userbot.start(stop)` races the connect and the catch-up, each
+  separately, against the stop event that SIGTERM and SIGINT set (`_until_stopped` in `runner.py`).
+  The signal handlers are installed before the client is built, so a signal at any point of the
+  start counts. On a signal the pending call is cancelled, `start` returns without the "listening"
+  line, `run_until` returns at once because the event is set, and the normal shutdown runs: remove
+  the handler, disconnect (bounded), stop the heartbeat, dispose the engine, exit 0 without a
+  traceback. This matters because `CONNECT_TIMEOUT_SECONDS` (30 s) is longer than Docker's 10 s
+  grace period. The 30 s timeout stays for the case where no signal comes, and still ends the
+  start with the readable `ConnectTimedOut` error.
+- **Run and shutdown.** The app waits for SIGTERM/SIGINT or for the client's `disconnected` future.
+  A disconnect nobody asked for is an error exit. Shutdown removes the handler, disconnects (bounded
+  by a timeout) and only then lets the engine be disposed.
+- **Login command.** `python -m cyrano login` asks for the phone before anything touches the
+  network, then connects, requests the code, signs in and asks for the two-step password only if
+  Telegram demands it (`getpass`). Phone, code and password are passed on and never stored, logged
+  or put in `Settings`; on success it prints only that the session was saved. A failed login
+  removes a session file that it created. Prompts and the client factory are parameters, so tests
+  run it without a terminal or a network.
+- **Logging.** No message text, names, usernames, phone numbers or Telegram ids at INFO or above.
+  Rejections are DEBUG with a reason and a counter. Handler failures are ERROR with the class name and
+  counters. `telethon` follows `TELETHON_LOG_LEVEL`.
+
+## Intake and contact events (CYR-10)
+
+`services/intake.py`: `IntakeService(contacts, messages, events).handle(incoming)` returns an
+`IntakeResult` (contact id, message id, whether this call created the contact). It depends only on
+the repository Protocols and on `ContactEventPublisher`. The steps, the race handling and the
+idempotency are in [contact-lifecycle.md](contact-lifecycle.md#registration-cyr-10).
+
+`services/sanitize.py`: `strip_nul` and `sanitize_incoming`, pure.
+
+`services/contact_events.py`: the `ContactEventPublisher` Protocol (`async publish`) and
+`InMemoryContactEvents` on a bounded `asyncio.Queue` (`EVENT_QUEUE_SIZE`, 1000) with an async
+`subscribe()` iterator for the future consumer (CYR-12). A full queue drops the new event and logs
+a warning with counters; `publish` never raises. The queue lives in one process and is lost on
+restart, which is fine because events are best-effort and the database is the source of truth.
 
 ## Persistence
 
@@ -192,6 +287,8 @@ the raw input. `load_settings(env_file=None)` ignores any `.env`.
 - Context goes through `extra=`: every `LogRecord` attribute outside the stdlib set becomes a field.
   Everything propagates to the root handler, so libraries that log through the stdlib (Arq
   included) are rendered by the same formatter.
+- The userbot loggers are `cyrano.userbot` and `cyrano.userbot.handler`, intake is
+  `cyrano.services.intake`, events `cyrano.services.contact_events`.
 - Library loggers (`telethon`, `aiogram`, `httpx`, `httpcore`) have their own levels
   (`*_LOG_LEVEL`, default `WARNING`), independent of `LOG_LEVEL`. `httpcore` follows
   `HTTPX_LOG_LEVEL` because it is httpx's transport.
@@ -232,8 +329,19 @@ the raw input. `load_settings(env_file=None)` ignores any `.env`.
   Tests that load settings pass `env_file=None` or change into `/` so no stray `.env` is read.
 - Assertions on startup output cover secrets and personal identifiers (owner id, API id).
 - Exists: config loading and validation, secret masking, logging format, heartbeat and
-  healthcheck, the app loop, a real subprocess that must exit cleanly on SIGTERM, worker settings,
+  healthcheck, the app loop, a real subprocess that must exit cleanly on SIGTERM (it runs
+  `tests/fake_app.py`, which wires a fake Telethon client into the real `run`), a real subprocess
+  that must exit with the "run make login" message when the session file is missing, worker settings,
   status transition rules (pure, no database), domain models, migrations and repositories.
+  CYR-10 added: NUL sanitization, the event queue, the intake on real PostgreSQL (including two
+  concurrent first messages), the filters, the handler with fake events (including the retry:
+  one failure then success, always failing, cancellation not retried), the client and startup
+  logic with a fake client (including a connect or catch-up that never finishes plus a stop
+  signal, and a real subprocess that must exit within 2 s of SIGTERM while connecting), the login flow with injected prompts, and the structural test that
+  the userbot never sends (`tests/userbot/test_never_sends.py`).
+- **No real Telegram in tests.** Nothing in the test suite connects to Telegram. The fakes in
+  `tests/userbot/fakes.py` implement the Protocols; their write methods record the attempt and
+  raise, so a test can prove that none was made.
 - **Test database**: real PostgreSQL, never SQLite. The fixture in `tests/db/conftest.py` reads
   `TEST_DATABASE_URL` from the environment or `.env`, creates a database with a random name through
   an admin connection, applies the Alembic migrations to it, so every database test also runs the
@@ -241,8 +349,8 @@ the raw input. `load_settings(env_file=None)` ignores any `.env`.
   `WITH (FORCE)`, also after a failure. One database per test keeps tests isolated without
   truncation. Unreachable Postgres or a missing variable fails the test with a message naming
   `make db-up`; it never skips. CI runs a Postgres service container on the same tag as compose.
-- Planned: scripted fakes for Telethon, aiogram and the LLM (CYR-10, CYR-12, CYR-13); `respx` for
-  the HTTP client (CYR-13). Failure cases to cover for new behaviour:
+- Planned: scripted fakes for aiogram and the LLM (CYR-12, CYR-13); `respx` for the HTTP client
+  (CYR-13). Failure cases to cover for new behaviour:
   empty input, malformed Telegram event, invalid LLM JSON, status changed between scheduling and
   sending, FloodWait.
 
@@ -250,4 +358,4 @@ the raw input. `load_settings(env_file=None)` ignores any `.env`.
 
 Listed in [decisions.md](decisions.md) under "Open questions": how the worker sends through the
 userbot session, worker reconnect to Redis, where the layered prompt builder lives, whether `bot`,
-`userbot` and `worker` may import each other.
+`userbot` and `worker` may import each other, the order of the consumers of `NewContactEvent`.

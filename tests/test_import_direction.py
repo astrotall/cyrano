@@ -36,3 +36,30 @@ def test_db_does_not_import_services_or_llm() -> None:
 def test_services_do_not_import_db() -> None:
     for module in _imported_modules("services"):
         assert not module.startswith("cyrano.db")
+
+
+def test_only_the_userbot_package_imports_telethon() -> None:
+    importers: set[str] = set()
+    for path in SOURCE_ROOT.rglob("*.py"):
+        for node in ast.walk(ast.parse(path.read_text())):
+            names = (
+                [alias.name for alias in node.names]
+                if isinstance(node, ast.Import)
+                else [node.module]
+                if isinstance(node, ast.ImportFrom) and node.module is not None
+                else []
+            )
+            if any(name.split(".")[0] == "telethon" for name in names):
+                importers.add(path.relative_to(SOURCE_ROOT).parts[0])
+
+    assert importers == {"userbot"}
+
+
+def test_services_do_not_import_the_userbot_or_the_bot() -> None:
+    for module in _imported_modules("services"):
+        assert not module.startswith(("cyrano.userbot", "cyrano.bot"))
+
+
+def test_userbot_does_not_import_db_or_llm() -> None:
+    for module in _imported_modules("userbot"):
+        assert not module.startswith(("cyrano.db", "cyrano.llm", "cyrano.bot"))

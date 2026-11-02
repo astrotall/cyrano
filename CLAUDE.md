@@ -21,8 +21,8 @@ owner, and pacing and limits are enforced centrally.
 Contact statuses: `new -> pending -> active -> paused / ignored`. Meaning and transitions:
 [contact-lifecycle.md](.claude/docs/contact-lifecycle.md).
 
-The skeleton (CYR-8) and the storage layer (CYR-9) exist. Everything else is planned and marked
-with its ticket key.
+The skeleton (CYR-8), the storage layer (CYR-9) and the userbot intake (CYR-10) exist. Everything
+else is planned and marked with its ticket key.
 Never describe planned behaviour as existing.
 
 ## Locked architectural decisions
@@ -51,10 +51,10 @@ Changing any of these is a large change (see Workflow expectations). Reasons:
 | pydantic-settings (Pydantic v2), tzdata | in the project |
 | Arq, Redis 7.4 | in the project (skeleton worker, placeholder job) |
 | PostgreSQL 16.15 | in the project (compose, migrations, tests) |
-| SQLAlchemy 2.x async, asyncpg, Alembic | in the project (schema, repositories; nothing calls them yet) |
+| SQLAlchemy 2.x async, asyncpg, Alembic | in the project (schema, repositories, used by the intake) |
 | Ruff, mypy strict, pytest, pytest-asyncio | in the project |
 | Docker, Docker Compose, GitHub Actions, Dependabot | in the project |
-| Telethon | planned, CYR-10 |
+| Telethon | in the project (userbot listens and registers contacts; imported only in `userbot/`) |
 | aiogram | planned, CYR-12 |
 | DeepSeek client over plain httpx | planned, CYR-13 |
 | respx | planned, with CYR-13 |
@@ -65,7 +65,7 @@ Changing any of these is a large change (see Workflow expectations). Reasons:
 .
 ├── CLAUDE.md, CONTRIBUTING.md, README.md
 ├── pyproject.toml, uv.lock, .python-version
-├── Makefile
+├── Makefile                      includes login and login-docker
 ├── Dockerfile, docker-compose.yml, docker-compose.override.yml
 ├── .env.example, .dockerignore, .gitignore
 ├── alembic.ini
@@ -73,14 +73,15 @@ Changing any of these is a large change (see Workflow expectations). Reasons:
 ├── .claude/docs/                 architecture, contact-lifecycle, safety-rules, decisions
 ├── .github/                      dependabot.yml, workflows/ci.yml
 ├── src/cyrano/
-│   ├── __main__.py, main.py      entrypoint (composition root), signals, heartbeat
+│   ├── __main__.py, main.py      entrypoint (composition root), login subcommand, signals, heartbeat
 │   ├── config.py                 Settings, load_settings, ConfigError
 │   ├── logging.py                JSON-lines logging
 │   ├── health.py                 heartbeat file and the app healthcheck
 │   ├── domain/                   enums, status transition rules, errors, Pydantic models
 │   ├── db/                       SQLAlchemy models, engine and sessions, repositories
-│   ├── services/repositories.py  repository Protocols; the rest of services is planned
-│   ├── userbot/ bot/ llm/        empty skeleton packages
+│   ├── services/                 repositories (Protocols), intake, sanitize, contact_events; the rest is planned
+│   ├── userbot/                  Telethon: protocols, filters, handler, client, login, runner, errors
+│   ├── bot/ llm/                 empty skeleton packages
 │   └── worker/settings.py        Arq WorkerSettings, placeholder job
 └── tests/                        mirrors src/cyrano
 ```
@@ -88,7 +89,11 @@ Changing any of these is a large change (see Workflow expectations). Reasons:
 CYR-8 added the package skeleton, typed configuration, JSON logging, app process with heartbeat,
 Arq worker skeleton, Docker Compose, CI and Dependabot. CYR-9 added `domain/`, the content of
 `db/`, `services/repositories.py`, `alembic.ini`, `migrations/`, the one-shot `migrate` compose
-service and the database tests.
+service and the database tests. CYR-10 added `userbot/` (the only package that imports Telethon;
+it listens and registers, it never sends), `services/intake.py`, `services/sanitize.py`,
+`services/contact_events.py`, the `IncomingMessage` and `NewContactEvent` models, the
+`python -m cyrano login` command with the `make login` and `make login-docker` targets, and the
+userbot tests with their fakes.
 
 ## Detailed guides
 

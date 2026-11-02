@@ -3,19 +3,16 @@
 from __future__ import annotations
 
 import re
-from collections.abc import Sequence
 from dataclasses import dataclass
 
-from cyrano.domain.enums import LeomatchTextKind
+from cyrano.domain.enums import LeomatchNameSource
 from cyrano.domain.models import (
     MAX_LEOMATCH_AGE,
     MAX_LEOMATCH_CITY_LENGTH,
     MAX_LEOMATCH_NAME_LENGTH,
-    MAX_LEOMATCH_RELATED_TEXTS,
     MAX_LEOMATCH_TEXT_LENGTH,
     MIN_LEOMATCH_AGE,
     LeomatchProfile,
-    LeomatchSourceText,
 )
 from cyrano.services.sanitize import clean_text
 
@@ -91,32 +88,28 @@ def parse_leomatch_text(text: str) -> LeomatchFields:
     return LeomatchFields(name=name, age=age, city=city, about=about)
 
 
-def _first_text(texts: Sequence[LeomatchSourceText], kind: LeomatchTextKind) -> str | None:
-    for item in texts:
-        if item.kind is kind:
-            cleaned = clean_text(item.text, MAX_LEOMATCH_TEXT_LENGTH)
-            if cleaned is not None:
-                return cleaned
-    return None
-
-
-def build_leomatch_profile(texts: Sequence[LeomatchSourceText]) -> LeomatchProfile | None:
-    card = _first_text(texts, LeomatchTextKind.CARD)
-    match = _first_text(texts, LeomatchTextKind.MATCH)
-    raw_text, other = (card, match) if card is not None else (match, None)
-    if raw_text is None:
+def build_leomatch_profile(
+    card_text: str | None, match_text: str | None, match_name: str | None
+) -> LeomatchProfile | None:
+    card = clean_text(card_text, MAX_LEOMATCH_TEXT_LENGTH)
+    match = clean_text(match_text, MAX_LEOMATCH_TEXT_LENGTH)
+    if card is None and match is None:
         return None
-    fields = NO_FIELDS
-    for candidate in (card, match):
-        if candidate is not None and (parsed := parse_leomatch_text(candidate)).matched:
-            fields = parsed
-            break
-    related = [other] if other is not None else []
+    fields = parse_leomatch_text(card) if card is not None else NO_FIELDS
+    if fields.matched:
+        return LeomatchProfile(
+            raw_text=card,
+            match_text=match,
+            name=fields.name,
+            name_source=LeomatchNameSource.CARD,
+            age=fields.age,
+            city=fields.city,
+            about=fields.about,
+        )
+    fallback_name = clean_text(match_name, MAX_LEOMATCH_NAME_LENGTH)
     return LeomatchProfile(
-        raw_text=raw_text,
-        related_texts=related[:MAX_LEOMATCH_RELATED_TEXTS],
-        name=fields.name,
-        age=fields.age,
-        city=fields.city,
-        about=fields.about,
+        raw_text=card,
+        match_text=match,
+        name=fallback_name,
+        name_source=None if fallback_name is None else LeomatchNameSource.MATCH,
     )

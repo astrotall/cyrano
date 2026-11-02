@@ -5,9 +5,9 @@ from __future__ import annotations
 from datetime import UTC, datetime
 from typing import Annotated
 
-from pydantic import AfterValidator, AwareDatetime, BaseModel, ConfigDict, Field
+from pydantic import AfterValidator, AwareDatetime, BaseModel, ConfigDict, Field, model_validator
 
-from cyrano.domain.enums import CardOutcome, ContactStatus, LeomatchTextKind, MessageDirection
+from cyrano.domain.enums import CardOutcome, ContactStatus, LeomatchNameSource, MessageDirection
 
 DEFAULT_MODE_NAME = "default"
 
@@ -18,7 +18,12 @@ MAX_DISPLAY_NAME_LENGTH = 256
 MAX_BIO_LENGTH = 1000
 MAX_PHOTO_PATH_LENGTH = 256
 MAX_LEOMATCH_TEXT_LENGTH = 4000
-MAX_LEOMATCH_RELATED_TEXTS = 2
+MAX_CARD_PHOTOS = 5
+LEGACY_LEOMATCH_PHOTO_KEY = "photo"
+LEOMATCH_PHOTOS_KEY = "photos"
+LEOMATCH_NAME_KEY = "name"
+LEOMATCH_NAME_SOURCE_KEY = "name_source"
+LEGACY_LEOMATCH_RELATED_TEXTS_KEY = "related_texts"
 MAX_LEOMATCH_NAME_LENGTH = 100
 MAX_LEOMATCH_CITY_LENGTH = 100
 MIN_LEOMATCH_AGE = 14
@@ -134,21 +139,31 @@ class TelegramProfile(_Input):
     bio: str | None = None
 
 
-class LeomatchSourceText(_Input):
-    kind: LeomatchTextKind
-    text: str
-
-
 class LeomatchProfile(_Input):
-    raw_text: str = Field(max_length=MAX_LEOMATCH_TEXT_LENGTH)
-    related_texts: list[Annotated[str, Field(max_length=MAX_LEOMATCH_TEXT_LENGTH)]] = Field(
-        default_factory=list, max_length=MAX_LEOMATCH_RELATED_TEXTS
-    )
+    raw_text: str | None = Field(default=None, max_length=MAX_LEOMATCH_TEXT_LENGTH)
+    match_text: str | None = Field(default=None, max_length=MAX_LEOMATCH_TEXT_LENGTH)
     name: str | None = Field(default=None, max_length=MAX_LEOMATCH_NAME_LENGTH)
+    name_source: LeomatchNameSource | None = None
     age: int | None = Field(default=None, ge=MIN_LEOMATCH_AGE, le=MAX_LEOMATCH_AGE)
     city: str | None = Field(default=None, max_length=MAX_LEOMATCH_CITY_LENGTH)
     about: str | None = Field(default=None, max_length=MAX_LEOMATCH_TEXT_LENGTH)
-    photo: str | None = Field(default=None, max_length=MAX_PHOTO_PATH_LENGTH)
+    photos: list[Annotated[str, Field(max_length=MAX_PHOTO_PATH_LENGTH)]] = Field(
+        default_factory=list, max_length=MAX_CARD_PHOTOS
+    )
+
+    @model_validator(mode="before")
+    @classmethod
+    def _read_legacy_keys(cls, data: object) -> object:
+        if not isinstance(data, dict):
+            return data
+        current = dict(data)
+        legacy_photo = current.pop(LEGACY_LEOMATCH_PHOTO_KEY, None)
+        current.pop(LEGACY_LEOMATCH_RELATED_TEXTS_KEY, None)
+        if LEOMATCH_PHOTOS_KEY not in current and isinstance(legacy_photo, str):
+            current[LEOMATCH_PHOTOS_KEY] = [legacy_photo]
+        if current.get(LEOMATCH_NAME_KEY) is not None and LEOMATCH_NAME_SOURCE_KEY not in current:
+            current[LEOMATCH_NAME_SOURCE_KEY] = LeomatchNameSource.CARD
+        return current
 
 
 class ContactProfile(_Input):
@@ -169,8 +184,9 @@ class CardLeomatch(_Input):
     name: str | None = Field(default=None, max_length=CARD_LEOMATCH_NAME_LENGTH)
     age: int | None = Field(default=None, ge=MIN_LEOMATCH_AGE, le=MAX_LEOMATCH_AGE)
     city: str | None = Field(default=None, max_length=CARD_LEOMATCH_CITY_LENGTH)
+    name_source: LeomatchNameSource | None = None
     about: str | None = Field(default=None, max_length=CARD_LEOMATCH_ABOUT_LENGTH)
-    raw_text: str = Field(max_length=CARD_LEOMATCH_RAW_LENGTH)
+    raw_text: str | None = Field(default=None, max_length=CARD_LEOMATCH_RAW_LENGTH)
 
 
 class ContactCard(_Input):
@@ -183,7 +199,9 @@ class ContactCard(_Input):
         default_factory=list, max_length=CARD_MESSAGES_LIMIT
     )
     profile_photo: str | None = Field(default=None, max_length=MAX_PHOTO_PATH_LENGTH)
-    card_photo: str | None = Field(default=None, max_length=MAX_PHOTO_PATH_LENGTH)
+    card_photos: list[Annotated[str, Field(max_length=MAX_PHOTO_PATH_LENGTH)]] = Field(
+        default_factory=list, max_length=MAX_CARD_PHOTOS
+    )
     profile_collected: bool = False
     modes: list[ModeChoice] = Field(default_factory=list)
 

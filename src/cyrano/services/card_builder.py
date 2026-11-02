@@ -39,15 +39,14 @@ def profile_of(contact: Contact) -> ContactProfile:
 def _card_leomatch(leomatch: LeomatchProfile | None) -> CardLeomatch | None:
     if leomatch is None:
         return None
-    raw_text = clean_text(leomatch.raw_text, CARD_LEOMATCH_RAW_LENGTH)
-    if raw_text is None:
-        return None
+    name = clean_text(leomatch.name, CARD_LEOMATCH_NAME_LENGTH)
     return CardLeomatch(
-        name=clean_text(leomatch.name, CARD_LEOMATCH_NAME_LENGTH),
+        name=name,
+        name_source=leomatch.name_source if name is not None else None,
         age=leomatch.age,
         city=clean_text(leomatch.city, CARD_LEOMATCH_CITY_LENGTH),
         about=clean_text(leomatch.about, CARD_LEOMATCH_ABOUT_LENGTH),
-        raw_text=raw_text,
+        raw_text=clean_text(leomatch.raw_text, CARD_LEOMATCH_RAW_LENGTH),
     )
 
 
@@ -80,7 +79,7 @@ def build_card(contact: Contact, messages: Sequence[Message], modes: Sequence[Mo
         leomatch=_card_leomatch(leomatch),
         messages=_message_texts(messages),
         profile_photo=profile.photo,
-        card_photo=leomatch.photo if leomatch is not None else None,
+        card_photos=list(leomatch.photos) if leomatch is not None else [],
         profile_collected=profile.collected_at is not None,
         modes=_mode_choices(modes),
     )

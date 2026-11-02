@@ -7,6 +7,7 @@ import pytest
 from sqlalchemy.engine import URL
 
 from cyrano.db.repositories import SqlContactRepository
+from cyrano.domain.enums import LeomatchNameSource
 from cyrano.domain.errors import ContactNotFound
 from cyrano.domain.models import (
     Contact,
@@ -37,11 +38,13 @@ def _profile() -> ContactProfile:
         photo="profiles/1.jpg",
         leomatch=LeomatchProfile(
             raw_text=f"Фейк, 25, Город {EN_DASH} про меня",
-            related_texts=["match text"],
+            match_text="match text",
             name="Фейк",
+            name_source=LeomatchNameSource.CARD,
             age=25,
             city="Город",
             about="про меня",
+            photos=["profiles/1-card-1.jpg", "profiles/1-card-2.jpg"],
         ),
         collected_at=COLLECTED_AT,
     )
@@ -114,6 +117,34 @@ async def test_the_profile_round_trips_through_jsonb(contacts: SqlContactReposit
     assert stored is not None
     assert ContactProfile.model_validate(stored.profile) == _profile()
     assert ContactProfile.model_validate(stored.profile).collected_at == COLLECTED_AT
+
+
+async def test_a_profile_stored_in_the_legacy_shape_is_read_in_the_new_one(
+    contacts: SqlContactRepository,
+) -> None:
+    contact = await _contact(contacts)
+    legacy: dict[str, object] = {
+        "photo": "profiles/1.jpg",
+        "leomatch": {
+            "raw_text": "Фейк, 25, Город",
+            "related_texts": ["match text"],
+            "name": "Фейк",
+            "age": 25,
+            "city": "Город",
+            "about": None,
+            "photo": "profiles/1-card.jpg",
+        },
+    }
+    await contacts.update(contact.id, ContactUpdate(profile=legacy))
+
+    stored = await contacts.get_by_id(contact.id)
+
+    assert stored is not None
+    leomatch = ContactProfile.model_validate(stored.profile).leomatch
+    assert leomatch is not None
+    assert leomatch.photos == ["profiles/1-card.jpg"]
+    assert leomatch.name_source is LeomatchNameSource.CARD
+    assert leomatch.match_text is None
 
 
 async def test_the_profile_is_stored_as_a_json_object_with_a_timestamp_string(

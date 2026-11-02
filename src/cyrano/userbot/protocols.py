@@ -90,6 +90,9 @@ class HistoryMessage(Protocol):
     @property
     def photo(self) -> object | None: ...
 
+    @property
+    def grouped_id(self) -> int | None: ...
+
 
 EventCallback = Callable[[IncomingEvent], Awaitable[None]]
 

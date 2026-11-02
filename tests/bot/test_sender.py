@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import os
 from pathlib import Path
 
 import pytest
@@ -12,7 +13,7 @@ from aiogram.exceptions import (
     TelegramRetryAfter,
 )
 from aiogram.methods import SendMediaGroup, SendMessage, SendPhoto
-from aiogram.types import InlineKeyboardMarkup
+from aiogram.types import FSInputFile, InlineKeyboardMarkup
 
 from cyrano.bot import messages
 from cyrano.bot.sender import MAX_RETRY_AFTER_SECONDS, TelegramCardSender
@@ -22,7 +23,9 @@ from tests.services.fakes import fake_card
 from tests.userbot.fakes import RecordingSleep
 
 PROFILE_PHOTO = "profiles/17.jpg"
-CARD_PHOTO = "profiles/17-card.jpg"
+CARD_PHOTOS = [f"profiles/17-card-{n}.jpg" for n in (1, 2, 3)]
+CARD_PHOTO = CARD_PHOTOS[0]
+MEDIA_GROUP_LIMIT = 10
 PROBE = SendMessage(chat_id=OWNER_ID, text="probe")
 
 
@@ -98,27 +101,112 @@ async def test_only_the_card_photo_gets_the_card_photo_caption(tmp_path: Path) -
     _media(tmp_path, CARD_PHOTO)
     sender = _sender(tmp_path, session)
 
-    await sender.send_card(fake_card(card_photo=CARD_PHOTO))
+    await sender.send_card(fake_card(card_photos=[CARD_PHOTO]))
 
     [photo] = session.calls_of(SendPhoto)
     assert photo.caption == messages.CARD_PHOTO_CAPTION
 
 
-async def test_two_photos_go_as_a_media_group_before_the_text_card(tmp_path: Path) -> None:
+async def test_a_profile_photo_and_a_card_photo_go_as_a_media_group_before_the_text(
+    tmp_path: Path,
+) -> None:
     session = RecordingSession()
     _media(tmp_path, PROFILE_PHOTO, CARD_PHOTO)
     sender = _sender(tmp_path, session)
 
-    assert await sender.send_card(fake_card(profile_photo=PROFILE_PHOTO, card_photo=CARD_PHOTO))
+    assert await sender.send_card(fake_card(profile_photo=PROFILE_PHOTO, card_photos=[CARD_PHOTO]))
 
     assert _kinds(session) == ["SendMediaGroup", "SendMessage"]
     [group] = session.calls_of(SendMediaGroup)
     assert [item.caption for item in group.media] == [
-        messages.PROFILE_PHOTO_CAPTION,
-        messages.CARD_PHOTO_CAPTION,
+        messages.PROFILE_AND_CARD_PHOTOS_CAPTION,
+        None,
     ]
     [text] = session.calls_of(SendMessage)
     assert isinstance(text.reply_markup, InlineKeyboardMarkup)
+
+
+async def test_a_profile_photo_and_three_card_photos_are_one_group_of_four(
+    tmp_path: Path,
+) -> None:
+    session = RecordingSession()
+    _media(tmp_path, PROFILE_PHOTO, *CARD_PHOTOS)
+    sender = _sender(tmp_path, session)
+
+    assert await sender.send_card(fake_card(profile_photo=PROFILE_PHOTO, card_photos=CARD_PHOTOS))
+
+    assert _kinds(session) == ["SendMediaGroup", "SendMessage"]
+    [group] = session.calls_of(SendMediaGroup)
+    assert len(group.media) == 1 + len(CARD_PHOTOS)
+    assert [item.caption for item in group.media] == [
+        messages.PROFILE_AND_CARD_PHOTOS_CAPTION,
+        None,
+        None,
+        None,
+    ]
+    paths = [
+        Path(item.media.path).name for item in group.media if isinstance(item.media, FSInputFile)
+    ]
+    assert paths == ["17.jpg", "17-card-1.jpg", "17-card-2.jpg", "17-card-3.jpg"]
+
+
+async def test_only_card_photos_go_as_a_group_captioned_as_the_card(tmp_path: Path) -> None:
+    session = RecordingSession()
+    _media(tmp_path, *CARD_PHOTOS)
+    sender = _sender(tmp_path, session)
+
+    assert await sender.send_card(fake_card(card_photos=CARD_PHOTOS))
+
+    [group] = session.calls_of(SendMediaGroup)
+    assert [item.caption for item in group.media] == [messages.CARD_PHOTO_CAPTION, None, None]
+
+
+async def test_only_a_profile_photo_is_captioned_as_the_profile(tmp_path: Path) -> None:
+    session = RecordingSession()
+    _media(tmp_path, PROFILE_PHOTO)
+    sender = _sender(tmp_path, session)
+
+    assert await sender.send_card(fake_card(profile_photo=PROFILE_PHOTO))
+
+    assert _kinds(session) == ["SendPhoto", "SendMessage"]
+    [photo] = session.calls_of(SendPhoto)
+    assert photo.caption == messages.PROFILE_PHOTO_CAPTION
+
+
+async def test_one_card_photo_in_total_uses_send_photo(tmp_path: Path) -> None:
+    session = RecordingSession()
+    _media(tmp_path, CARD_PHOTO)
+    sender = _sender(tmp_path, session)
+
+    assert await sender.send_card(fake_card(card_photos=[CARD_PHOTO]))
+
+    assert _kinds(session) == ["SendPhoto", "SendMessage"]
+    assert session.calls_of(SendMediaGroup) == []
+
+
+async def test_a_group_never_exceeds_the_telegram_limit(tmp_path: Path) -> None:
+    session = RecordingSession()
+    _media(tmp_path, PROFILE_PHOTO, *CARD_PHOTOS)
+    sender = _sender(tmp_path, session)
+
+    await sender.send_card(fake_card(profile_photo=PROFILE_PHOTO, card_photos=CARD_PHOTOS))
+
+    [group] = session.calls_of(SendMediaGroup)
+    assert len(group.media) <= MEDIA_GROUP_LIMIT
+
+
+async def test_a_card_photo_is_kept_when_only_the_profile_photo_is_missing(
+    tmp_path: Path,
+) -> None:
+    session = RecordingSession()
+    _media(tmp_path, *CARD_PHOTOS[:2])
+    sender = _sender(tmp_path, session)
+
+    assert await sender.send_card(fake_card(profile_photo=PROFILE_PHOTO, card_photos=CARD_PHOTOS))
+
+    [group] = session.calls_of(SendMediaGroup)
+    assert [item.caption for item in group.media] == [messages.CARD_PHOTO_CAPTION, None]
+    assert sender.photos_skipped == 2
 
 
 async def test_a_missing_photo_file_is_skipped_and_counted(tmp_path: Path) -> None:
@@ -126,9 +214,11 @@ async def test_a_missing_photo_file_is_skipped_and_counted(tmp_path: Path) -> No
     _media(tmp_path, CARD_PHOTO)
     sender = _sender(tmp_path, session)
 
-    assert await sender.send_card(fake_card(profile_photo=PROFILE_PHOTO, card_photo=CARD_PHOTO))
+    assert await sender.send_card(fake_card(profile_photo=PROFILE_PHOTO, card_photos=[CARD_PHOTO]))
 
     assert _kinds(session) == ["SendPhoto", "SendMessage"]
+    [photo] = session.calls_of(SendPhoto)
+    assert photo.caption == messages.CARD_PHOTO_CAPTION
     assert sender.photos_skipped == 1
 
 
@@ -136,7 +226,7 @@ async def test_all_photos_missing_still_sends_the_text_card(tmp_path: Path) -> N
     session = RecordingSession()
     sender = _sender(tmp_path, session)
 
-    assert await sender.send_card(fake_card(profile_photo=PROFILE_PHOTO, card_photo=CARD_PHOTO))
+    assert await sender.send_card(fake_card(profile_photo=PROFILE_PHOTO, card_photos=[CARD_PHOTO]))
 
     assert _kinds(session) == ["SendMessage"]
     assert sender.photos_skipped == 2
@@ -153,18 +243,50 @@ async def test_an_empty_photo_file_is_skipped(tmp_path: Path) -> None:
     assert sender.photos_skipped == 1
 
 
-async def test_an_unreadable_photo_file_is_skipped(tmp_path: Path) -> None:
+async def test_a_photo_file_the_process_may_not_read_is_skipped(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     session = RecordingSession()
     root = _media(tmp_path, PROFILE_PHOTO)
-    (root / PROFILE_PHOTO).chmod(0)
+    forbidden = (root / PROFILE_PHOTO).resolve()
+    real_access = os.access
+
+    def access(path: str | os.PathLike[str], mode: int) -> bool:
+        return False if Path(path) == forbidden else real_access(path, mode)
+
+    monkeypatch.setattr(os, "access", access)
     sender = _sender(tmp_path, session)
-    try:
-        assert await sender.send_card(fake_card(profile_photo=PROFILE_PHOTO))
-    finally:
-        (root / PROFILE_PHOTO).chmod(0o600)
+
+    assert await sender.send_card(fake_card(profile_photo=PROFILE_PHOTO))
 
     assert _kinds(session) == ["SendMessage"]
     assert sender.photos_skipped == 1
+
+
+async def test_a_photo_file_that_cannot_be_opened_while_sending_is_skipped(
+    tmp_path: Path,
+) -> None:
+    session = RecordingSession({SendPhoto: [PermissionError("fake open error")]})
+    _media(tmp_path, PROFILE_PHOTO)
+    sender = _sender(tmp_path, session)
+
+    assert await sender.send_card(fake_card(profile_photo=PROFILE_PHOTO)) is True
+
+    assert _kinds(session) == ["SendPhoto", "SendMessage"]
+    assert sender.photos_skipped == 1
+
+
+async def test_a_media_group_that_cannot_be_opened_while_sending_is_skipped_whole(
+    tmp_path: Path,
+) -> None:
+    session = RecordingSession({SendMediaGroup: [PermissionError("fake open error")]})
+    _media(tmp_path, PROFILE_PHOTO, *CARD_PHOTOS)
+    sender = _sender(tmp_path, session)
+
+    assert await sender.send_card(fake_card(profile_photo=PROFILE_PHOTO, card_photos=CARD_PHOTOS))
+
+    assert _kinds(session) == ["SendMediaGroup", "SendMessage"]
+    assert sender.photos_skipped == 1 + len(CARD_PHOTOS)
 
 
 async def test_a_photo_path_that_leaves_the_media_directory_is_skipped(tmp_path: Path) -> None:
@@ -283,7 +405,7 @@ async def test_every_call_targets_the_owner_chat(tmp_path: Path) -> None:
     _media(tmp_path, PROFILE_PHOTO, CARD_PHOTO)
     sender = _sender(tmp_path, session)
 
-    await sender.send_card(fake_card(profile_photo=PROFILE_PHOTO, card_photo=CARD_PHOTO))
+    await sender.send_card(fake_card(profile_photo=PROFILE_PHOTO, card_photos=[CARD_PHOTO]))
     await sender.send_card(fake_card(contact_id=99))
 
     assert session.calls
@@ -305,4 +427,25 @@ async def test_a_failure_is_logged_without_personal_data(
     logged = "".join(f"{r.getMessage()} {r.__dict__}" for r in caplog.records)
     assert "TelegramForbiddenError" in logged
     for private in ("Secretname", "secret_nick", "secretbio", str(OWNER_ID)):
+        assert private not in logged
+
+
+async def test_photo_paths_and_counters_do_not_leak_names_into_the_logs(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    session = RecordingSession({SendMessage: [_forbidden()], SendMediaGroup: [_bad_photo()]})
+    _media(tmp_path, PROFILE_PHOTO, *CARD_PHOTOS)
+    sender = _sender(tmp_path, session)
+    card = fake_card(
+        display_name="Secretname",
+        profile_photo=PROFILE_PHOTO,
+        card_photos=CARD_PHOTOS,
+    )
+
+    with caplog.at_level(logging.DEBUG):
+        await sender.send_card(card)
+
+    logged = "".join(f"{r.getMessage()} {r.__dict__}" for r in caplog.records)
+    assert "TelegramForbiddenError" in logged
+    for private in ("Secretname", ".jpg", "profiles/", str(OWNER_ID)):
         assert private not in logged

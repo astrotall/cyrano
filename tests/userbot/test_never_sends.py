@@ -33,7 +33,7 @@ ALLOWED_CLIENT_MEMBERS = frozenset(
         "iter_messages",
     }
 )
-ALLOWED_HISTORY_MEMBERS = frozenset({"id", "out", "raw_text", "entities", "photo"})
+ALLOWED_HISTORY_MEMBERS = frozenset({"id", "out", "raw_text", "entities", "photo", "grouped_id"})
 ALLOWED_TELETHON_REQUESTS = frozenset({("telethon.tl.functions.users", "GetFullUserRequest")})
 REQUEST_CLASS_SUFFIX = "Request"
 ALLOWED_EVENT_MEMBERS = frozenset(

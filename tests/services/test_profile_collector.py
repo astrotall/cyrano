@@ -10,15 +10,16 @@ from pathlib import Path
 
 import pytest
 
-from cyrano.domain.enums import ContactStatus, LeomatchTextKind
+from cyrano.domain.enums import ContactStatus, LeomatchNameSource
 from cyrano.domain.models import (
     MAX_BIO_LENGTH,
+    MAX_CARD_PHOTOS,
+    MAX_LEOMATCH_NAME_LENGTH,
     Contact,
     ContactProfile,
     ContactReadyEvent,
     ContactUpdate,
     LeomatchProfile,
-    LeomatchSourceText,
     NewContactEvent,
 )
 from cyrano.services.contact_events import InMemoryContactEvents
@@ -27,12 +28,11 @@ from cyrano.services.profile_collector import (
     PROFILE_PHOTO_DIRECTORY,
     ProfileCollector,
 )
-from cyrano.services.profile_source import ProfileSourceError
+from cyrano.services.profile_source import CardPhotos, LeomatchLookup, ProfileSourceError
 from tests.services.fakes import (
     FAKE_BIO,
-    FAKE_CARD_PHOTO,
     FAKE_PHOTO,
-    FakeCardPhoto,
+    FakeCardPhotos,
     FakeLeomatchSource,
     FakeProfileSource,
     fake_telegram_profile,
@@ -151,15 +151,15 @@ async def _profile(rig: Rig, contact: Contact) -> ContactProfile:
     return ContactProfile.model_validate((await _stored(rig, contact)).profile)
 
 
-def _leomatch_texts(
-    card: str | None = CARD_TEXT, match: str | None = MATCH_TEXT
-) -> list[LeomatchSourceText]:
-    texts: list[LeomatchSourceText] = []
-    if match is not None:
-        texts.append(LeomatchSourceText(kind=LeomatchTextKind.MATCH, text=match))
-    if card is not None:
-        texts.append(LeomatchSourceText(kind=LeomatchTextKind.CARD, text=card))
-    return texts
+def _lookup(
+    card: str | None = CARD_TEXT,
+    match: str | None = MATCH_TEXT,
+    match_name: str | None = None,
+    photos: CardPhotos | None = None,
+) -> LeomatchLookup:
+    return LeomatchLookup(
+        card_text=card, match_text=match, match_name=match_name, card_photos=photos
+    )
 
 
 def test_the_total_budget_per_contact_is_thirty_seconds() -> None:
@@ -167,7 +167,7 @@ def test_the_total_budget_per_contact_is_thirty_seconds() -> None:
 
 
 async def test_every_part_succeeds_and_the_card_can_be_shown(tmp_path: Path) -> None:
-    rig = _rig(tmp_path, leomatch=FakeLeomatchSource(_leomatch_texts()))
+    rig = _rig(tmp_path, leomatch=FakeLeomatchSource(_lookup()))
     contact = await _new_contact(rig)
 
     profile = await _collect(rig, contact)
@@ -179,7 +179,8 @@ async def test_every_part_succeeds_and_the_card_can_be_shown(tmp_path: Path) -> 
     assert profile.collected_at == CLOCK_NOW
     assert profile.leomatch is not None
     assert profile.leomatch.raw_text == CARD_TEXT
-    assert profile.leomatch.related_texts == [MATCH_TEXT]
+    assert profile.leomatch.match_text == MATCH_TEXT
+    assert profile.leomatch.name_source is LeomatchNameSource.CARD
     assert (profile.leomatch.name, profile.leomatch.age, profile.leomatch.city) == (
         "Cardname",
         27,
@@ -283,7 +284,7 @@ async def test_a_failed_photo_download_leaves_no_file_and_other_parts_survive(
     rig = _rig(
         tmp_path,
         profiles=FakeProfileSource(photo_error=ProfileSourceError("FloodWaitError")),
-        leomatch=FakeLeomatchSource(_leomatch_texts()),
+        leomatch=FakeLeomatchSource(_lookup()),
     )
     contact = await _new_contact(rig)
 
@@ -314,7 +315,7 @@ async def test_a_failed_telegram_profile_leaves_collected_at_empty_but_publishes
     rig = _rig(
         tmp_path,
         profiles=FakeProfileSource(fetch_error=ProfileSourceError("FloodWaitError")),
-        leomatch=FakeLeomatchSource(_leomatch_texts()),
+        leomatch=FakeLeomatchSource(_lookup()),
     )
     contact = await _new_contact(rig)
 
@@ -550,27 +551,90 @@ async def test_an_earlier_photo_survives_a_failed_retry(tmp_path: Path) -> None:
     assert profile.collected_at == CLOCK_NOW
 
 
-async def test_leomatch_without_a_card_stores_only_the_match_text(tmp_path: Path) -> None:
-    rig = _rig(tmp_path, leomatch=FakeLeomatchSource(_leomatch_texts(card=None)))
+async def test_leomatch_without_a_card_keeps_the_match_text_apart_from_the_card_text(
+    tmp_path: Path,
+) -> None:
+    rig = _rig(tmp_path, leomatch=FakeLeomatchSource(_lookup(card=None)))
     contact = await _new_contact(rig)
 
     profile = await _collect(rig, contact)
 
     assert profile.leomatch is not None
-    assert profile.leomatch.raw_text == MATCH_TEXT
-    assert profile.leomatch.related_texts == []
+    assert profile.leomatch.raw_text is None
+    assert profile.leomatch.match_text == MATCH_TEXT
     assert profile.leomatch.name is None
+    assert profile.leomatch.name_source is None
 
 
-async def test_leomatch_text_that_does_not_parse_keeps_only_the_raw_text(tmp_path: Path) -> None:
-    rig = _rig(tmp_path, leomatch=FakeLeomatchSource(_leomatch_texts(card="free card text")))
+async def test_without_a_card_the_name_comes_from_the_match_link(tmp_path: Path) -> None:
+    lookup = _lookup(card=None, match_name="Linkname")
+    rig = _rig(tmp_path, leomatch=FakeLeomatchSource(lookup))
+    contact = await _new_contact(rig)
+
+    profile = await _collect(rig, contact)
+
+    assert profile.leomatch is not None
+    assert profile.leomatch.raw_text is None
+    assert (profile.leomatch.name, profile.leomatch.name_source) == (
+        "Linkname",
+        LeomatchNameSource.MATCH,
+    )
+    assert (profile.leomatch.age, profile.leomatch.city, profile.leomatch.about) == (None,) * 3
+
+
+async def test_a_card_that_does_not_parse_also_takes_the_name_from_the_match_link(
+    tmp_path: Path,
+) -> None:
+    lookup = _lookup(card="free card text", match_name="Linkname")
+    rig = _rig(tmp_path, leomatch=FakeLeomatchSource(lookup))
     contact = await _new_contact(rig)
 
     profile = await _collect(rig, contact)
 
     assert profile.leomatch is not None
     assert profile.leomatch.raw_text == "free card text"
-    assert profile.leomatch.related_texts == [MATCH_TEXT]
+    assert (profile.leomatch.name, profile.leomatch.name_source) == (
+        "Linkname",
+        LeomatchNameSource.MATCH,
+    )
+
+
+async def test_a_parsed_card_name_wins_over_the_match_link_name(tmp_path: Path) -> None:
+    lookup = _lookup(match_name="Linkname")
+    rig = _rig(tmp_path, leomatch=FakeLeomatchSource(lookup))
+    contact = await _new_contact(rig)
+
+    profile = await _collect(rig, contact)
+
+    assert profile.leomatch is not None
+    assert (profile.leomatch.name, profile.leomatch.name_source) == (
+        "Cardname",
+        LeomatchNameSource.CARD,
+    )
+
+
+async def test_the_match_link_name_is_sanitized_and_truncated(tmp_path: Path) -> None:
+    lookup = _lookup(card=None, match_name="  Nul\x00name" + "x" * 500)
+    rig = _rig(tmp_path, leomatch=FakeLeomatchSource(lookup))
+    contact = await _new_contact(rig)
+
+    profile = await _collect(rig, contact)
+
+    assert profile.leomatch is not None
+    assert profile.leomatch.name is not None
+    assert profile.leomatch.name.startswith("Nulname")
+    assert len(profile.leomatch.name) == MAX_LEOMATCH_NAME_LENGTH
+
+
+async def test_leomatch_text_that_does_not_parse_keeps_only_the_raw_text(tmp_path: Path) -> None:
+    rig = _rig(tmp_path, leomatch=FakeLeomatchSource(_lookup(card="free card text")))
+    contact = await _new_contact(rig)
+
+    profile = await _collect(rig, contact)
+
+    assert profile.leomatch is not None
+    assert profile.leomatch.raw_text == "free card text"
+    assert profile.leomatch.match_text == MATCH_TEXT
     assert profile.leomatch.age is None
 
 
@@ -583,7 +647,7 @@ async def test_nothing_personal_reaches_the_logs(
         _rig(
             tmp_path / "ok",
             profiles=FakeProfileSource(profile=fake_telegram_profile(bio=secret_bio)),
-            leomatch=FakeLeomatchSource(_leomatch_texts(card=secret_card)),
+            leomatch=FakeLeomatchSource(_lookup(card=secret_card)),
         ),
         _rig(
             tmp_path / "failing",
@@ -623,12 +687,10 @@ async def test_nothing_personal_reaches_the_logs(
 
 
 def _card_rig(
-    tmp_path: Path, card_photo: FakeCardPhoto | None, *, profiles: FakeProfileSource | None = None
+    tmp_path: Path, card_photos: FakeCardPhotos | None, *, profiles: FakeProfileSource | None = None
 ) -> Rig:
     return _rig(
-        tmp_path,
-        profiles=profiles,
-        leomatch=FakeLeomatchSource(_leomatch_texts(), card_photo=card_photo),
+        tmp_path, profiles=profiles, leomatch=FakeLeomatchSource(_lookup(photos=card_photos))
     )
 
 
@@ -636,95 +698,124 @@ def _profile_files(rig: Rig) -> list[str]:
     return sorted(p.name for p in (rig.media_dir / PROFILE_PHOTO_DIRECTORY).iterdir())
 
 
-async def test_a_card_photo_is_stored_next_to_the_profile_photo(tmp_path: Path) -> None:
-    card_photo = FakeCardPhoto()
-    rig = _card_rig(tmp_path, card_photo)
+def _card_path(contact: Contact, number: int) -> str:
+    return f"{PROFILE_PHOTO_DIRECTORY}/{contact.id}-card-{number}.jpg"
+
+
+async def test_all_card_photos_are_stored_under_the_internal_id(tmp_path: Path) -> None:
+    card_photos = FakeCardPhotos(3, contents={0: b"one", 1: b"two", 2: b"three"})
+    rig = _card_rig(tmp_path, card_photos)
     contact = await _new_contact(rig, tg_id=987654)
 
     profile = await _collect(rig, contact)
 
     assert profile.leomatch is not None
-    assert profile.leomatch.photo is not None
-    relative = Path(profile.leomatch.photo)
-    assert not relative.is_absolute()
-    assert relative == Path(PROFILE_PHOTO_DIRECTORY) / f"{contact.id}-card.jpg"
-    assert "987654" not in profile.leomatch.photo
-    assert (rig.media_dir / relative).read_bytes() == FAKE_CARD_PHOTO
+    assert profile.leomatch.photos == [_card_path(contact, n) for n in (1, 2, 3)]
+    for stored in profile.leomatch.photos:
+        assert not Path(stored).is_absolute()
+        assert "987654" not in stored
+    contents = [(rig.media_dir / stored).read_bytes() for stored in profile.leomatch.photos]
+    assert contents == [b"one", b"two", b"three"]
     assert profile.photo == f"{PROFILE_PHOTO_DIRECTORY}/{contact.id}.jpg"
     assert (rig.media_dir / str(profile.photo)).read_bytes() == FAKE_PHOTO
-    assert _profile_files(rig) == [f"{contact.id}-card.jpg", f"{contact.id}.jpg"]
+    assert _profile_files(rig) == [
+        f"{contact.id}-card-1.jpg",
+        f"{contact.id}-card-2.jpg",
+        f"{contact.id}-card-3.jpg",
+        f"{contact.id}.jpg",
+    ]
 
 
-async def test_the_card_photo_is_downloaded_through_a_part_file(tmp_path: Path) -> None:
-    card_photo = FakeCardPhoto()
-    rig = _card_rig(tmp_path, card_photo)
+async def test_card_photos_are_downloaded_in_order_through_part_files(tmp_path: Path) -> None:
+    card_photos = FakeCardPhotos(2)
+    rig = _card_rig(tmp_path, card_photos)
     contact = await _new_contact(rig)
 
     await _collect(rig, contact)
 
-    assert card_photo.destinations == [
-        rig.media_dir / PROFILE_PHOTO_DIRECTORY / f"{contact.id}-card.part.jpg"
+    directory = rig.media_dir / PROFILE_PHOTO_DIRECTORY
+    assert card_photos.downloads == [
+        (0, directory / f"{contact.id}-card-1.part.jpg"),
+        (1, directory / f"{contact.id}-card-2.part.jpg"),
     ]
-    assert not list((rig.media_dir / PROFILE_PHOTO_DIRECTORY).glob("*.part*"))
+    assert not list(directory.glob("*.part*"))
 
 
-async def test_a_card_without_a_photo_stores_no_leomatch_photo(tmp_path: Path) -> None:
+async def test_no_more_than_the_photo_limit_is_downloaded(tmp_path: Path) -> None:
+    card_photos = FakeCardPhotos(MAX_CARD_PHOTOS + 3)
+    rig = _card_rig(tmp_path, card_photos)
+    contact = await _new_contact(rig)
+
+    profile = await _collect(rig, contact)
+
+    assert profile.leomatch is not None
+    assert len(profile.leomatch.photos) == MAX_CARD_PHOTOS
+    assert [index for index, _ in card_photos.downloads] == list(range(MAX_CARD_PHOTOS))
+
+
+async def test_a_card_without_photos_stores_none(tmp_path: Path) -> None:
     rig = _card_rig(tmp_path, None)
     contact = await _new_contact(rig)
 
     profile = await _collect(rig, contact)
 
     assert profile.leomatch is not None
-    assert profile.leomatch.photo is None
+    assert profile.leomatch.photos == []
     assert profile.photo is not None
     assert _profile_files(rig) == [f"{contact.id}.jpg"]
 
 
-async def test_a_card_photo_that_downloads_nothing_stores_no_path(tmp_path: Path) -> None:
-    rig = _card_rig(tmp_path, FakeCardPhoto(content=None))
+async def test_photos_that_download_nothing_store_no_path(tmp_path: Path) -> None:
+    rig = _card_rig(tmp_path, FakeCardPhotos(2, contents={0: None, 1: None}))
     contact = await _new_contact(rig)
 
     profile = await _collect(rig, contact)
 
     assert profile.leomatch is not None
-    assert profile.leomatch.photo is None
+    assert profile.leomatch.photos == []
 
 
-async def test_a_failed_card_photo_download_leaves_no_file_and_other_parts_survive(
-    tmp_path: Path,
-) -> None:
-    rig = _card_rig(tmp_path, FakeCardPhoto(error=ProfileSourceError("FloodWaitError")))
+async def test_one_failing_photo_does_not_block_the_others(tmp_path: Path) -> None:
+    card_photos = FakeCardPhotos(3, errors={1: ProfileSourceError("FloodWaitError")})
+    rig = _card_rig(tmp_path, card_photos)
     contact = await _new_contact(rig)
 
     profile = await _collect(rig, contact)
 
     assert profile.leomatch is not None
-    assert profile.leomatch.photo is None
+    assert profile.leomatch.photos == [_card_path(contact, 1), _card_path(contact, 3)]
     assert profile.leomatch.raw_text == CARD_TEXT
-    assert profile.leomatch.related_texts == [MATCH_TEXT]
+    assert profile.leomatch.match_text == MATCH_TEXT
     assert profile.photo == f"{PROFILE_PHOTO_DIRECTORY}/{contact.id}.jpg"
     assert profile.bio == FAKE_BIO
     assert profile.collected_at == CLOCK_NOW
-    assert _profile_files(rig) == [f"{contact.id}.jpg"]
+    assert _profile_files(rig) == [
+        f"{contact.id}-card-1.jpg",
+        f"{contact.id}-card-3.jpg",
+        f"{contact.id}.jpg",
+    ]
 
 
-async def test_an_unexpected_error_in_the_card_download_is_contained(tmp_path: Path) -> None:
-    rig = _card_rig(tmp_path, FakeCardPhoto(error=RuntimeError("unexpected")))
+async def test_every_photo_failing_leaves_no_file_and_the_other_parts_survive(
+    tmp_path: Path,
+) -> None:
+    errors = {0: ProfileSourceError("FloodWaitError"), 1: RuntimeError("unexpected")}
+    rig = _card_rig(tmp_path, FakeCardPhotos(2, errors=errors))
     contact = await _new_contact(rig)
 
     profile = await _collect(rig, contact)
 
     assert profile.leomatch is not None
-    assert profile.leomatch.photo is None
+    assert profile.leomatch.photos == []
+    assert profile.leomatch.raw_text == CARD_TEXT
     assert profile.collected_at == CLOCK_NOW
     assert _profile_files(rig) == [f"{contact.id}.jpg"]
+    assert rig.collector.failed == 0
 
 
-async def test_a_failed_profile_photo_does_not_touch_the_card_photo(tmp_path: Path) -> None:
+async def test_a_failed_profile_photo_does_not_touch_the_card_photos(tmp_path: Path) -> None:
     rig = _card_rig(
-        tmp_path,
-        FakeCardPhoto(),
-        profiles=FakeProfileSource(photo_error=ProfileSourceError("X")),
+        tmp_path, FakeCardPhotos(2), profiles=FakeProfileSource(photo_error=ProfileSourceError("X"))
     )
     contact = await _new_contact(rig)
 
@@ -732,16 +823,16 @@ async def test_a_failed_profile_photo_does_not_touch_the_card_photo(tmp_path: Pa
 
     assert profile.photo is None
     assert profile.leomatch is not None
-    assert profile.leomatch.photo == f"{PROFILE_PHOTO_DIRECTORY}/{contact.id}-card.jpg"
-    assert _profile_files(rig) == [f"{contact.id}-card.jpg"]
+    assert profile.leomatch.photos == [_card_path(contact, 1), _card_path(contact, 2)]
+    assert _profile_files(rig) == [f"{contact.id}-card-1.jpg", f"{contact.id}-card-2.jpg"]
 
 
 async def test_a_failed_leomatch_lookup_downloads_no_card_photo(tmp_path: Path) -> None:
-    card_photo = FakeCardPhoto()
+    card_photos = FakeCardPhotos(2)
     rig = _rig(
         tmp_path,
         leomatch=FakeLeomatchSource(
-            _leomatch_texts(), card_photo=card_photo, error=ProfileSourceError("RPCError")
+            _lookup(photos=card_photos), error=ProfileSourceError("RPCError")
         ),
     )
     contact = await _new_contact(rig)
@@ -749,13 +840,13 @@ async def test_a_failed_leomatch_lookup_downloads_no_card_photo(tmp_path: Path) 
     profile = await _collect(rig, contact)
 
     assert profile.leomatch is None
-    assert card_photo.destinations == []
+    assert card_photos.downloads == []
 
 
-async def test_a_card_photo_cut_off_by_the_budget_leaves_no_part_file(tmp_path: Path) -> None:
+async def test_card_photos_cut_off_by_the_budget_leave_no_part_file(tmp_path: Path) -> None:
     rig = _rig(
         tmp_path,
-        leomatch=FakeLeomatchSource(_leomatch_texts(), card_photo=FakeCardPhoto(delay=5.0)),
+        leomatch=FakeLeomatchSource(_lookup(photos=FakeCardPhotos(2, delay=5.0))),
         timeout=0.2,
     )
     contact = await _new_contact(rig)
@@ -763,73 +854,104 @@ async def test_a_card_photo_cut_off_by_the_budget_leaves_no_part_file(tmp_path: 
     profile = await _collect(rig, contact)
 
     assert profile.leomatch is not None
-    assert profile.leomatch.photo is None
+    assert profile.leomatch.photos == []
     assert profile.photo == f"{PROFILE_PHOTO_DIRECTORY}/{contact.id}.jpg"
     assert _profile_files(rig) == [f"{contact.id}.jpg"]
 
 
-def _earlier_leomatch(photo: str | None) -> dict[str, object]:
-    earlier = ContactProfile(leomatch=LeomatchProfile(raw_text="earlier card text", photo=photo))
+def _earlier_leomatch(*photos: str) -> dict[str, object]:
+    earlier = ContactProfile(
+        leomatch=LeomatchProfile(raw_text="earlier card text", photos=list(photos))
+    )
     return earlier.model_dump(mode="json")
 
 
-async def test_an_earlier_card_photo_survives_a_failed_retry(tmp_path: Path) -> None:
-    earlier_path = f"{PROFILE_PHOTO_DIRECTORY}/1-card.jpg"
-    rig = _card_rig(tmp_path, FakeCardPhoto(error=ProfileSourceError("X")))
-    contact = await _new_contact(rig, profile=_earlier_leomatch(earlier_path))
+async def test_earlier_paths_survive_failed_downloads_and_the_list_never_shrinks(
+    tmp_path: Path,
+) -> None:
+    earlier = [_old_path(n) for n in (1, 2, 3)]
+    errors: dict[int, Exception] = {index: ProfileSourceError("X") for index in range(3)}
+    rig = _card_rig(tmp_path, FakeCardPhotos(3, errors=errors))
+    contact = await _new_contact(rig, profile=_earlier_leomatch(*earlier))
 
     profile = await _collect(rig, contact)
 
     assert profile.leomatch is not None
     assert profile.leomatch.raw_text == CARD_TEXT
-    assert profile.leomatch.photo == earlier_path
+    assert profile.leomatch.photos == earlier
 
 
-async def test_an_earlier_card_photo_survives_a_retry_whose_card_has_no_photo(
-    tmp_path: Path,
-) -> None:
-    earlier_path = f"{PROFILE_PHOTO_DIRECTORY}/1-card.jpg"
-    rig = _card_rig(tmp_path, None)
-    contact = await _new_contact(rig, profile=_earlier_leomatch(earlier_path))
+async def test_a_retry_with_fewer_photos_keeps_the_longer_stored_list(tmp_path: Path) -> None:
+    earlier = [_old_path(n) for n in (1, 2, 3)]
+    rig = _card_rig(tmp_path, FakeCardPhotos(1))
+    contact = await _new_contact(rig, profile=_earlier_leomatch(*earlier))
 
     profile = await _collect(rig, contact)
 
     assert profile.leomatch is not None
-    assert profile.leomatch.photo == earlier_path
+    assert profile.leomatch.photos == [_card_path(contact, 1), *earlier[1:]]
 
 
-async def test_an_earlier_leomatch_with_its_photo_survives_a_failed_lookup(
+async def test_a_failure_at_one_index_keeps_the_old_path_there(tmp_path: Path) -> None:
+    earlier = [_old_path(1), _old_path(2)]
+    rig = _card_rig(tmp_path, FakeCardPhotos(3, errors={0: ProfileSourceError("X")}))
+    contact = await _new_contact(rig, profile=_earlier_leomatch(*earlier))
+
+    profile = await _collect(rig, contact)
+
+    assert profile.leomatch is not None
+    assert profile.leomatch.photos == [
+        earlier[0],
+        _card_path(contact, 2),
+        _card_path(contact, 3),
+    ]
+
+
+async def test_earlier_photos_survive_a_retry_whose_card_has_no_photos(tmp_path: Path) -> None:
+    earlier = [_old_path(1)]
+    rig = _card_rig(tmp_path, None)
+    contact = await _new_contact(rig, profile=_earlier_leomatch(*earlier))
+
+    profile = await _collect(rig, contact)
+
+    assert profile.leomatch is not None
+    assert profile.leomatch.photos == earlier
+
+
+async def test_an_earlier_leomatch_with_its_photos_survives_a_failed_lookup(
     tmp_path: Path,
 ) -> None:
-    earlier_path = f"{PROFILE_PHOTO_DIRECTORY}/1-card.jpg"
+    earlier = [_old_path(1)]
     rig = _rig(tmp_path, leomatch=FakeLeomatchSource(error=ProfileSourceError("RPCError")))
-    contact = await _new_contact(rig, profile=_earlier_leomatch(earlier_path))
+    contact = await _new_contact(rig, profile=_earlier_leomatch(*earlier))
 
     profile = await _collect(rig, contact)
 
     assert profile.leomatch is not None
     assert profile.leomatch.raw_text == "earlier card text"
-    assert profile.leomatch.photo == earlier_path
+    assert profile.leomatch.photos == earlier
 
 
-async def test_a_new_card_photo_replaces_an_earlier_path(tmp_path: Path) -> None:
-    rig = _card_rig(tmp_path, FakeCardPhoto())
-    contact = await _new_contact(
-        rig, profile=_earlier_leomatch(f"{PROFILE_PHOTO_DIRECTORY}/old-card.jpg")
-    )
+async def test_a_legacy_single_card_photo_is_kept_and_then_replaced(tmp_path: Path) -> None:
+    legacy = {"leomatch": {"raw_text": "earlier card text", "photo": "profiles/old-card.jpg"}}
+    rig = _card_rig(tmp_path, FakeCardPhotos(2))
+    contact = await _new_contact(rig, profile=legacy)
 
     profile = await _collect(rig, contact)
 
     assert profile.leomatch is not None
-    assert profile.leomatch.photo == f"{PROFILE_PHOTO_DIRECTORY}/{contact.id}-card.jpg"
+    assert profile.leomatch.photos == [_card_path(contact, 1), _card_path(contact, 2)]
 
 
-async def test_nothing_about_the_card_photo_reaches_the_logs(
+async def test_nothing_about_the_card_photos_reaches_the_logs(
     tmp_path: Path, caplog: pytest.LogCaptureFixture
 ) -> None:
     rigs = [
-        _card_rig(tmp_path / "ok", FakeCardPhoto()),
-        _card_rig(tmp_path / "failing", FakeCardPhoto(error=ProfileSourceError("leak-card"))),
+        _card_rig(tmp_path / "ok", FakeCardPhotos(2)),
+        _card_rig(
+            tmp_path / "failing",
+            FakeCardPhotos(2, errors={0: ProfileSourceError("leak-card")}),
+        ),
     ]
 
     with caplog.at_level(logging.DEBUG):
@@ -841,3 +963,7 @@ async def test_nothing_about_the_card_photo_reaches_the_logs(
     assert "profile collection finished" in logged
     for forbidden in ("-card", ".jpg", "profiles/", "leak-card", "555123", CARD_TEXT):
         assert forbidden not in logged
+
+
+def _old_path(number: int) -> str:
+    return f"{PROFILE_PHOTO_DIRECTORY}/old-card-{number}.jpg"

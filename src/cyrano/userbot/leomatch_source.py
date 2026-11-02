@@ -3,16 +3,20 @@
 from __future__ import annotations
 
 import logging
+from collections.abc import Iterable, Sequence
+from dataclasses import dataclass
 from pathlib import Path
 
 from telethon.errors import UsernameInvalidError, UsernameNotOccupiedError
 from telethon.tl.types import MessageEntityMentionName, MessageEntityTextUrl, MessageEntityUrl
 
-from cyrano.domain.enums import LeomatchTextKind
-from cyrano.domain.models import LeomatchSourceText
-from cyrano.services.profile_source import CardPhoto, LeomatchLookup, ProfileSourceError
+from cyrano.domain.models import MAX_CARD_PHOTOS
+from cyrano.services.profile_source import CardPhotos, LeomatchLookup, ProfileSourceError
 from cyrano.userbot.leomatch_match import (
+    USER_LINK,
     ChatMessage,
+    UserLinkText,
+    linked_name,
     looks_like_match_message,
     match_evidence,
     normalize_username,
@@ -25,6 +29,7 @@ logger = logging.getLogger("cyrano.userbot.leomatch_source")
 SCAN_LIMIT = 100
 SEARCH_RESULT_LIMIT = 5
 CARD_WALK_BACK_POSITIONS = 2
+CARD_HISTORY_LIMIT = 15
 UTF16 = "utf-16-le"
 UTF16_UNIT_BYTES = 2
 UNRESOLVABLE_CHAT = (ValueError, UsernameNotOccupiedError, UsernameInvalidError)
@@ -41,11 +46,18 @@ def to_chat_message(message: HistoryMessage) -> ChatMessage:
     text = message.raw_text or ""
     user_ids: list[int] = []
     links: list[str] = []
+    user_link_texts: list[UserLinkText] = []
     for entity in message.entities or ():
         if isinstance(entity, MessageEntityMentionName):
             user_ids.append(int(entity.user_id))
+            covered = entity_text(text, int(entity.offset), int(entity.length))
+            user_link_texts.append(UserLinkText(int(entity.user_id), covered))
         elif isinstance(entity, MessageEntityTextUrl):
             links.append(str(entity.url))
+            user_link = USER_LINK.fullmatch(str(entity.url))
+            if user_link is not None:
+                covered = entity_text(text, int(entity.offset), int(entity.length))
+                user_link_texts.append(UserLinkText(int(user_link.group(1)), covered))
         elif isinstance(entity, MessageEntityUrl):
             links.append(entity_text(text, int(entity.offset), int(entity.length)))
     return ChatMessage(
@@ -54,17 +66,39 @@ def to_chat_message(message: HistoryMessage) -> ChatMessage:
         text=text,
         mentioned_user_ids=tuple(user_ids),
         links=tuple(links),
+        user_link_texts=tuple(user_link_texts),
     )
 
 
-class TelethonCardPhoto:
-    def __init__(self, client: UserbotClient, message: HistoryMessage) -> None:
-        self._client = client
-        self._message = message
+def group_positions(newest_first: Iterable[HistoryMessage]) -> list[list[HistoryMessage]]:
+    positions: list[list[HistoryMessage]] = []
+    for message in newest_first:
+        grouped_id = message.grouped_id
+        if positions and grouped_id is not None and positions[-1][-1].grouped_id == grouped_id:
+            positions[-1].append(message)
+        else:
+            positions.append([message])
+    return [sorted(position, key=lambda member: member.id) for position in positions]
 
-    async def download(self, destination: Path) -> bool:
+
+@dataclass(frozen=True, slots=True)
+class _Card:
+    text: str
+    photo_messages: tuple[HistoryMessage, ...]
+
+
+class TelethonCardPhotos:
+    def __init__(self, client: UserbotClient, messages: Sequence[HistoryMessage]) -> None:
+        self._client = client
+        self._messages = tuple(messages)
+
+    @property
+    def count(self) -> int:
+        return len(self._messages)
+
+    async def download(self, index: int, destination: Path) -> bool:
         try:
-            saved = await self._client.download_media(self._message, file=str(destination))
+            saved = await self._client.download_media(self._messages[index], file=str(destination))
         except TELETHON_FAILURES as exc:
             raise ProfileSourceError(type(exc).__name__) from None
         return bool(saved)
@@ -84,14 +118,16 @@ class TelethonLeomatchSource:
             match = await self._find_match(chat, tg_id, normalize_username(username))
             if match is None:
                 return LeomatchLookup()
-            texts = [LeomatchSourceText(kind=LeomatchTextKind.MATCH, text=match.text)]
+            match_name = linked_name(match, tg_id)
             card = await self._find_card(chat, match)
             if card is None:
-                return LeomatchLookup(texts)
-            texts.append(
-                LeomatchSourceText(kind=LeomatchTextKind.CARD, text=to_chat_message(card).text)
+                return LeomatchLookup(match_text=match.text, match_name=match_name)
+            return LeomatchLookup(
+                card_text=card.text,
+                match_text=match.text,
+                match_name=match_name,
+                card_photos=self._card_photos_of(card),
             )
-            return LeomatchLookup(texts, self._card_photo_of(card))
         except TELETHON_FAILURES as exc:
             raise ProfileSourceError(type(exc).__name__) from None
 
@@ -131,15 +167,34 @@ class TelethonLeomatchSource:
                 return message
         return None
 
-    def _card_photo_of(self, card: HistoryMessage) -> CardPhoto | None:
-        return None if card.photo is None else TelethonCardPhoto(self._client, card)
+    def _card_photos_of(self, card: _Card) -> CardPhotos | None:
+        if not card.photo_messages:
+            return None
+        return TelethonCardPhotos(self._client, card.photo_messages)
 
-    async def _find_card(self, chat: SenderLike, match: ChatMessage) -> HistoryMessage | None:
-        async for raw in self._client.iter_messages(
-            chat, CARD_WALK_BACK_POSITIONS, offset_id=match.id
-        ):
-            message = to_chat_message(raw)
-            if message.out or not message.text.strip():
+    async def _find_card(self, chat: SenderLike, match: ChatMessage) -> _Card | None:
+        history = [
+            raw
+            async for raw in self._client.iter_messages(
+                chat, CARD_HISTORY_LIMIT, offset_id=match.id
+            )
+        ]
+        for position in group_positions(history)[:CARD_WALK_BACK_POSITIONS]:
+            members = [to_chat_message(raw) for raw in position]
+            if all(member.out for member in members):
                 continue
-            return None if looks_like_match_message(message) else raw
+            text = _first_caption(members)
+            if text is None:
+                continue
+            if any(looks_like_match_message(member) for member in members):
+                return None
+            photos = [raw for raw in position if raw.photo is not None]
+            return _Card(text, tuple(photos[:MAX_CARD_PHOTOS]))
         return None
+
+
+def _first_caption(members: Sequence[ChatMessage]) -> str | None:
+    for member in members:
+        if member.text.strip():
+            return member.text
+    return None

@@ -18,7 +18,7 @@ class MessageDirection(StrEnum):
     OUTGOING = "outgoing"
 
 
-class LeomatchTextKind(StrEnum):
+class LeomatchNameSource(StrEnum):
     CARD = "card"
     MATCH = "match"
 

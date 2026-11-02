@@ -113,6 +113,10 @@ only.
   Collected profile data is personal data too: username, display name, bio, the profile photo,
   the card photos (a list), their paths, and the matching-bot texts are never logged at INFO or above and never go to git.
   The collector logs internal contact ids, part names, error class names and counters only.
+  Prompts and model replies contain personal data: the LLM client never logs a prompt, a reply
+  (valid or not) or a response body at any level, and its errors carry the status code or the
+  exception class only. Its log lines carry the step, the model, token counts, the duration and
+  retry counters. It never logs the API key.
 - **Why:** the data belongs to real people.
 - **Enforced where:** exists today: `.gitignore` and `.dockerignore` exclude `.env`, `*.session`,
   `media/` and `data/` (profile photos live under `MEDIA_DIR`, `.env.example` and compose put it
@@ -125,7 +129,10 @@ only.
   setting is either allowlisted or deliberately withheld; the collector tests assert that no
   username, name, bio, Leomatch text, Telegram id or photo path appears in captured log output,
   failures included. Planned: tests that run the reply pipeline with a fake message and assert that its text
-  does not appear in captured log output at INFO and above.
+  does not appear in captured log output at INFO and above. Exists for the LLM client
+  (`tests/llm/test_logging.py`, `tests/llm/test_complete_json.py`): all log output is captured at
+  DEBUG during retries, invalid JSON replies and failures, and the prompt, the reply, the response
+  body and the key are asserted absent; the raw invalid reply is also absent from the raised error.
 
 ## S10. The assistant never answers a direct bot question
 

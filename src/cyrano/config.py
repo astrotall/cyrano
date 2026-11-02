@@ -5,6 +5,7 @@ from __future__ import annotations
 import re
 from pathlib import Path
 from typing import Literal
+from urllib.parse import urlsplit
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from pydantic import Field, SecretStr, ValidationError, field_validator
@@ -18,6 +19,14 @@ DEFAULT_ENV_FILE = ".env"
 DEFAULT_LEOMATCH_BOT_USERNAME = "leomatchbot"
 BOT_USERNAME_PATTERN = re.compile(r"[A-Za-z0-9_]{1,32}")
 BOT_USERNAME_PREFIX = "@"
+DEFAULT_DEEPSEEK_BASE_URL = "https://api.deepseek.com"
+HTTP_SCHEMES = frozenset({"http", "https"})
+MIN_LLM_TEMPERATURE = 0.0
+MAX_LLM_TEMPERATURE = 2.0
+DEFAULT_LLM_REPLY_TEMPERATURE = 1.0
+DEFAULT_LLM_SUMMARY_TEMPERATURE = 0.2
+DEFAULT_LLM_REPLY_MAX_TOKENS = 400
+DEFAULT_LLM_SUMMARY_MAX_TOKENS = 1500
 
 LOGGED_SETTINGS = frozenset(
     {
@@ -25,6 +34,13 @@ LOGGED_SETTINGS = frozenset(
         "timezone",
         "media_dir",
         "deepseek_model",
+        "deepseek_thinking",
+        "llm_reply_model",
+        "llm_summary_model",
+        "llm_reply_temperature",
+        "llm_summary_temperature",
+        "llm_reply_max_tokens",
+        "llm_summary_max_tokens",
         "telethon_log_level",
         "aiogram_log_level",
         "httpx_log_level",
@@ -53,6 +69,18 @@ class Settings(BaseSettings):
     timezone: str = "Europe/Moscow"
     media_dir: Path = Path("media")
     deepseek_model: str = "deepseek-chat"
+    deepseek_base_url: str = DEFAULT_DEEPSEEK_BASE_URL
+    deepseek_thinking: bool = False
+    llm_reply_model: str | None = None
+    llm_summary_model: str | None = None
+    llm_reply_temperature: float = Field(
+        default=DEFAULT_LLM_REPLY_TEMPERATURE, ge=MIN_LLM_TEMPERATURE, le=MAX_LLM_TEMPERATURE
+    )
+    llm_summary_temperature: float = Field(
+        default=DEFAULT_LLM_SUMMARY_TEMPERATURE, ge=MIN_LLM_TEMPERATURE, le=MAX_LLM_TEMPERATURE
+    )
+    llm_reply_max_tokens: int = Field(default=DEFAULT_LLM_REPLY_MAX_TOKENS, gt=0)
+    llm_summary_max_tokens: int = Field(default=DEFAULT_LLM_SUMMARY_MAX_TOKENS, gt=0)
     telethon_log_level: LogLevel = "WARNING"
     aiogram_log_level: LogLevel = "WARNING"
     httpx_log_level: LogLevel = "WARNING"
@@ -79,6 +107,27 @@ class Settings(BaseSettings):
             raise ValueError(msg)
         return name
 
+    @field_validator("deepseek_model", "llm_reply_model", "llm_summary_model")
+    @classmethod
+    def _check_model_name(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        name = value.strip()
+        if not name:
+            msg = "must not be empty"
+            raise ValueError(msg)
+        return name
+
+    @field_validator("deepseek_base_url")
+    @classmethod
+    def _check_deepseek_base_url(cls, value: str) -> str:
+        url = value.strip()
+        parts = urlsplit(url)
+        if parts.scheme not in HTTP_SCHEMES or not parts.netloc:
+            msg = "must be an http:// or https:// URL"
+            raise ValueError(msg)
+        return url
+
     @field_validator("timezone")
     @classmethod
     def _check_timezone(cls, value: str) -> str:
@@ -104,6 +153,14 @@ class Settings(BaseSettings):
             msg = "must be a Redis URL (redis://... or rediss://...)"
             raise ValueError(msg)
         return value
+
+    @property
+    def reply_model(self) -> str:
+        return self.llm_reply_model or self.deepseek_model
+
+    @property
+    def summary_model(self) -> str:
+        return self.llm_summary_model or self.deepseek_model
 
     @property
     def library_log_levels(self) -> dict[str, LogLevel]:

@@ -1,7 +1,7 @@
 # Architecture
 
-State as of CYR-33: the skeleton, the storage layer, the userbot intake, the profile collection and the
-control bot with the contact card exist. Anything else is marked **planned** with its ticket.
+State as of CYR-13: the skeleton, the storage layer, the userbot intake, the profile collection, the
+control bot with the contact card and the LLM client exist (the LLM client has no consumer yet). Anything else is marked **planned** with its ticket.
 Product and decisions: [CLAUDE.md](../../CLAUDE.md). Reasons: [decisions.md](decisions.md).
 
 ## Layers
@@ -12,28 +12,30 @@ Source lives in `src/cyrano/`.
 | --- | --- | --- |
 | `userbot/` | The only package that imports Telethon: client, session and login, event filters, the incoming-message handler, the listener lifecycle. Receives private messages on the second account and converts events into plain objects. Also holds the read-only adapters of the profile collection: `profile_source.py` (bio, names, photo) and `leomatch_source.py` with `leomatch_match.py` (the matching-bot chat). Planned: the actual Telegram send behind the sender (CYR-19) | exists for listening and registration (CYR-10) and for reading profiles (CYR-11); it sends nothing |
 | `bot/` | The only package that imports aiogram: the owner-only control bot. `app.py` (`ControlBot`: bot, dispatcher, polling, stop), `middleware.py` (owner-only), `handlers.py` (`/start`, the card buttons), `rendering.py` (pure card text, keyboard, decision), `callbacks.py` (callback data), `sender.py` (`TelegramCardSender`), `messages.py` (every Russian text), `errors.py` (readable fatal errors). Planned: notifications of stop-triggers and the rest of the panel (CYR-20, CYR-26) | exists for the card and its two buttons (CYR-12) |
-| `llm/` | LLM client: DeepSeek over plain httpx, response parsing | empty skeleton; planned CYR-13 |
+| `llm/` | The only package that imports httpx and the only one that knows the provider: `deepseek.py` (`DeepSeekClient`, `StepConfig`), `transport.py` (`RetryingTransport`), `factory.py` (`LLMClientFactory`), `wire.py` (the response fields it reads), `json_reply.py` (JSON extraction and validation problems), `prompts.py` (the texts it adds for JSON), `constants.py` (every number and string). See [LLM client](#llm-client-cyr-13) | exists (CYR-13); not wired into `main.py` yet, the first consumers are CYR-16, CYR-17 and CYR-25 |
 | `db/` | SQLAlchemy models (`models.py`), engine and session factory (`session.py`), repositories (`repositories.py`) | exists; called by the intake (CYR-10) |
-| `services/` | Business logic shared by userbot, bot and worker: contact lifecycle, sender, reply pipeline. `repositories.py` holds the repository Protocols, `intake.py` the `IntakeService`, `sanitize.py` the NUL-byte removal, `contact_events.py` the generic `ContactEventPublisher[T]` and `ContactEventSubscriber[T]` Protocols and the in-memory queue; CYR-11 added `profile_source.py` (the `ProfileSource` and `LeomatchSource` Protocols and `ProfileSourceError`), `leomatch.py` (the card parser) and `profile_collector.py` (`ProfileCollector`); CYR-12 added `card_sender.py` (the `CardSender` Protocol), `card_builder.py` (assembles the `ContactCard`), `card_announcer.py` (`CardAnnouncer`) and `card_actions.py` (`CardActions`) | Protocols, intake, sanitization, events (CYR-10), the profile collector (CYR-11) and the card announcer and actions (CYR-12) exist; the rest is planned from CYR-13 on |
+| `services/` | Business logic shared by userbot, bot and worker: contact lifecycle, sender, reply pipeline. `repositories.py` holds the repository Protocols, `intake.py` the `IntakeService`, `sanitize.py` the NUL-byte removal, `contact_events.py` the generic `ContactEventPublisher[T]` and `ContactEventSubscriber[T]` Protocols and the in-memory queue; CYR-11 added `profile_source.py` (the `ProfileSource` and `LeomatchSource` Protocols and `ProfileSourceError`), `leomatch.py` (the card parser) and `profile_collector.py` (`ProfileCollector`); CYR-12 added `card_sender.py` (the `CardSender` Protocol), `card_builder.py` (assembles the `ContactCard`), `card_announcer.py` (`CardAnnouncer`) and `card_actions.py` (`CardActions`); CYR-13 added `llm_client.py` (the `LLMClient` Protocol) and `llm_check.py` (`check_llm`, the request behind `llm-check`) | Protocols, intake, sanitization, events (CYR-10), the profile collector (CYR-11), the card announcer and actions (CYR-12) and the LLM Protocol (CYR-13) exist; the rest is planned from CYR-15 on |
 | `worker/` | Arq worker: `settings.py` holds `WorkerSettings`, `startup`, `shutdown`, a placeholder `noop` job (Arq refuses to start a worker with no registered functions) | skeleton works; real jobs planned CYR-17 |
 | `config.py` | `Settings` (pydantic-settings), `load_settings`, `ConfigError` | exists |
 | `logging.py` | JSON-lines formatter, `build_log_config`, `configure_logging` | exists |
 | `health.py` | Heartbeat file, `is_alive`, `python -m cyrano.health` | exists |
-| `main.py`, `__main__.py` | App entrypoint (composition root), the `login` subcommand, signal handling, heartbeat task | exists; the userbot is plugged in (CYR-10), the collector (CYR-11), the control bot and the announcer (CYR-12) |
-| `domain/` | Leaf package, imports only pydantic and the standard library: enums, status transition rules, domain errors, Pydantic models the layers exchange | exists |
+| `main.py`, `__main__.py` | App entrypoint (composition root), the `login` and `llm-check` subcommands, signal handling, heartbeat task | exists; the userbot is plugged in (CYR-10), the collector (CYR-11), the control bot and the announcer (CYR-12); `llm-check` builds the LLM factory (CYR-13), the app itself does not yet |
+| `domain/` | Leaf package, imports only pydantic and the standard library: enums, status transition rules, domain errors (the LLM errors among them), Pydantic models the layers exchange (`llm.py`: `LLMMessage`, `LLMUsage`, `LLMResult`) | exists |
 | `prompts` | Prompt texts, few-shot data loading, trigger lists | planned, not created; the layered builder's location is decided in CYR-16 |
 
 `tests/` mirrors the packages (`tests/userbot`, `tests/bot`, `tests/llm`, `tests/domain`,
 `tests/db`, `tests/services`, `tests/worker`); the skeleton packages have empty test packages.
-`tests/userbot/fakes.py` holds the fake Telethon client, event and sender.
+`tests/userbot/fakes.py` holds the fake Telethon client, event and sender; `tests/llm/fakes.py` the scripted `httpx.MockTransport` handlers.
 
 ## Import direction
 
 Enforced by review. `tests/test_import_direction.py` also checks the part that exists: `domain`
 imports only pydantic, the standard library and itself; `db` imports neither `services` nor `llm`;
 `services` imports neither `db`, `userbot` nor `bot`, nor Telethon or aiogram; `userbot` imports
-none of `db`, `llm`, `bot`; `bot` imports none of `db`, `userbot`, `llm`; only the `userbot`
-package imports `telethon` and only the `bot` package imports `aiogram`.
+none of `db`, `llm`, `bot`; `bot` imports none of `db`, `userbot`, `llm`; `llm` imports none of `services`, `db`, `userbot`,
+`bot`; only the `userbot` package imports `telethon`, only the `bot` package imports `aiogram`
+and only the `llm` package imports `httpx`; outside `llm` only `main.py` imports `cyrano.llm`, and
+no module outside `llm` and `config.py` mentions the provider by name.
 
 1. `bot`, `userbot` and `worker` may import `services`.
 2. `services` reach `llm` and `db` only through interfaces defined in `services`. The concrete
@@ -52,6 +54,9 @@ package imports `telethon` and only the `bot` package imports `aiogram`.
 7. aiogram is imported only inside `bot/`. `services` reach the owner through the `CardSender`
    Protocol and receive the owner's decisions through `CardActions`; `bot` calls `CardActions` and
    implements `CardSender`, and `main` joins them.
+8. httpx is imported only inside `llm/`. Consumers import the `LLMClient` Protocol from
+   `services/llm_client.py` and the models and errors from `domain`; no httpx exception and no
+   provider class crosses the package boundary.
 
 Never import upward. Whether `bot`, `userbot` and `worker` may import each other is an open
 question in [decisions.md](decisions.md).
@@ -64,6 +69,8 @@ question in [decisions.md](decisions.md).
 | Telethon events, sessions, converting a Telethon entity into a plain object | `userbot` |
 | aiogram handlers, keyboards, card formatting | `bot` |
 | HTTP calls to the LLM provider and parsing its response | `llm` |
+| The interface consumers use to talk to a language model | `services/llm_client.py` |
+| LLM messages, results, usage and errors | `domain` |
 | SQLAlchemy models, repository implementations, session handling | `db` |
 | A repository interface | `services/repositories.py` |
 | Arq job functions and worker settings | `worker` |
@@ -298,6 +305,85 @@ the userbot, by long polling.
   `cyrano.services.card_announcer` (INFO: contact id of an announced card; WARNING: counters and
   error class, at most one per sweep).
 
+## LLM client (CYR-13)
+
+`src/cyrano/llm/` plus `services/llm_client.py` and `domain/llm.py`. One interface for reply
+generation (CYR-16, CYR-17) and summary extraction (CYR-25), DeepSeek the only provider. Nothing in
+this ticket sends a message or touches a contact, and the app process does not build the client yet:
+only `python -m cyrano llm-check` does.
+
+| Where | What |
+| --- | --- |
+| `domain/enums.py` | `Role` (`system`, `user`, `assistant`) and `LLMStep` (`reply`, `summary`) |
+| `domain/llm.py` | `LLMMessage(role, content)`, `LLMUsage(input_tokens, output_tokens, cache_hit_tokens)`, `LLMResult(text, usage, truncated)`. The message class is `LLMMessage` because `domain.models.Message` is the stored chat message |
+| `domain/errors.py` | `LLMError(message, status_code)` under `DomainError`, and `LLMAuthError` (401, 403), `LLMRequestError` (other 4xx except 429, invalid input), `LLMRateLimitError` (429 after the retries, or a `Retry-After` beyond the cap), `LLMUnavailableError` (5xx or a network failure after the retries), `LLMInvalidResponseError` (empty reply, unexpected body shape, no valid JSON after the attempts) |
+| `services/llm_client.py` | The `LLMClient` Protocol: `complete(messages, *, temperature, max_tokens)` and `complete_json(messages, schema, *, temperature, max_tokens)` |
+| `llm/deepseek.py` | `DeepSeekClient`, bound to a step (model, default temperature, default max tokens); satisfies the Protocol without importing `services` |
+| `llm/transport.py` | `RetryingTransport`: every request goes through it |
+| `llm/factory.py` | `LLMClientFactory(settings)` builds the shared `httpx.AsyncClient` once; `get(LLMStep.REPLY)` returns a bound client; `aclose()` closes the http client explicitly. Nothing is built at import time |
+
+- **Requests.** `POST {DEEPSEEK_BASE_URL}/chat/completions` with the OpenAI-compatible body: `model`,
+  `messages`, `temperature`, `max_tokens` (always set: the per-call value, else the step default),
+  `stream: false` and `thinking`. `Authorization: Bearer <DEEPSEEK_API_KEY>` is set once on the shared
+  http client and nowhere else. An empty message list, a list without a `user` message, a temperature
+  outside 0..2 and a non-positive `max_tokens` are `LLMRequestError` before any HTTP call.
+- **Thinking.** The documented request parameter is `thinking: {"type": "enabled" | "disabled"}`, and
+  DeepSeek enables thinking when it is omitted. The client always sends it: `disabled` unless
+  `DEEPSEEK_THINKING=true`. A chat reply therefore spends no tokens on reasoning and `temperature`
+  has effect (the provider ignores it in thinking mode).
+- **Reply.** `text` is `choices[0].message.content`; `truncated` is `finish_reason == "length"`;
+  `usage` comes from `prompt_tokens`, `completion_tokens` and `prompt_cache_hit_tokens` (absent means
+  `None`). A blank reply from `complete` is `LLMInvalidResponseError`; so is a body that is not JSON,
+  has no choice or has no usage.
+- **`complete_json`.** The client inserts one system message with the JSON Schema of the model after
+  the caller's leading system messages and asks for a single JSON object; it also sends
+  `response_format: {"type": "json_object"}`, which the provider documents together with the
+  requirement that the prompt mentions JSON (the schema message does). The JSON is read from a fenced
+  block anywhere in the reply (` ```json ` or a bare fence), otherwise from the whole reply, and
+  validated with `model_validate_json`, so a partially valid object is never returned. An invalid
+  reply goes back as an assistant turn followed by a user turn that lists the problems as
+  `- <field path>: <message>` (never input values) and, for a truncated reply, asks for a shorter
+  output. A blank reply is retried unchanged; the provider documents that JSON mode can return only
+  spaces. The first call plus `LLM_JSON_MAX_RETRIES` (2) retries are made, the two kinds of failure
+  sharing that budget; after that `LLMInvalidResponseError` with the attempt count only. The invalid
+  reply stays inside the package: it is not in the exception (which is raised with no cause), not in a log
+  line and not in the exception chain. The prompt texts of this step live in `llm/prompts.py`.
+- **Transport rules** (`RetryingTransport`, constants in `llm/constants.py`):
+  - Network errors, 429 and 5xx are retried up to 3 times with exponential backoff, base 1 s, cap
+    30 s, jitter lowering each delay by up to half (`delay = ceiling * (1 - 0.5 * jitter)`).
+  - `Retry-After` (seconds or an HTTP date) replaces the backoff on a retried status. If it asks for
+    more than the 30 s cap the call fails at once (`LLMRateLimitError` for 429, `LLMUnavailableError`
+    for 5xx). An unreadable value falls back to the backoff.
+  - Other 4xx are never retried: 401 and 403 give `LLMAuthError`, the rest `LLMRequestError` (402,
+    "insufficient balance", is one of them). Any other non-2xx status is `LLMInvalidResponseError`.
+  - Every attempt runs under a hard deadline of 60 s enforced with `asyncio.timeout`, because a
+    provider can hold a connection open without answering. A missed deadline counts as a network
+    error. The http client also has connect, read, write and pool timeouts.
+  - The sleep, the jitter source and the clock are constructor parameters, so tests never wait.
+  - No `httpx` exception leaves the package: they are caught and re-raised as domain errors with
+    `from None`. Exceptions and logs carry the status code or the exception class only, never a
+    response body, a message text or the key.
+- **Per-step settings** (all optional; the table is under [Configuration](#configuration)):
+  `LLM_REPLY_MODEL` and `LLM_SUMMARY_MODEL` fall back to `DEEPSEEK_MODEL`; temperatures default to 1.0
+  (reply) and 0.2 (summary); max tokens to 400 and 1500. Invalid values give the usual readable
+  `ConfigError` without echoing them.
+- **Logging.** Logger `cyrano.llm.deepseek`: one INFO line per HTTP call with `step`, `model`,
+  `input_tokens`, `output_tokens`, `cache_hit_tokens` (only if the provider sent it), `duration_ms` and
+  `retries`; WARNING `llm json reply rejected` with `step`, `attempt`, `max_attempts`, `reason`,
+  `truncated` and `problem_count`. Logger `cyrano.llm.transport`: WARNING `llm request will be
+  retried` with the retry number, the status or the exception class and the delay. Prompts, replies,
+  response bodies and the key are never logged at any level; a test captures all log output and
+  asserts it (S9).
+- **`llm-check`.** `python -m cyrano llm-check` (`make llm-check`) builds the `reply` client from
+  `Settings`, sends the system message "reply with the single word OK" and the user message "ping"
+  with `max_tokens=5`, and prints one line: `llm-check ok: model=... input_tokens=... output_tokens=...
+  [cache_hit_tokens=...] latency_ms=...`. It never prints the reply. On an `LLMError` it prints
+  `llm-check failed: <class>: <message>` to stderr and exits 1; an invalid configuration still exits 2.
+  The request lives in `services/llm_check.py` (`check_llm`), the printing and exit codes in `main.py`.
+- **Not verified against the live API.** No key was available. The request and response shapes follow
+  the DeepSeek documentation read at the time of CYR-13; see [decisions.md](decisions.md) for exactly
+  what was and was not confirmed.
+
 ## Persistence
 
 - **Tables**: `contacts`, `messages`, `modes`; native enums `contact_status` and
@@ -347,7 +433,12 @@ the raw input. `load_settings(env_file=None)` ignores any `.env`.
 | `LOG_LEVEL` | no | `INFO` | case-insensitive |
 | `TIMEZONE` | no | `Europe/Moscow` | validated as an IANA name |
 | `MEDIA_DIR` | no | `media` | path |
-| `DEEPSEEK_MODEL` | no | `deepseek-chat` | |
+| `DEEPSEEK_MODEL` | no | `deepseek-chat` | model of every step that has no model of its own; must not be blank |
+| `DEEPSEEK_BASE_URL` | no | `https://api.deepseek.com` | `http://` or `https://` URL; not in the startup log line |
+| `DEEPSEEK_THINKING` | no | `false` | `true` sends `thinking: {"type": "enabled"}`; by default thinking is sent as disabled |
+| `LLM_REPLY_MODEL`, `LLM_SUMMARY_MODEL` | no | `DEEPSEEK_MODEL` | model of the reply and of the summary step; must not be blank |
+| `LLM_REPLY_TEMPERATURE`, `LLM_SUMMARY_TEMPERATURE` | no | `1.0`, `0.2` | 0 to 2 |
+| `LLM_REPLY_MAX_TOKENS`, `LLM_SUMMARY_MAX_TOKENS` | no | `400`, `1500` | positive integers |
 | `TELETHON_LOG_LEVEL` | no | `WARNING` | |
 | `AIOGRAM_LOG_LEVEL` | no | `WARNING` | |
 | `HTTPX_LOG_LEVEL` | no | `WARNING` | also applied to `httpcore` |
@@ -384,14 +475,15 @@ the raw input. `load_settings(env_file=None)` ignores any `.env`.
 - The userbot loggers are `cyrano.userbot`, `cyrano.userbot.handler` and
   `cyrano.userbot.leomatch_source`, intake is `cyrano.services.intake`, events
   `cyrano.services.contact_events`, the collector `cyrano.services.profile_collector`, the announcer
-  `cyrano.services.card_announcer` and the control bot `cyrano.bot` with its submodules.
+  `cyrano.services.card_announcer`, the control bot `cyrano.bot` with its submodules and the LLM
+  client `cyrano.llm.deepseek` and `cyrano.llm.transport`.
 - Library loggers (`telethon`, `aiogram`, `httpx`, `httpcore`) have their own levels
   (`*_LOG_LEVEL`, default `WARNING`), independent of `LOG_LEVEL`. `httpcore` follows
   `HTTPX_LOG_LEVEL` because it is httpx's transport.
 - A `SecretStr` passed in `extra=` is masked as a second line of defence.
 - **Startup line**: the app and the worker log `Settings.safe_summary()`, which returns only the
   settings listed in `LOGGED_SETTINGS` (log levels, timezone, media dir, model name, heartbeat
-  path). No secret, no `OWNER_TELEGRAM_ID`, no `TELEGRAM_API_ID`, no session path. A new setting is
+  path, the LLM models, temperatures and max tokens, the thinking flag; not the base URL). No secret, no `OWNER_TELEGRAM_ID`, no `TELEGRAM_API_ID`, no session path. A new setting is
   withheld until it is added to that list.
 - The worker passes the same config dict to `arq --custom-log-dict`, so Arq never installs its own
   plain formatter. `startup` calls `configure_logging` again, which is idempotent, so JSON logging
@@ -468,8 +560,16 @@ the raw input. `load_settings(env_file=None)` ignores any `.env`.
   numbered card photo downloads with failures that never shrink the stored list, the legacy profile
   shape, the fallback name, and the media group of the control bot. The unreadable-file test fakes
   the access check and the open error instead of `chmod`, so it behaves the same as root.
-- Planned: scripted fakes for the LLM (CYR-13); `respx` for the HTTP client
-  (CYR-13). Failure cases to cover for new behaviour:
+  CYR-13 added: the LLM client against `httpx.MockTransport` (no network, no `respx`): the request
+  body, the reply and its usage, the empty and truncated replies, `complete_json` (bare and fenced
+  JSON, the schema message position, the correction turn, an empty reply, exhausted attempts with
+  the raw reply absent from errors and logs), the transport (retry then success per error kind,
+  exhaustion, `Retry-After` in seconds and as a date, beyond the cap, no retry on 4xx, a hanging
+  attempt against the deadline, no httpx exception leaking, the backoff values through a fake
+  sleep), the per-step settings and their validation, the logs, `llm-check` with a fake client and
+  with a mocked transport, and the import direction for httpx and the provider. `FakeLLMClient` in
+  `tests/services/fakes.py` is the scripted fake for the consumers (CYR-16, CYR-17, CYR-25).
+- Failure cases to cover for new behaviour:
   empty input, malformed Telegram event, invalid LLM JSON, status changed between scheduling and
   sending, FloodWait.
 

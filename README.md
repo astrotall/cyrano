@@ -37,8 +37,8 @@ Key principles:
   Message text, names and other personal data are never logged at INFO or above.
 
 > The project skeleton (CYR-8), the storage layer (CYR-9), the userbot intake (CYR-10), the
-> profile collection (CYR-11) and the control bot with the contact card (CYR-12) exist. The flow
-> below is the plan.
+> profile collection (CYR-11), the control bot with the contact card (CYR-12) and the LLM client
+> (CYR-13, not used by the app yet) exist. The flow below is the plan.
 
 ## Architecture diagram
 
@@ -86,9 +86,10 @@ messages, registers unknown senders as contacts with status `new`, stores their 
 publishes an in-memory event for each new contact; a collector then reads their profile for the
 owner's card (see [What is collected](#what-is-collected-about-a-new-contact)). It never sends
 anything. The control bot then shows the owner a card for every new contact with a Reply button per
-mode and an Ignore button (see [The control bot](#the-control-bot-and-the-card)). The LLM package
-is empty; `services` holds the repository interfaces, the intake, the event queue, the collector
-and the card logic.
+mode and an Ignore button (see [The control bot](#the-control-bot-and-the-card)). The `llm`
+package holds the DeepSeek client, which nothing in the app calls yet; `services` holds the
+repository interfaces, the LLM interface, the intake, the event queue, the collector and the card
+logic.
 Details: [.claude/docs/contact-lifecycle.md](.claude/docs/contact-lifecycle.md).
 
 ### What the userbot does and does not do
@@ -202,11 +203,11 @@ import aiogram; full rules in
 | Userbot | Telethon | now (listens and registers contacts; sends nothing) |
 | Control bot | aiogram 3 | now (owner-only, contact card with Reply and Ignore) |
 | ORM and migrations | SQLAlchemy 2.x (async), asyncpg, Alembic | now (schema and repositories, used by the intake) |
-| LLM client | DeepSeek over plain httpx, no SDK | planned, CYR-13 |
+| LLM client | DeepSeek over plain httpx, no SDK | now (client, retries, `make llm-check`; not wired into the app yet) |
 | Lint, format | Ruff | now |
 | Types | mypy strict with the Pydantic plugin | now |
 | Tests | pytest, pytest-asyncio | now |
-| HTTP mocks in tests | respx | planned, with CYR-13 |
+| HTTP mocks in tests | `httpx.MockTransport` (no respx) | now |
 | Containers | Docker, Docker Compose | now |
 | CI | GitHub Actions, Dependabot | now |
 
@@ -222,7 +223,7 @@ What exists now:
 ├── pyproject.toml                # dependencies, Ruff, mypy, pytest config
 ├── uv.lock
 ├── .python-version               # 3.14
-├── Makefile                      # install, check, test, fmt, up, down, logs, migrate, revision, db-up, login, login-docker
+├── Makefile                      # install, check, test, fmt, up, down, logs, migrate, revision, db-up, login, login-docker, llm-check
 ├── Dockerfile                    # multi-stage, non-root runtime
 ├── docker-compose.yml            # app, worker, one-shot migrate, postgres, redis
 ├── docker-compose.override.yml   # dev: Postgres and Redis on 127.0.0.1, media in ./data/media
@@ -242,18 +243,20 @@ What exists now:
 │   ├── dependabot.yml            # weekly: Actions, Docker, Compose, uv
 │   └── workflows/ci.yml
 ├── src/cyrano/
-│   ├── __main__.py               # python -m cyrano [login]
-│   ├── main.py                   # app entrypoint, login subcommand, signals, heartbeat
+│   ├── __main__.py               # python -m cyrano [login | llm-check]
+│   ├── main.py                   # app entrypoint, login and llm-check subcommands, signals, heartbeat
 │   ├── config.py                 # Settings, load_settings, ConfigError
 │   ├── logging.py                # JSON-lines logging
 │   ├── health.py                 # heartbeat file and the app healthcheck
 │   ├── userbot/                  # Telethon: protocols, filters, handler, client, login, runner, profile and Leomatch readers
 │   ├── bot/                      # aiogram: owner-only middleware, handlers, card rendering, card sender, polling
-│   ├── llm/                      # empty skeleton
+│   ├── llm/                      # DeepSeek client, retrying transport, factory (the only package that imports httpx)
 │   ├── domain/                   # enums, status transition rules, errors, Pydantic models
 │   ├── db/                       # SQLAlchemy models, engine and sessions, repositories
 │   ├── services/
 │   │   ├── repositories.py       # repository Protocols
+│   │   ├── llm_client.py         # LLMClient Protocol
+│   │   ├── llm_check.py          # the request behind llm-check
 │   │   ├── intake.py             # IntakeService: register contact and message
 │   │   ├── sanitize.py           # NUL-byte removal, text cleaning
 │   │   ├── contact_events.py     # generic ContactEventPublisher, bounded in-memory queue
@@ -435,6 +438,29 @@ The app connects to Telegram as the userbot and polls the control bot, and conne
 | `make migrate`, `make revision m="..."` | Run Alembic, or autogenerate a revision |
 | `make login` | Log the second account in locally and save the session |
 | `make login-docker` | The same inside the compose image and volume |
+| `make llm-check` | Send one tiny request to DeepSeek with the `reply` settings and print the result (see [Checking the LLM key](#checking-the-llm-key)) |
+
+### Checking the LLM key
+
+The LLM provider is DeepSeek and the key comes from `DEEPSEEK_API_KEY`. Nothing in the app calls it
+yet; to check the key, the model name and the network once, run
+
+```sh
+make llm-check   # uv run python -m cyrano llm-check
+```
+
+It sends a tiny request (system: reply with the single word OK; user: ping) with the `reply`
+settings and prints one line, never the reply text:
+
+```
+llm-check ok: model=deepseek-chat input_tokens=14 output_tokens=2 latency_ms=620
+```
+
+`cache_hit_tokens=...` is added when the provider reports it. On any LLM error it prints
+`llm-check failed: <error class>: <message>` to stderr and exits with code 1, for example a
+rejected key (`LLMAuthError`, HTTP 401) or an unreachable provider (`LLMUnavailableError`). A request
+makes up to 3 retries with a backoff of at most 30 s and an attempt limit of 60 s, so a provider that
+never answers can take about four minutes to fail.
 
 ### Migrations
 
@@ -465,7 +491,12 @@ the default applies.
 | `BOT_TOKEN` | yes | | Control bot token from @BotFather |
 | `OWNER_TELEGRAM_ID` | yes | | Telegram id of the main account; the only user the control bot will answer, and the only chat it writes to |
 | `DEEPSEEK_API_KEY` | yes | | DeepSeek API key |
-| `DEEPSEEK_MODEL` | no | `deepseek-chat` | DeepSeek model name |
+| `DEEPSEEK_MODEL` | no | `deepseek-chat` | DeepSeek model name; the model of every LLM step that has none of its own. Must not be blank |
+| `DEEPSEEK_BASE_URL` | no | `https://api.deepseek.com` | Base URL of the DeepSeek API; must start with `http://` or `https://` |
+| `DEEPSEEK_THINKING` | no | `false` | `true` lets the model reason before it answers; by default thinking is switched off, so a chat reply spends no tokens on reasoning and the temperature applies |
+| `LLM_REPLY_MODEL`, `LLM_SUMMARY_MODEL` | no | `DEEPSEEK_MODEL` | Model for reply generation and for summary extraction; must not be blank |
+| `LLM_REPLY_TEMPERATURE`, `LLM_SUMMARY_TEMPERATURE` | no | `1.0`, `0.2` | Default sampling temperature of each step, from 0 to 2 |
+| `LLM_REPLY_MAX_TOKENS`, `LLM_SUMMARY_MAX_TOKENS` | no | `400`, `1500` | Default limit on the length of each step's reply, a positive integer |
 | `DATABASE_URL` | yes | | PostgreSQL URL, must start with `postgresql+asyncpg://` |
 | `REDIS_URL` | yes | | Redis URL, must start with `redis://` or `rediss://` |
 | `MEDIA_DIR` | no | `media` | Where downloaded media goes: today the profile photos in `profiles/<internal contact id>.jpg` and the Leomatch card photos in `profiles/<internal contact id>-card.jpg` |
@@ -502,7 +533,7 @@ startup logic, the login flow, the intake on real PostgreSQL, the profile collec
 check, matching-bot lookup, collector, `update_identity` on real PostgreSQL) and the check that the
 userbot never sends, and for the control bot: owner-only access, the card rendering, the card sender,
 the handlers driven through the real dispatcher, the announcer and the Reply and Ignore actions on
-real PostgreSQL. Telegram is always faked: no test connects to it. All tests use fake values only.
+real PostgreSQL, and for the LLM client: the request and reply shapes, JSON validation with retries, the retry and deadline rules, the per-step settings and the logs, all against `httpx.MockTransport`. Telegram and DeepSeek are always faked: no test connects to either. All tests use fake values only.
 
 Database tests run against real PostgreSQL, never SQLite, because JSONB and native enums must be
 tested for real. `TEST_DATABASE_URL` (from the environment or `.env`; the template value targets

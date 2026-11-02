@@ -47,3 +47,29 @@ class ModeAlreadyExists(DomainError):
 class DefaultModeUnavailable(DomainError):
     def __init__(self) -> None:
         super().__init__("the default mode is missing or disabled")
+
+
+class LLMError(DomainError):
+    def __init__(self, message: str, *, status_code: int | None = None) -> None:
+        super().__init__(message)
+        self.status_code = status_code
+
+
+class LLMAuthError(LLMError):
+    pass
+
+
+class LLMRequestError(LLMError):
+    pass
+
+
+class LLMRateLimitError(LLMError):
+    pass
+
+
+class LLMUnavailableError(LLMError):
+    pass
+
+
+class LLMInvalidResponseError(LLMError):
+    pass

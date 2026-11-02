@@ -1,4 +1,4 @@
-.PHONY: install check test fmt up down logs migrate revision db-up login login-docker
+.PHONY: install check test fmt up down logs migrate revision db-up login login-docker llm-check
 
 install:
 	uv sync --locked
@@ -41,3 +41,6 @@ login:
 
 login-docker:
 	docker compose run --rm app python -m cyrano login
+
+llm-check:
+	uv run python -m cyrano llm-check

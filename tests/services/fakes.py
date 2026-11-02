@@ -6,9 +6,11 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 
 from cyrano.domain.models import LeomatchSourceText, TelegramProfile
+from cyrano.services.profile_source import CardPhoto, LeomatchLookup
 
 FAKE_PHOTO = b"fake-jpeg-bytes"
 FAKE_BIO = "fake bio text"
+FAKE_CARD_PHOTO = b"fake-card-jpeg-bytes"
 
 
 def fake_telegram_profile(**overrides: str | None) -> TelegramProfile:
@@ -77,22 +79,49 @@ class FakeProfileSource:
             return True
 
 
+class FakeCardPhoto:
+    def __init__(
+        self,
+        content: bytes | None = FAKE_CARD_PHOTO,
+        *,
+        error: Exception | None = None,
+        delay: float = 0.0,
+    ) -> None:
+        self.destinations: list[Path] = []
+        self._content = content
+        self._error = error
+        self._delay = delay
+
+    async def download(self, destination: Path) -> bool:
+        self.destinations.append(destination)
+        await asyncio.sleep(self._delay)
+        if self._error is not None:
+            await asyncio.to_thread(destination.write_bytes, b"partial")
+            raise self._error
+        if self._content is None:
+            return False
+        await asyncio.to_thread(destination.write_bytes, self._content)
+        return True
+
+
 class FakeLeomatchSource:
     def __init__(
         self,
         texts: list[LeomatchSourceText] | None = None,
         *,
+        card_photo: CardPhoto | None = None,
         error: Exception | None = None,
         delay: float = 0.0,
     ) -> None:
         self.texts = texts if texts is not None else []
+        self.card_photo = card_photo
         self.queries: list[tuple[int, str | None]] = []
         self._error = error
         self._delay = delay
 
-    async def find_texts(self, tg_id: int, username: str | None) -> list[LeomatchSourceText]:
+    async def find_texts(self, tg_id: int, username: str | None) -> LeomatchLookup:
         self.queries.append((tg_id, username))
         await asyncio.sleep(self._delay)
         if self._error is not None:
             raise self._error
-        return self.texts
+        return LeomatchLookup(self.texts, self.card_photo)

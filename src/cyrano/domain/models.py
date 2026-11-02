@@ -138,6 +138,7 @@ class LeomatchProfile(_Input):
     age: int | None = Field(default=None, ge=MIN_LEOMATCH_AGE, le=MAX_LEOMATCH_AGE)
     city: str | None = Field(default=None, max_length=MAX_LEOMATCH_CITY_LENGTH)
     about: str | None = Field(default=None, max_length=MAX_LEOMATCH_TEXT_LENGTH)
+    photo: str | None = Field(default=None, max_length=MAX_PHOTO_PATH_LENGTH)
 
 
 class ContactProfile(_Input):

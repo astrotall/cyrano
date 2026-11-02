@@ -3,13 +3,14 @@
 from __future__ import annotations
 
 import logging
+from pathlib import Path
 
 from telethon.errors import UsernameInvalidError, UsernameNotOccupiedError
 from telethon.tl.types import MessageEntityMentionName, MessageEntityTextUrl, MessageEntityUrl
 
 from cyrano.domain.enums import LeomatchTextKind
 from cyrano.domain.models import LeomatchSourceText
-from cyrano.services.profile_source import ProfileSourceError
+from cyrano.services.profile_source import CardPhoto, LeomatchLookup, ProfileSourceError
 from cyrano.userbot.leomatch_match import (
     ChatMessage,
     looks_like_match_message,
@@ -56,25 +57,41 @@ def to_chat_message(message: HistoryMessage) -> ChatMessage:
     )
 
 
+class TelethonCardPhoto:
+    def __init__(self, client: UserbotClient, message: HistoryMessage) -> None:
+        self._client = client
+        self._message = message
+
+    async def download(self, destination: Path) -> bool:
+        try:
+            saved = await self._client.download_media(self._message, file=str(destination))
+        except TELETHON_FAILURES as exc:
+            raise ProfileSourceError(type(exc).__name__) from None
+        return bool(saved)
+
+
 class TelethonLeomatchSource:
     def __init__(self, client: UserbotClient, bot_username: str) -> None:
         self._client = client
         self._bot_username = bot_username
         self._chat: SenderLike | None = None
 
-    async def find_texts(self, tg_id: int, username: str | None) -> list[LeomatchSourceText]:
+    async def find_texts(self, tg_id: int, username: str | None) -> LeomatchLookup:
         try:
             chat = await self._resolve_chat()
             if chat is None:
-                return []
+                return LeomatchLookup()
             match = await self._find_match(chat, tg_id, normalize_username(username))
             if match is None:
-                return []
+                return LeomatchLookup()
             texts = [LeomatchSourceText(kind=LeomatchTextKind.MATCH, text=match.text)]
             card = await self._find_card(chat, match)
-            if card is not None:
-                texts.append(LeomatchSourceText(kind=LeomatchTextKind.CARD, text=card.text))
-            return texts
+            if card is None:
+                return LeomatchLookup(texts)
+            texts.append(
+                LeomatchSourceText(kind=LeomatchTextKind.CARD, text=to_chat_message(card).text)
+            )
+            return LeomatchLookup(texts, self._card_photo_of(card))
         except TELETHON_FAILURES as exc:
             raise ProfileSourceError(type(exc).__name__) from None
 
@@ -114,12 +131,15 @@ class TelethonLeomatchSource:
                 return message
         return None
 
-    async def _find_card(self, chat: SenderLike, match: ChatMessage) -> ChatMessage | None:
+    def _card_photo_of(self, card: HistoryMessage) -> CardPhoto | None:
+        return None if card.photo is None else TelethonCardPhoto(self._client, card)
+
+    async def _find_card(self, chat: SenderLike, match: ChatMessage) -> HistoryMessage | None:
         async for raw in self._client.iter_messages(
             chat, CARD_WALK_BACK_POSITIONS, offset_id=match.id
         ):
             message = to_chat_message(raw)
             if message.out or not message.text.strip():
                 continue
-            return None if looks_like_match_message(message) else message
+            return None if looks_like_match_message(message) else raw
         return None

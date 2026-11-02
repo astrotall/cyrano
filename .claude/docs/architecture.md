@@ -118,8 +118,8 @@ Two Python processes, two stores, one external API each for Telegram and the LLM
 ### Profile collection (CYR-11)
 
 People arrive from a matching bot. The owner's chat with that bot (Leomatch) holds the person's
-card and the match message; the collector reads them together with nick, name, bio and photo for
-the owner's card. The system never sends anything to the matching bot. The steps, the stored
+card (with its photo) and the match message; the collector reads them together with nick, name,
+bio and photo for the owner's card. The system never sends anything to the matching bot. The steps, the stored
 structure and the semantics of `collected_at` are in
 [contact-lifecycle.md](contact-lifecycle.md#profile-collection-cyr-11).
 
@@ -130,7 +130,7 @@ module calls `send_*`, `mark_read`, `send_read_acknowledge` or any other write m
 
 | Module | Role |
 | --- | --- |
-| `protocols.py` | The small surface of Telethon that the code uses, as Protocols: `SenderLike`, `IncomingEvent`, `UserbotClient`, `LoginClient`. `UserbotClient` has `connect`, `disconnect`, `is_user_authorized`, `catch_up`, `add_event_handler`, `remove_event_handler`, `disconnected` and, since CYR-11, only the read members `get_entity`, `download_profile_photo`, `iter_messages` and `__call__` (typed to accept only the full-user request); no write method; a test enforces that list |
+| `protocols.py` | The small surface of Telethon that the code uses, as Protocols: `SenderLike`, `IncomingEvent`, `UserbotClient`, `LoginClient`. `UserbotClient` has `connect`, `disconnect`, `is_user_authorized`, `catch_up`, `add_event_handler`, `remove_event_handler`, `disconnected` and, since CYR-11, only the read members `get_entity`, `download_profile_photo`, `download_media`, `iter_messages` and `__call__` (typed to accept only the full-user request); no write method; a test enforces that list |
 | `filters.py` | Pure functions: `event_rejection(event)` and `sender_rejection(sender)` return a `Rejection` or `None` |
 | `handler.py` | `IncomingHandler`: registers one `events.NewMessage(incoming=True)` handler, converts an event into `IncomingMessage`, calls the intake, catches and counts failures |
 | `client.py` | Builds the `TelegramClient` from `Settings`, session file naming and mode, `connect_authorized` with the timeout, `disconnect_client` |
@@ -138,7 +138,7 @@ module calls `send_*`, `mark_read`, `send_read_acknowledge` or any other write m
 | `login.py` | The interactive login flow with injected prompts |
 | `errors.py` | `UserbotError` and subclasses; their messages are meant to be read by the owner |
 | `profile_source.py` | `TelethonProfileSource`, the `ProfileSource` adapter: the user from the session cache (`get_entity`), the bio from `GetFullUserRequest`, the big current profile photo. Every Telethon failure becomes `ProfileSourceError` carrying the class name; it never sleeps on a flood wait |
-| `leomatch_source.py` | `TelethonLeomatchSource`, the `LeomatchSource` adapter: resolves the chat with `LEOMATCH_BOT_USERNAME` (an unresolvable chat gives an empty list and a DEBUG line), searches, scans, walks back for the card; `to_chat_message` turns Telethon messages and entities into the plain `ChatMessage` |
+| `leomatch_source.py` | `TelethonLeomatchSource`, the `LeomatchSource` adapter: resolves the chat with `LEOMATCH_BOT_USERNAME` (an unresolvable chat gives an empty lookup and a DEBUG line), searches, scans, walks back for the card and hands out access to the card photo (`TelethonCardPhoto`, a read-only `download_media` of the card message); `to_chat_message` turns Telethon messages and entities into the plain `ChatMessage` |
 | `leomatch_match.py` | Pure: `ChatMessage`, `match_evidence` (the strict match check), `looks_like_match_message`, `normalize_username` |
 
 - **Why Protocols.** Telethon ships no type information. The Protocols keep mypy strict on our code
@@ -222,18 +222,22 @@ ready, media_dir)`. It depends on the `ContactRepository` Protocol, on the two s
 
 - **Protocols.** `ProfileSource.fetch_profile(tg_id)` returns a `TelegramProfile` (username,
   display name, bio); `ProfileSource.download_photo(tg_id, destination)` returns whether a photo was
-  saved; `LeomatchSource.find_texts(tg_id, username)` returns a list of `LeomatchSourceText` labelled
-  `match` or `card` (empty when nothing is found). Every adapter failure (flood wait, privacy
+  saved; `LeomatchSource.find_texts(tg_id, username)` returns a `LeomatchLookup`: `texts`, a list of
+  `LeomatchSourceText` labelled `match` or `card` (empty when nothing is found), and `card_photo`, a
+  `CardPhoto` with one method `download(destination)` when the card message has a photo, otherwise
+  `None`. Every adapter failure (flood wait, privacy
   restriction, not found, timeout) is one `ProfileSourceError`.
 - **Parser.** `services/leomatch.py`: `parse_leomatch_text` never raises and fills name, age, city
-  and about only for the assumed card format; `build_leomatch_profile` assembles the stored
+  and about only for the observed card format (a header paragraph ending with a colon is skipped;
+  the description is optional); `build_leomatch_profile` assembles the stored
   `LeomatchProfile` from the labelled texts. Linear time: it splits strings and uses one simple
   pattern, no nested quantifiers.
 - **Process.** Started by `main.run` after the userbot connected and caught up, cancelled first on
   shutdown, before the client disconnects. A collector that crashes is logged once (class name) and
   does not stop the intake.
-- **Media directory.** `MEDIA_DIR/profiles/<internal contact id>.jpg`, created on demand;
-  `<id>.part.jpg` exists only during a download. The `media` compose volume is mounted into `app`
+- **Media directory.** `MEDIA_DIR/profiles/<internal contact id>.jpg` for the Telegram profile photo and
+  `<internal contact id>-card.jpg` for the Leomatch card photo, created on demand; `<id>.part.jpg`
+  and `<id>-card.part.jpg` exist only during a download. The `media` compose volume is mounted into `app`
   and `worker`.
 - **Logger.** `cyrano.services.profile_collector` (INFO: contact id and which parts produced data;
   WARNING: contact id, part name and error class of a failed part; ERROR: error class and counter
@@ -402,4 +406,4 @@ the raw input. `load_settings(env_file=None)` ignores any `.env`.
 
 Listed in [decisions.md](decisions.md) under "Open questions": how the worker sends through the
 userbot session, worker reconnect to Redis, where the layered prompt builder lives, whether `bot`,
-`userbot` and `worker` may import each other, and the first real Leomatch match (card format, chat order, search).
+`userbot` and `worker` may import each other, and the Leomatch cases not yet observed (a card with a description, the other chain shape, search).

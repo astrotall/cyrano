@@ -68,7 +68,7 @@ services:
       start_period: 5s
 
   redis:
-    image: redis:7.4-alpine
+    image: redis:8.10-alpine
     restart: unless-stopped
     # AOF persistence: Arq's delayed jobs live in Redis and must survive restarts.
     command: ["redis-server", "--appendonly", "yes"]

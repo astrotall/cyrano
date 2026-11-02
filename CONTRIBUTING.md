@@ -154,7 +154,7 @@ Findings outside the task:
 | A status transition or a safety rule | [contact-lifecycle.md](.claude/docs/contact-lifecycle.md) or [safety-rules.md](.claude/docs/safety-rules.md), the code and the test |
 | A layer or an import rule | [architecture.md](.claude/docs/architecture.md) |
 | A decision on an open question | [decisions.md](.claude/docs/decisions.md) |
-| A new setting | The settings model (`src/cyrano/config.py`) and `.env.example` |
+| A new setting | The settings model (`src/cyrano/config.py`), the README Settings section, and `.env.example` when the variable is required |
 | A dependency | `pyproject.toml` and `uv.lock` |
 
 ## Pull requests
@@ -195,6 +195,7 @@ Locally:
 ```sh
 make install   # uv sync --locked
 make check     # ruff check, ruff format --check, mypy
+make db-up     # start Postgres from compose; database tests need it
 make test      # pytest
 make fmt       # auto-fix lint and formatting
 ```
@@ -204,7 +205,7 @@ through uv from `.python-version`:
 
 | Job | Steps |
 | --- | --- |
-| `check` | `make install`, `make check`, `make test` |
-| `docker` | `cp .env.example .env`, `docker compose config --quiet` with and without the override file, `docker compose build` |
+| `check` | a Postgres service container, `make install`, `make check`, `make test` with `TEST_DATABASE_URL` |
+| `docker` | `cp .env.example .env`, `docker compose config --quiet` with and without the override file and for `migrate`, `docker compose build`, `alembic heads` in a throwaway `migrate` container |
 
 Red CI is never merged.

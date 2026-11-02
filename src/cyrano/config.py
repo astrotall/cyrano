@@ -126,7 +126,10 @@ def _format_validation_error(exc: ValidationError) -> str:
     if invalid:
         lines.append("Invalid values:")
         lines.extend(f"  - {name}: {msg}" for name, msg in sorted(invalid))
-    lines.append("See .env.example for the full list of variables.")
+    lines.append(
+        "The variables are described in the Settings section of README.md; "
+        ".env.example is the template to copy to .env."
+    )
     return "\n".join(lines)
 
 

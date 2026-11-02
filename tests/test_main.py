@@ -11,7 +11,7 @@ from pathlib import Path
 
 import pytest
 
-from cyrano.config import load_settings
+from cyrano.config import Settings, load_settings
 from cyrano.logging import configure_logging
 from cyrano.main import run
 from tests.conftest import (
@@ -112,6 +112,38 @@ def _mtime_ns(path: Path) -> int:
 
 def _exists(path: Path) -> bool:
     return path.exists()
+
+
+class _EngineSpy:
+    def __init__(self) -> None:
+        self.disposed = False
+
+    async def dispose(self) -> None:
+        self.disposed = True
+
+
+async def test_run_builds_the_engine_and_disposes_it_on_stop(
+    full_env: dict[str, str], heartbeat_file: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    settings = load_settings(env_file=None)
+    engine = _EngineSpy()
+    built_from: list[Settings] = []
+
+    def build(from_settings: Settings) -> _EngineSpy:
+        built_from.append(from_settings)
+        return engine
+
+    monkeypatch.setattr("cyrano.main.build_engine", build)
+    stop = asyncio.Event()
+
+    task = asyncio.create_task(run(settings, stop))
+    await asyncio.sleep(0.05)
+    assert built_from == [settings]
+    assert engine.disposed is False
+    stop.set()
+    await asyncio.wait_for(task, timeout=2)
+
+    assert engine.disposed is True
 
 
 async def test_run_keeps_touching_heartbeat_and_removes_it_on_stop(

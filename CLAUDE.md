@@ -21,7 +21,8 @@ owner, and pacing and limits are enforced centrally.
 Contact statuses: `new -> pending -> active -> paused / ignored`. Meaning and transitions:
 [contact-lifecycle.md](.claude/docs/contact-lifecycle.md).
 
-Only the skeleton exists (CYR-8). Everything else is planned and marked with its ticket key.
+The skeleton (CYR-8) and the storage layer (CYR-9) exist. Everything else is planned and marked
+with its ticket key.
 Never describe planned behaviour as existing.
 
 ## Locked architectural decisions
@@ -29,18 +30,18 @@ Never describe planned behaviour as existing.
 Changing any of these is a large change (see Workflow expectations). Reasons:
 [decisions.md](.claude/docs/decisions.md).
 
-| Decision | Choice | Consequence |
-| --- | --- | --- |
-| Users | One owner; the control bot answers only `OWNER_TELEGRAM_ID` | No multi-user code, no roles; the control bot gives nobody else an answer (planned, CYR-12) |
-| Likes | The owner likes in the matching bot by hand | No automation of the matching bot, ever |
-| Automatic replies | Only to contacts in status `active`; checked at scheduling time and again right before sending | A status change between the two checks cancels the reply |
-| One way out | Every outgoing message goes through the sender | No other code path sends; the status guard lives in the sender |
+| Decision | Choice                                                                                                                                                                                         | Consequence |
+| --- |------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------| --- |
+| Users | One owner; the control bot answers only `OWNER_TELEGRAM_ID`                                                                                                                                    | No multi-user code, no roles; the control bot gives nobody else an answer (planned, CYR-12) |
+| Likes | The owner likes in the matching bot by hand                                                                                                                                                    | No automation of the matching bot, ever |
+| Automatic replies | Only to contacts in status `active`; checked at scheduling time and again right before sending                                                                                                 | A status change between the two checks cancels the reply |
+| One way out | Every outgoing message goes through the sender                                                                                                                                                 | No other code path sends; the status guard lives in the sender |
 | Hand-over | Meeting or date proposals, phone and contact exchange, money, photo requests, a direct question whether it is a bot or AI, and low model confidence stop the conversation and notify the owner | The assistant never answers those itself |
-| Style | Persona text plus few-shot examples from the owner's real chats; no model training. Modes are a prompt fragment plus examples; the persona is common | Style changes are text and data changes, not code or training |
-| LLM | One interface, DeepSeek first (plain httpx, no SDK), provider replaceable by config | No provider SDK; the rest of the code sees only the interface |
-| Infra | PostgreSQL, async SQLAlchemy 2.0, Alembic, Redis, Arq, Docker Compose, Python 3.14, uv | Everything async; schema changes go through Alembic |
-| Data | Real personal data (persona, examples, sessions, media, messages) never goes to git; fixtures use fake data only | `.env`, sessions, `media/` and `data/` stay git-ignored |
-| Logs | Message text, names and other personal data are never logged at INFO or above | Logs carry internal ids, counts and statuses, not content; the startup line carries an allowlist of non-personal settings, never secrets or Telegram ids |
+| Style | Persona text plus few-shot examples from the owner's real chats; no model training. Modes are a prompt fragment plus examples; the persona is common                                           | Style changes are text and data changes, not code or training |
+| LLM | One interface, DeepSeek first (plain httpx, no SDK), provider replaceable by config                                                                                                            | No provider SDK; the rest of the code sees only the interface |
+| Infra | PostgreSQL, async SQLAlchemy 2.x, Alembic, Redis, Arq, Docker Compose, Python 3.14, uv                                                                                                         | Everything async; schema changes go through Alembic |
+| Data | Real personal data (persona, examples, sessions, media, messages) never goes to git; fixtures use fake data only                                                                               | `.env`, sessions, `media/` and `data/` stay git-ignored |
+| Logs | Message text, names and other personal data are never logged at INFO or above                                                                                                                  | Logs carry internal ids, counts and statuses, not content; the startup line carries an allowlist of non-personal settings, never secrets or Telegram ids |
 
 ## Stack
 
@@ -49,12 +50,12 @@ Changing any of these is a large change (see Workflow expectations). Reasons:
 | Python 3.14, uv | in the project |
 | pydantic-settings (Pydantic v2), tzdata | in the project |
 | Arq, Redis 7.4 | in the project (skeleton worker, placeholder job) |
-| PostgreSQL 16.15 | in compose; nothing uses it yet |
+| PostgreSQL 16.15 | in the project (compose, migrations, tests) |
+| SQLAlchemy 2.x async, asyncpg, Alembic | in the project (schema, repositories; nothing calls them yet) |
 | Ruff, mypy strict, pytest, pytest-asyncio | in the project |
 | Docker, Docker Compose, GitHub Actions, Dependabot | in the project |
 | Telethon | planned, CYR-10 |
 | aiogram | planned, CYR-12 |
-| SQLAlchemy 2.0 async, asyncpg, Alembic | planned, CYR-9 |
 | DeepSeek client over plain httpx | planned, CYR-13 |
 | respx | planned, with CYR-13 |
 
@@ -67,6 +68,8 @@ Changing any of these is a large change (see Workflow expectations). Reasons:
 ├── Makefile
 ├── Dockerfile, docker-compose.yml, docker-compose.override.yml
 ├── .env.example, .dockerignore, .gitignore
+├── alembic.ini
+├── migrations/                   async env.py, versions/
 ├── .claude/docs/                 architecture, contact-lifecycle, safety-rules, decisions
 ├── .github/                      dependabot.yml, workflows/ci.yml
 ├── src/cyrano/
@@ -74,13 +77,18 @@ Changing any of these is a large change (see Workflow expectations). Reasons:
 │   ├── config.py                 Settings, load_settings, ConfigError
 │   ├── logging.py                JSON-lines logging
 │   ├── health.py                 heartbeat file and the app healthcheck
-│   ├── userbot/ bot/ llm/ db/ services/    empty skeleton packages
+│   ├── domain/                   enums, status transition rules, errors, Pydantic models
+│   ├── db/                       SQLAlchemy models, engine and sessions, repositories
+│   ├── services/repositories.py  repository Protocols; the rest of services is planned
+│   ├── userbot/ bot/ llm/        empty skeleton packages
 │   └── worker/settings.py        Arq WorkerSettings, placeholder job
 └── tests/                        mirrors src/cyrano
 ```
 
-CYR-8 added all of the above except the documentation: package skeleton, typed configuration,
-JSON logging, app process with heartbeat, Arq worker skeleton, Docker Compose, CI and Dependabot.
+CYR-8 added the package skeleton, typed configuration, JSON logging, app process with heartbeat,
+Arq worker skeleton, Docker Compose, CI and Dependabot. CYR-9 added `domain/`, the content of
+`db/`, `services/repositories.py`, `alembic.ini`, `migrations/`, the one-shot `migrate` compose
+service and the database tests.
 
 ## Detailed guides
 

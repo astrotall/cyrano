@@ -9,6 +9,7 @@ import signal
 import sys
 
 from cyrano.config import ConfigError, Settings, load_settings
+from cyrano.db.session import build_engine
 from cyrano.health import HEARTBEAT_INTERVAL, heartbeat_loop
 from cyrano.logging import configure_logging
 
@@ -26,6 +27,7 @@ async def run(
         loop.add_signal_handler(sig, stop.set)
 
     logger.info("cyrano started", extra={"service": "app", **settings.safe_summary()})
+    engine = build_engine(settings)
     heartbeat = asyncio.create_task(heartbeat_loop(settings.heartbeat_path, heartbeat_interval))
     try:
         await stop.wait()
@@ -37,6 +39,7 @@ async def run(
         settings.heartbeat_path.unlink(missing_ok=True)
         for sig in (signal.SIGTERM, signal.SIGINT):
             loop.remove_signal_handler(sig)
+        await engine.dispose()
         logger.info("cyrano stopped", extra={"service": "app"})
 
 

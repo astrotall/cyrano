@@ -1,4 +1,4 @@
-.PHONY: install check test fmt up down logs
+.PHONY: install check test fmt up down logs migrate revision db-up
 
 install:
 	uv sync --locked
@@ -23,3 +23,15 @@ down:
 
 logs:
 	docker compose logs -f
+
+migrate:
+	uv run alembic upgrade head
+
+revision:
+	@test -n "$(m)" || (echo 'usage: make revision m="what changed"' >&2; exit 2)
+	uv run alembic revision --autogenerate -m "$(m)"
+	uv run ruff check --fix --quiet migrations
+	uv run ruff format --quiet migrations
+
+db-up:
+	docker compose -f docker-compose.yml -f docker-compose.override.yml up -d --wait postgres

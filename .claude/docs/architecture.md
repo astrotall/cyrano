@@ -1,6 +1,7 @@
 # Architecture
 
-State as of CYR-8: only the skeleton exists. Anything else is marked **planned** with its ticket.
+State as of CYR-9: the skeleton and the storage layer exist. Anything else is marked **planned**
+with its ticket.
 Product and decisions: [CLAUDE.md](../../CLAUDE.md). Reasons: [decisions.md](decisions.md).
 
 ## Layers
@@ -12,26 +13,31 @@ Source lives in `src/cyrano/`.
 | `userbot/` | Telethon userbot: receives messages on the second account, converts events into plain objects, performs the actual Telegram send | empty skeleton; planned CYR-10, CYR-11 |
 | `bot/` | aiogram control bot: owner-only, contact card, Reply/Ignore buttons, notifications | empty skeleton; planned CYR-12 |
 | `llm/` | LLM client: DeepSeek over plain httpx, response parsing | empty skeleton; planned CYR-13 |
-| `db/` | Engine, sessions, models, repositories | empty skeleton; planned CYR-9 |
-| `services/` | Business logic shared by userbot, bot and worker: contact lifecycle, sender, reply pipeline | empty skeleton; planned from CYR-12 on |
+| `db/` | SQLAlchemy models (`models.py`), engine and session factory (`session.py`), repositories (`repositories.py`) | exists; nothing calls it yet |
+| `services/` | Business logic shared by userbot, bot and worker: contact lifecycle, sender, reply pipeline. `repositories.py` holds the repository Protocols | Protocols exist; the logic is planned from CYR-12 on |
 | `worker/` | Arq worker: `settings.py` holds `WorkerSettings`, `startup`, `shutdown`, a placeholder `noop` job (Arq refuses to start a worker with no registered functions) | skeleton works; real jobs planned CYR-17 |
 | `config.py` | `Settings` (pydantic-settings), `load_settings`, `ConfigError` | exists |
 | `logging.py` | JSON-lines formatter, `build_log_config`, `configure_logging` | exists |
 | `health.py` | Heartbeat file, `is_alive`, `python -m cyrano.health` | exists |
 | `main.py`, `__main__.py` | App entrypoint, signal handling, heartbeat task | exists; userbot and bot are plugged in by later tickets |
-| `domain` | Plain data types shared by layers (statuses, DTOs) | planned, not created |
+| `domain/` | Leaf package, imports only pydantic and the standard library: enums, status transition rules, domain errors, Pydantic models the layers exchange | exists |
 | `prompts` | Prompt texts, few-shot data loading, trigger lists | planned, not created; the layered builder's location is decided in CYR-16 |
 
-`tests/` mirrors the packages (`tests/userbot`, `tests/bot`, `tests/llm`, `tests/db`,
-`tests/services`, `tests/worker`); the skeleton packages have empty test packages.
+`tests/` mirrors the packages (`tests/userbot`, `tests/bot`, `tests/llm`, `tests/domain`,
+`tests/db`, `tests/services`, `tests/worker`); the skeleton packages have empty test packages.
 
 ## Import direction
 
-Planned; enforced by review (and by a test if one is added later).
+Enforced by review. `tests/test_import_direction.py` also checks the part that exists: `domain`
+imports only pydantic, the standard library and itself; `db` imports neither `services` nor `llm`;
+`services` does not import `db`.
 
 1. `bot`, `userbot` and `worker` may import `services`.
 2. `services` reach `llm` and `db` only through interfaces defined in `services`. The concrete
-   `llm` and `db` code satisfies those interfaces without importing `services`.
+   `llm` and `db` code satisfies those interfaces without importing `services`. For `db` this is
+   fact: `services/repositories.py` defines `ContactRepository`, `MessageRepository` and
+   `ModeRepository`, `db/repositories.py` satisfies them structurally, and mypy checks that in
+   `tests/db/test_session.py`.
 3. `llm` and `db` never import `services` or each other.
 4. `config`, `domain` and `prompts` are leaves: they import no application layer. Any layer may
    import them. Today `config` also imports `health` for the default heartbeat path (`health` is
@@ -50,13 +56,14 @@ question in [decisions.md](decisions.md).
 | Telethon events, sessions, converting a Telethon entity into a plain object | `userbot` |
 | aiogram handlers, keyboards, card formatting | `bot` |
 | HTTP calls to the LLM provider and parsing its response | `llm` |
-| SQLAlchemy models, repositories, session handling | `db` |
+| SQLAlchemy models, repository implementations, session handling | `db` |
+| A repository interface | `services/repositories.py` |
 | Arq job functions and worker settings | `worker` |
-| A data type used by several layers | `domain` (planned) |
+| A data type or rule used by several layers | `domain` |
 | Prompt text, few-shot loading, trigger lists | `prompts` (planned) or config |
-| An environment-driven setting | `config.py` and `.env.example`, together |
+| An environment-driven setting | `config.py` and the README Settings section, together; `.env.example` too when the variable is required |
 | Wiring concrete objects together | `main.py` |
-| Alembic migrations | decided in CYR-9 |
+| Alembic migrations | `migrations/versions/` at the repository root |
 
 ## Process model
 
@@ -74,21 +81,27 @@ Two Python processes, two stores, one external API each for Telegram and the LLM
                                                      LLM (DeepSeek)
 ```
 
-- **app**: `python -m cyrano`. Today it loads config, starts JSON logging, touches the heartbeat
-  file and waits for SIGTERM or SIGINT. Planned: the userbot and the control bot run on its event
-  loop (CYR-10, CYR-12). On shutdown it stops the heartbeat and removes the file; planned: stop the
-  userbot and the control bot and close the database and Redis connections there. It has the
+- **app**: `python -m cyrano`. Today it loads config, starts JSON logging, builds the database
+  engine (which opens no connection until something uses it), touches the heartbeat file and waits
+  for SIGTERM or SIGINT. Planned: the userbot and the control bot run on its event loop (CYR-10,
+  CYR-12). On shutdown it stops the heartbeat, removes the file and disposes the engine; planned:
+  stop the userbot and the control bot and close the Redis connections there. It has the
   `userbot_session` volume.
 - **worker**: `arq cyrano.worker.settings.WorkerSettings`. Arq imports `settings.py` itself, so a
   missing or invalid configuration ends the import with `SystemExit` and the readable `ConfigError`
   text instead of a traceback chain. Planned: runs the delayed reply job
   (CYR-17) and background jobs (CYR-23, CYR-24, CYR-25). It has the `media` volume but not the
   session volume; how it sends through the userbot session is an open question (CYR-17).
-- **postgres**: `postgres:16.15-alpine`, volume `postgres_data`. Nothing uses it yet.
+- **migrate**: one-shot, `alembic upgrade head`, then exits. Same Dockerfile as app and worker, same
+  environment, `restart: "no"`. Depends only on healthy postgres. It exits non-zero with the
+  readable `ConfigError` text if the settings are invalid.
+- **postgres**: `postgres:16.15-alpine`, volume `postgres_data`.
 - **redis**: `redis:7.4-alpine` with AOF on `redis_data`. Arq stores delayed jobs here.
-- The Dockerfile builds one image for app and worker (Python 3.14 slim, uv only in the builder
-  stage, non-root user `cyrano`, uid 10001). Compose overrides the command per service.
-- `depends_on` waits for healthy postgres and redis before app and worker start.
+- The Dockerfile builds one image, tagged `cyrano:local`, for app, worker and migrate (Python 3.14
+  slim, uv only in the builder stage, non-root user `cyrano`, uid 10001). It includes `alembic.ini`
+  and `migrations/`. Compose overrides the command per service.
+- `depends_on` waits for healthy postgres and redis and for `migrate` to exit with 0
+  (`service_completed_successfully`) before app and worker start.
 
 ### Profile parsing (planned, CYR-11)
 
@@ -96,6 +109,33 @@ People arrive from a matching bot. The first messages from a contact may carry t
 profile in that bot (for Leomatch); the userbot collects it together with nick, name, bio and
 photo for the card. The format and how it is parsed are specified in CYR-11. The system never
 sends anything to the matching bot.
+
+## Persistence
+
+- **Tables**: `contacts`, `messages`, `modes`; native enums `contact_status` and
+  `message_direction`. Columns and rules: [contact-lifecycle.md](contact-lifecycle.md).
+- **Names**: table names and enum type names live in `db/models.py`, enum values in
+  `domain/enums.py`. `Base.metadata` has a naming convention, so constraint and index names are
+  stable and need no spelling out. The migration repeats these strings on purpose: a revision is a
+  frozen record of the past, so it must not change when the code does. `alembic check` and
+  `tests/db/test_migrations.py` prove the two agree.
+- **Time**: every timestamp is `timestamptz`; the domain models reject naive values and normalize
+  to UTC. `touch_last_message_at` refuses a naive `datetime`.
+- **Repositories**: take a session factory. Every method is one transaction, returns domain models
+  and never an ORM object, and turns constraint violations into domain errors with `from None`, so
+  the driver's message (which names key values) does not travel. Writes that read first lock the
+  row with `FOR UPDATE`. Nothing spans several repository calls yet; when a later ticket needs that
+  to be atomic, it changes this rule here.
+- **Engine and sessions**: `build_engine(settings)` and `build_session_factory(engine)`. Nothing is
+  built at import time; the composition root owns the lifecycle. The worker does not build an engine
+  yet (CYR-17).
+- **Migrations**: `alembic.ini` holds no URL. The async `migrations/env.py` reads
+  `Settings.database_url`, so there is one source of truth, and logs through `configure_logging`.
+  `--sql` prints plain SQL and configures no logging, so log lines do not end up in the output. The
+  autogenerate comparison includes column types and server defaults. It does not see enum values,
+  so a test compares them with `domain/enums.py`.
+- **Default mode**: migration `0001` seeds `default` with a neutral placeholder fragment and no
+  examples, idempotently. The real modes belong to CYR-15.
 
 ## Configuration
 
@@ -125,19 +165,23 @@ the raw input. `load_settings(env_file=None)` ignores any `.env`.
 | `HTTPX_LOG_LEVEL` | no | `WARNING` | also applied to `httpcore` |
 | `HEARTBEAT_PATH` | no | `<tmpdir>/cyrano-heartbeat` | liveness file; also read straight from `os.environ` by `cyrano.health`, the one exception to hard rule 3 ([decisions.md](decisions.md)) |
 
+`TEST_DATABASE_URL` is not in this table: tests read it themselves
+([decisions.md](decisions.md)).
+
 - **Secrets** are `SecretStr`: `repr`, `str` and dumps mask them; `.get_secret_value()` is called
   only where the value is used. Settings that carry URLs with credentials are secrets too.
-- **Local vs Docker** (CYR-8): `.env.example` has a local section (`DATABASE_URL` and `REDIS_URL`
-  on `localhost`, relative `USERBOT_SESSION_PATH` and `MEDIA_DIR`) and a Docker section
-  (`POSTGRES_*`). Compose builds `DATABASE_URL` and `REDIS_URL` for app and worker from
+- **Local vs Docker** (CYR-8): `.env.example` is a bare template without comments: required
+  variables and local values (`DATABASE_URL` and `REDIS_URL` on `localhost`, relative
+  `USERBOT_SESSION_PATH` and `MEDIA_DIR`), `POSTGRES_*` and `TEST_DATABASE_URL`. The README describes every variable and
+  the two run modes. Compose builds `DATABASE_URL` and `REDIS_URL` for app and worker from
   `POSTGRES_*` and the service names and sets `USERBOT_SESSION_PATH=/data/session/userbot` and
   `MEDIA_DIR=/data/media`; `environment:` beats `env_file:`, so the localhost values are ignored
   in containers.
 - **Time**: timestamps are stored in UTC; `TIMEZONE` is applied only at the edges (planned
   users: quiet hours in CYR-18 and times shown to the owner). `Settings.tzinfo` returns the `ZoneInfo`. `tzdata` is a
   dependency because the slim image has no system zone database.
-- **New setting**: add the field to `Settings` and the variable to `.env.example` in the same
-  commit.
+- **New setting**: add the field to `Settings` and describe the variable in the README Settings
+  section in the same commit; a required variable also goes to `.env.example`.
 
 ## Logging
 
@@ -162,6 +206,10 @@ the raw input. `load_settings(env_file=None)` ignores any `.env`.
 - **No personal data at INFO or above**: no message text, names, bios, profile text. Log internal
   ids, statuses, counts, durations; Telegram ids are personal data too. This is a review rule
   today; scrubbing of free-text logs is an open question (CYR-28).
+- **Database**: repositories log nothing. The engine sets `hide_parameters=True`, so a driver error
+  or an enabled `sqlalchemy.engine` logger never shows bound values such as message text. Domain
+  errors carry internal ids and statuses, never a Telegram id.
+- `migrate` logs through the same formatter, so Alembic's lines are JSON too.
 
 ## Health checks
 
@@ -184,14 +232,22 @@ the raw input. `load_settings(env_file=None)` ignores any `.env`.
   Tests that load settings pass `env_file=None` or change into `/` so no stray `.env` is read.
 - Assertions on startup output cover secrets and personal identifiers (owner id, API id).
 - Exists: config loading and validation, secret masking, logging format, heartbeat and
-  healthcheck, the app loop, a real subprocess that must exit cleanly on SIGTERM, worker settings.
+  healthcheck, the app loop, a real subprocess that must exit cleanly on SIGTERM, worker settings,
+  status transition rules (pure, no database), domain models, migrations and repositories.
+- **Test database**: real PostgreSQL, never SQLite. The fixture in `tests/db/conftest.py` reads
+  `TEST_DATABASE_URL` from the environment or `.env`, creates a database with a random name through
+  an admin connection, applies the Alembic migrations to it, so every database test also runs the
+  migration, yields a session factory built by the production code, and drops the database with
+  `WITH (FORCE)`, also after a failure. One database per test keeps tests isolated without
+  truncation. Unreachable Postgres or a missing variable fails the test with a message naming
+  `make db-up`; it never skips. CI runs a Postgres service container on the same tag as compose.
 - Planned: scripted fakes for Telethon, aiogram and the LLM (CYR-10, CYR-12, CYR-13); `respx` for
-  the HTTP client (CYR-13); a database fixture (CYR-9). Failure cases to cover for new behaviour:
+  the HTTP client (CYR-13). Failure cases to cover for new behaviour:
   empty input, malformed Telegram event, invalid LLM JSON, status changed between scheduling and
   sending, FloodWait.
 
 ## Open design questions
 
 Listed in [decisions.md](decisions.md) under "Open questions": how the worker sends through the
-userbot session, how migrations run, worker reconnect to Redis, where the layered prompt builder
-lives, whether `bot`, `userbot` and `worker` may import each other.
+userbot session, worker reconnect to Redis, where the layered prompt builder lives, whether `bot`,
+`userbot` and `worker` may import each other.

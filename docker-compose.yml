@@ -1,0 +1,87 @@
+# Requires a .env next to this file: `cp .env.example .env` (compose refuses to start without it).
+#
+# Credentials have a single source of truth: POSTGRES_* in .env. The connection URLs and
+# container paths for app/worker are built here from those values and the service names, so the
+# DATABASE_URL / REDIS_URL / *_PATH / MEDIA_DIR in .env (which point at localhost for running
+# outside Docker) are overridden inside the containers. `environment:` beats `env_file:`.
+x-app: &app
+  build: .
+  env_file: .env
+  restart: unless-stopped
+  environment:
+    DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:?set POSTGRES_USER in .env}:${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}@postgres:5432/${POSTGRES_DB:?set POSTGRES_DB in .env}
+    REDIS_URL: redis://redis:6379/0
+    USERBOT_SESSION_PATH: /data/session/userbot
+    MEDIA_DIR: /data/media
+  depends_on:
+    postgres:
+      condition: service_healthy
+    redis:
+      condition: service_healthy
+
+services:
+  app:
+    <<: *app
+    command: ["python", "-m", "cyrano"]
+    volumes:
+      - userbot_session:/data/session
+      - media:/data/media
+    healthcheck:
+      # No HTTP server: the event loop touches a heartbeat file; see src/cyrano/health.py.
+      test: ["CMD", "python", "-m", "cyrano.health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 15s
+
+  worker:
+    <<: *app
+    command:
+      - arq
+      - --custom-log-dict
+      - cyrano.worker.settings.LOG_CONFIG
+      - cyrano.worker.settings.WorkerSettings
+    volumes:
+      - media:/data/media
+    healthcheck:
+      # Arq's built-in check: succeeds while the worker keeps refreshing its health key in Redis.
+      test: ["CMD", "arq", "--check", "cyrano.worker.settings.WorkerSettings"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 20s
+
+  postgres:
+    image: postgres:16.15-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:?set POSTGRES_USER in .env}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}
+      POSTGRES_DB: ${POSTGRES_DB:?set POSTGRES_DB in .env}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+      start_period: 5s
+
+  redis:
+    image: redis:7.4-alpine
+    restart: unless-stopped
+    # AOF persistence: Arq's delayed jobs live in Redis and must survive restarts.
+    command: ["redis-server", "--appendonly", "yes"]
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+volumes:
+  postgres_data:
+  redis_data:
+  userbot_session:
+  media:

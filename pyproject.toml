@@ -1,0 +1,64 @@
+[project]
+name = "cyrano"
+version = "0.1.0"
+description = "Telegram assistant: a Telethon userbot chatting in the owner's style, controlled via an aiogram bot."
+readme = "README.md"
+requires-python = ">=3.14,<3.15"
+dependencies = [
+    # Typed, env-driven configuration (pulls in pydantic v2).
+    "pydantic-settings>=2.6",
+    # WorkerSettings / RedisSettings for the delayed-jobs worker.
+    "arq>=0.26",
+    # IANA tz database: python:slim has no system tzdata, and TIMEZONE is validated at startup.
+    "tzdata>=2024.2",
+]
+
+[dependency-groups]
+dev = [
+    "mypy>=1.13",
+    "pytest>=8.3",
+    "pytest-asyncio>=0.24",
+    "ruff>=0.8",
+]
+
+[build-system]
+requires = ["uv_build>=0.12.4,<0.13.0"]
+build-backend = "uv_build"
+
+[tool.ruff]
+line-length = 100
+target-version = "py314"
+src = ["src", "tests"]
+
+[tool.ruff.lint]
+select = [
+    "E", "W",   # pycodestyle
+    "F",        # pyflakes
+    "I",        # isort
+    "B",        # bugbear
+    "UP",       # pyupgrade
+    "SIM",      # simplify
+    "ASYNC",    # async pitfalls
+    "RUF",      # ruff-specific
+    "S",        # bandit-style security checks
+]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/**" = ["S101", "S105", "S106"]  # asserts and fake secrets are fine in tests
+
+[tool.mypy]
+python_version = "3.14"
+strict = true
+files = ["src", "tests"]
+plugins = ["pydantic.mypy"]
+
+[tool.pydantic-mypy]
+init_forbid_extra = true
+init_typed = true
+warn_required_dynamic_aliases = true
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+asyncio_mode = "auto"
+asyncio_default_fixture_loop_scope = "function"
+addopts = "-ra"

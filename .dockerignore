@@ -1,0 +1,15 @@
+.git
+.github
+.idea
+.vscode
+.venv
+.env
+*.session
+*.session-journal
+media/
+data/
+**/__pycache__
+.pytest_cache
+.mypy_cache
+.ruff_cache
+tests/

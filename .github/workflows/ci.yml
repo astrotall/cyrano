@@ -1,0 +1,56 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v10.3.3
+        with:
+          enable-cache: true
+          cache-dependency-glob: uv.lock
+
+      # Explicit, not implicit: the interpreter version comes from .python-version.
+      - name: Install Python
+        run: uv python install "$(cat .python-version)"
+
+      - name: Install dependencies
+        run: make install
+
+      - name: Lint, format check, type check
+        run: make check
+
+      - name: Tests
+        run: make test
+
+  # Validates the Docker setup only: no push, no registry, nothing is started.
+  docker:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Create .env from the example
+        run: cp .env.example .env
+
+      - name: Validate compose files (with and without the dev override)
+        run: |
+          docker compose config --quiet
+          docker compose -f docker-compose.yml config --quiet
+
+      - name: Build images
+        run: docker compose build

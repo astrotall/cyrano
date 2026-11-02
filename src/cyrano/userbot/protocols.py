@@ -87,6 +87,9 @@ class HistoryMessage(Protocol):
     @property
     def entities(self) -> Sequence[object] | None: ...
 
+    @property
+    def photo(self) -> object | None: ...
+
 
 EventCallback = Callable[[IncomingEvent], Awaitable[None]]
 
@@ -114,6 +117,8 @@ class UserbotClient(Protocol):
     def download_profile_photo(
         self, entity: SenderLike, file: str, *, download_big: bool = True
     ) -> Awaitable[str | None]: ...
+
+    def download_media(self, message: HistoryMessage, file: str) -> Awaitable[str | None]: ...
 
     def iter_messages(
         self,

@@ -159,6 +159,7 @@ disconnects. It never sends and never changes a status.
   | Telegram profile | username, display name, bio | `ProfileSource.fetch_profile` |
   | Photo | the current big profile photo | `ProfileSource.download_photo` |
   | Leomatch | the card text and the match text from the chat with the matching bot | `LeomatchSource.find_texts` |
+  | Card photo | the photo of the card message, when it has one; runs only after a Leomatch lookup that found texts | `CardPhoto.download`, from the same lookup |
 
   The Leomatch lookup uses the username that the Telegram part just fetched (the stored one if that
   part failed). The whole contact has a time budget of 30 s (`COLLECTION_TIMEOUT_SECONDS`,
@@ -168,7 +169,7 @@ disconnects. It never sends and never changes a status.
   `display_name`, which CYR-10 wrote once from the first message. NUL bytes are removed and every
   text is truncated to a named limit (`domain/models.py`) before anything is stored.
 - **`collected_at`** is set (UTC) only if the Telegram profile part succeeded. Otherwise it stays
-  empty, so the next start retries the contact. A failed photo or Leomatch part does not prevent
+  empty, so the next start retries the contact. A failed photo, card photo or Leomatch part does not prevent
   it and is not retried; values gathered by an earlier run are kept when a later run fails that
   part.
 - **Always ready.** `ContactReadyEvent(contact_id)` is published in a `finally` for every contact
@@ -181,6 +182,11 @@ disconnects. It never sends and never changes a status.
   Telegram id or a name. It is downloaded to a `<id>.part.jpg` file first and renamed when the
   download is complete, so a failed download leaves no half file. The path stored in the profile is
   relative to `MEDIA_DIR`.
+- **Card photo.** The same way, as `profiles/<internal contact id>-card.jpg` through
+  `<id>-card.part.jpg`, downloaded read-only from the card message. Its relative path is stored in
+  `leomatch.photo`; the Telegram profile photo stays in `photo`. A failed download is its own part
+  (`card_photo`): it leaves no half file, never blocks or changes another part and keeps
+  `leomatch.photo` as an earlier run stored it. A new successful download replaces the path.
 
 ### The stored profile
 
@@ -191,11 +197,11 @@ An empty object `{}` means nothing was collected.
 | --- | --- |
 | `username`, `display_name`, `bio` | As fetched, sanitized and truncated; `null` when missing |
 | `photo` | Path relative to `MEDIA_DIR`, for example `profiles/17.jpg`, or `null` |
-| `leomatch` | `null` or an object: `raw_text` (the card text if a card was found, otherwise the match text), `related_texts` (the other one, at most 2), and, only when the text matches the assumed card format, `name`, `age` (18 to 99), `city`, `about` |
+| `leomatch` | `null` or an object: `raw_text` (the card text if a card was found, otherwise the match text), `related_texts` (the other one, at most 2), `photo` (path of the card photo relative to `MEDIA_DIR`, for example `profiles/17-card.jpg`, or `null`), and, only when the text matches the observed card format, `name`, `age` (18 to 99), `city` and `about` (`about` stays `null` when the card has no description) |
 | `collected_at` | ISO 8601 UTC time, or `null` while the Telegram part has not succeeded |
 
-The card format and the lookup in the matching-bot chat are assumptions that are not verified
-against real messages yet; see [decisions.md](decisions.md).
+The card and match formats were observed on one real match; what is still unobserved is listed in
+[decisions.md](decisions.md).
 
 ## What is stored per contact
 

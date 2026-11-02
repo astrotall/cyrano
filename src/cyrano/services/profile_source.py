@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Protocol
 
@@ -18,5 +19,15 @@ class ProfileSource(Protocol):
     async def download_photo(self, tg_id: int, destination: Path) -> bool: ...
 
 
+class CardPhoto(Protocol):
+    async def download(self, destination: Path) -> bool: ...
+
+
+@dataclass(frozen=True, slots=True)
+class LeomatchLookup:
+    texts: list[LeomatchSourceText] = field(default_factory=list)
+    card_photo: CardPhoto | None = None
+
+
 class LeomatchSource(Protocol):
-    async def find_texts(self, tg_id: int, username: str | None) -> list[LeomatchSourceText]: ...
+    async def find_texts(self, tg_id: int, username: str | None) -> LeomatchLookup: ...

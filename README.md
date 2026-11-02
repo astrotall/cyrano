@@ -127,8 +127,10 @@ read. A failed part never blocks the others or the registration.
   matches `joanna` or `ann_k`). It tries Telegram's search for the username first and falls back
   to the last 100 messages. The profile card sits at most two messages before the match message.
   Both texts are stored as they are; name, age and city are extracted only when the card looks like
-  `Name, age[, city] - description`. This format and the chat order are assumptions to verify on
-  the first real match.
+  `Name, age[, city]`, optionally followed by ` - description`, after an optional header line that
+  ends with a colon. If the card message has a photo, it is saved as
+  `profiles/<internal contact id>-card.jpg` under `MEDIA_DIR`, with its relative path stored next to
+  the card text, and a failed download never blocks the rest.
 
 ### Code layers
 
@@ -413,7 +415,7 @@ the default applies.
 | `DEEPSEEK_MODEL` | no | `deepseek-chat` | DeepSeek model name |
 | `DATABASE_URL` | yes | | PostgreSQL URL, must start with `postgresql+asyncpg://` |
 | `REDIS_URL` | yes | | Redis URL, must start with `redis://` or `rediss://` |
-| `MEDIA_DIR` | no | `media` | Where downloaded media goes: today the profile photos, in `profiles/<internal contact id>.jpg` |
+| `MEDIA_DIR` | no | `media` | Where downloaded media goes: today the profile photos in `profiles/<internal contact id>.jpg` and the Leomatch card photos in `profiles/<internal contact id>-card.jpg` |
 | `LOG_LEVEL` | no | `INFO` | Level of the application log. One of `DEBUG`, `INFO`, `WARNING`, `ERROR`, `CRITICAL`, case-insensitive |
 | `TELETHON_LOG_LEVEL`, `AIOGRAM_LOG_LEVEL` | no | `WARNING` | Level of the `telethon` and `aiogram` loggers; same allowed values as `LOG_LEVEL` |
 | `HTTPX_LOG_LEVEL` | no | `WARNING` | Level of the `httpx` logger, also applied to `httpcore`; same allowed values as `LOG_LEVEL` |

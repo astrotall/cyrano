@@ -10,6 +10,7 @@ from cyrano.domain.models import (
     MAX_LEOMATCH_AGE,
     MAX_LEOMATCH_RELATED_TEXTS,
     MAX_LEOMATCH_TEXT_LENGTH,
+    MAX_PHOTO_PATH_LENGTH,
     MIN_LEOMATCH_AGE,
     ContactProfile,
     ContactReadyEvent,
@@ -34,7 +35,11 @@ def test_the_profile_round_trips_through_json() -> None:
         bio="fake bio",
         photo="profiles/7.jpg",
         leomatch=LeomatchProfile(
-            raw_text="Fake, 25, Town - about", related_texts=["match"], name="Fake", age=25
+            raw_text="Fake, 25, Town - about",
+            related_texts=["match"],
+            name="Fake",
+            age=25,
+            photo="profiles/7-card.jpg",
         ),
         collected_at=COLLECTED_AT,
     )
@@ -69,6 +74,13 @@ def test_text_limits_are_enforced() -> None:
         LeomatchProfile(raw_text="x" * (MAX_LEOMATCH_TEXT_LENGTH + 1))
     with pytest.raises(ValidationError):
         LeomatchProfile(raw_text="x", related_texts=["y"] * (MAX_LEOMATCH_RELATED_TEXTS + 1))
+
+
+def test_a_leomatch_profile_without_a_photo_is_valid_and_the_path_is_limited() -> None:
+    assert LeomatchProfile(raw_text="x").photo is None
+    assert LeomatchProfile.model_validate({"raw_text": "x"}).photo is None
+    with pytest.raises(ValidationError):
+        LeomatchProfile(raw_text="x", photo="p" * (MAX_PHOTO_PATH_LENGTH + 1))
 
 
 @pytest.mark.parametrize("age", [MIN_LEOMATCH_AGE - 1, MAX_LEOMATCH_AGE + 1, 0, -5])

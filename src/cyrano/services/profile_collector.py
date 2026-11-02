@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import logging
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from enum import StrEnum
@@ -27,7 +27,7 @@ from cyrano.domain.models import (
 )
 from cyrano.services.contact_events import ContactEventPublisher, ContactEventSubscriber
 from cyrano.services.leomatch import build_leomatch_profile
-from cyrano.services.profile_source import LeomatchSource, ProfileSource
+from cyrano.services.profile_source import CardPhoto, LeomatchSource, ProfileSource
 from cyrano.services.repositories import ContactRepository
 from cyrano.services.sanitize import clean_text
 
@@ -37,11 +37,13 @@ COLLECTION_TIMEOUT_SECONDS = 30.0
 PROFILE_PHOTO_DIRECTORY = "profiles"
 PROFILE_PHOTO_SUFFIX = ".jpg"
 PARTIAL_PHOTO_MARKER = ".part"
+CARD_PHOTO_MARKER = "-card"
 
 
 class CollectionPart(StrEnum):
     TELEGRAM = "telegram"
     PHOTO = "photo"
+    CARD_PHOTO = "card_photo"
     LEOMATCH = "leomatch"
 
 
@@ -162,6 +164,7 @@ class ProfileCollector:
                 "contact_id": contact.id,
                 "telegram": gathered.telegram_collected,
                 "photo": gathered.photo is not None,
+                "card_photo": gathered.leomatch is not None and gathered.leomatch.photo is not None,
                 "leomatch": gathered.leomatch is not None,
             },
         )
@@ -190,30 +193,60 @@ class ProfileCollector:
         gathered.telegram_collected = True
 
     async def _gather_photo(self, contact: Contact, gathered: _Gathered) -> None:
-        name = f"{contact.id}{PROFILE_PHOTO_SUFFIX}"
-        relative = Path(PROFILE_PHOTO_DIRECTORY) / name
+        saved = await self._save_photo(
+            contact,
+            CollectionPart.PHOTO,
+            f"{contact.id}",
+            lambda destination: self._profiles.download_photo(contact.tg_id, destination),
+        )
+        if saved is not None:
+            gathered.photo = saved
+
+    async def _save_photo(
+        self,
+        contact: Contact,
+        part: CollectionPart,
+        stem: str,
+        download: Callable[[Path], Awaitable[bool]],
+    ) -> str | None:
+        relative = Path(PROFILE_PHOTO_DIRECTORY) / f"{stem}{PROFILE_PHOTO_SUFFIX}"
         final = self._media_dir / relative
-        partial = final.with_name(f"{contact.id}{PARTIAL_PHOTO_MARKER}{PROFILE_PHOTO_SUFFIX}")
+        partial = final.with_name(f"{stem}{PARTIAL_PHOTO_MARKER}{PROFILE_PHOTO_SUFFIX}")
         try:
             final.parent.mkdir(parents=True, exist_ok=True)
-            if await self._profiles.download_photo(contact.tg_id, partial):
+            if await download(partial):
                 partial.replace(final)
-                gathered.photo = relative.as_posix()
+                return relative.as_posix()
         except Exception as exc:
-            self._part_failed(contact, CollectionPart.PHOTO, exc)
+            self._part_failed(contact, part, exc)
         finally:
             with contextlib.suppress(OSError):
                 partial.unlink(missing_ok=True)
+        return None
 
     async def _gather_leomatch(self, contact: Contact, gathered: _Gathered) -> None:
         try:
-            texts = await self._leomatch.find_texts(contact.tg_id, gathered.username)
-            found = build_leomatch_profile(texts)
+            lookup = await self._leomatch.find_texts(contact.tg_id, gathered.username)
+            found = build_leomatch_profile(lookup.texts)
         except Exception as exc:
             self._part_failed(contact, CollectionPart.LEOMATCH, exc)
             return
-        if found is not None:
-            gathered.leomatch = found
+        if found is None:
+            return
+        earlier = gathered.leomatch.photo if gathered.leomatch is not None else None
+        gathered.leomatch = found.model_copy(update={"photo": earlier})
+        if lookup.card_photo is not None:
+            saved = await self._gather_card_photo(contact, lookup.card_photo)
+            if saved is not None:
+                gathered.leomatch = found.model_copy(update={"photo": saved})
+
+    async def _gather_card_photo(self, contact: Contact, card_photo: CardPhoto) -> str | None:
+        return await self._save_photo(
+            contact,
+            CollectionPart.CARD_PHOTO,
+            f"{contact.id}{CARD_PHOTO_MARKER}",
+            card_photo.download,
+        )
 
     async def _store(self, contact: Contact, gathered: _Gathered) -> None:
         profile = ContactProfile(

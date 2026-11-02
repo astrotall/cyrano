@@ -63,6 +63,8 @@ class FakeHistoryMessage:
     raw_text: str | None = ""
     out: bool | None = False
     entities: Sequence[object] | None = None
+    photo: object | None = None
+    media_bytes: bytes | None = None
 
 
 @dataclass
@@ -132,6 +134,7 @@ class FakeClient:
         self.requests: list[FullUserRequestLike] = []
         self.history_queries: list[tuple[int | None, str | None, int]] = []
         self.photo_downloads: list[tuple[str, bool]] = []
+        self.media_downloads: list[tuple[int, str]] = []
         self._hang_on_read = hang_on_read
         self._read_error = read_error
         self._authorized = authorized
@@ -214,6 +217,15 @@ class FakeClient:
         if self.photo_bytes is None:
             return None
         await asyncio.to_thread(Path(file).write_bytes, self.photo_bytes)
+        return file
+
+    async def download_media(self, message: HistoryMessage, file: str) -> str | None:
+        await self._read("download_media")
+        self.media_downloads.append((message.id, file))
+        content = message.media_bytes if isinstance(message, FakeHistoryMessage) else None
+        if content is None:
+            return None
+        await asyncio.to_thread(Path(file).write_bytes, content)
         return file
 
     async def iter_messages(

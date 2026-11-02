@@ -22,6 +22,7 @@ changing one is a large change.
 | Redis runs with AOF on a named volume | Arq's delayed jobs live in Redis and must survive restarts |
 | Compose builds `DATABASE_URL` and `REDIS_URL` from `POSTGRES_*` and the service names | One source of truth for credentials; the same `.env` works locally and in Docker |
 | `docker-compose.override.yml` publishes Postgres and Redis on `127.0.0.1` only | Host access for `psql` and a local app without exposing the services to other machines |
+| `docker-compose.override.yml` bind-mounts `./data/media` over `/data/media` in `app` and `worker`; production (`docker-compose.yml` alone) keeps the named `media` volume | Collected photos are visible in the project folder without copying them out of the Docker VM |
 | `postgres:16.15-alpine` and `redis:7.4-alpine`, pinned by tag | Reproducible builds; Dependabot proposes bumps |
 | Dependabot runs weekly for GitHub Actions, Docker, Docker Compose and uv | Pinned versions stay current without manual tracking |
 | JSON logs to stdout, with Arq's own lines in the same format | One format for every process; the container runtime collects stdout |

@@ -4,7 +4,16 @@
 #   docker compose -f docker-compose.yml up -d
 # If 5432/6379 are taken on your machine, set POSTGRES_HOST_PORT / REDIS_HOST_PORT in .env
 # (and use the same ports in the local DATABASE_URL / REDIS_URL).
+# Collected photos land in ./data/media (bind mount) instead of the named `media` volume, so they
+# can be opened from the host. Compose merges volumes by container path: this entry replaces
+# `media:/data/media` from docker-compose.yml. Run `mkdir -p data/media` before the first start.
 services:
+  app:
+    volumes:
+      - ./data/media:/data/media
+  worker:
+    volumes:
+      - ./data/media:/data/media
   postgres:
     ports:
       - "127.0.0.1:${POSTGRES_HOST_PORT:-5432}:5432"

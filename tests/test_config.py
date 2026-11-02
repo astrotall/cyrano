@@ -214,6 +214,7 @@ def test_every_setting_is_either_logged_or_deliberately_withheld() -> None:
         "database_url",
         "redis_url",
         "leomatch_bot_username",
+        "deepseek_base_url",
     }
 
     assert set(Settings.model_fields) == set(LOGGED_SETTINGS) | withheld

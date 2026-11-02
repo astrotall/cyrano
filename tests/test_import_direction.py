@@ -80,3 +80,43 @@ def test_services_do_not_import_the_userbot_or_the_bot() -> None:
 def test_userbot_does_not_import_db_or_llm() -> None:
     for module in _imported_modules("userbot"):
         assert not module.startswith(("cyrano.db", "cyrano.llm", "cyrano.bot"))
+
+
+def test_only_the_llm_package_imports_httpx() -> None:
+    assert _packages_importing("httpx") == {"llm"}
+
+
+def test_llm_does_not_import_services_db_userbot_or_bot() -> None:
+    for module in _imported_modules("llm"):
+        assert not module.startswith(
+            ("cyrano.services", "cyrano.db", "cyrano.userbot", "cyrano.bot")
+        )
+
+
+def test_only_the_composition_root_imports_the_llm_package() -> None:
+    importers: set[str] = set()
+    for path in SOURCE_ROOT.rglob("*.py"):
+        relative = path.relative_to(SOURCE_ROOT)
+        if relative.parts[0] == "llm":
+            continue
+        for node in ast.walk(ast.parse(path.read_text())):
+            names = (
+                [alias.name for alias in node.names]
+                if isinstance(node, ast.Import)
+                else [node.module]
+                if isinstance(node, ast.ImportFrom) and node.module is not None
+                else []
+            )
+            if any(name == "cyrano.llm" or name.startswith("cyrano.llm.") for name in names):
+                importers.add(relative.as_posix())
+    assert importers == {"main.py"}
+
+
+def test_no_module_outside_llm_and_config_mentions_the_provider() -> None:
+    mentioning = {
+        path.relative_to(SOURCE_ROOT).as_posix()
+        for path in SOURCE_ROOT.rglob("*.py")
+        if path.relative_to(SOURCE_ROOT).parts[0] != "llm"
+        and "deepseek" in path.read_text().lower()
+    }
+    assert mentioning == {"config.py"}

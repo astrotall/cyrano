@@ -1,4 +1,4 @@
-"""Contact statuses and message directions."""
+"""Contact statuses, message directions and LLM vocabulary."""
 
 from __future__ import annotations
 
@@ -29,3 +29,14 @@ class CardOutcome(StrEnum):
     REFUSED = "refused"
     NOT_FOUND = "not_found"
     MODE_UNAVAILABLE = "mode_unavailable"
+
+
+class Role(StrEnum):
+    SYSTEM = "system"
+    USER = "user"
+    ASSISTANT = "assistant"
+
+
+class LLMStep(StrEnum):
+    REPLY = "reply"
+    SUMMARY = "summary"

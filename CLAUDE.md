@@ -22,7 +22,8 @@ Contact statuses: `new -> pending -> active -> paused / ignored`. Meaning and tr
 [contact-lifecycle.md](.claude/docs/contact-lifecycle.md).
 
 The skeleton (CYR-8), the storage layer (CYR-9), the userbot intake (CYR-10), the profile
-collection (CYR-11) and the control bot with the contact card (CYR-12) exist. Everything
+collection (CYR-11), the control bot with the contact card (CYR-12) and the LLM client (CYR-13,
+not used by the app yet) exist. Everything
 else is planned and marked with its ticket key.
 Never describe planned behaviour as existing.
 
@@ -57,8 +58,8 @@ Changing any of these is a large change (see Workflow expectations). Reasons:
 | Docker, Docker Compose, GitHub Actions, Dependabot | in the project |
 | Telethon | in the project (userbot listens, registers contacts and reads profiles; imported only in `userbot/`) |
 | aiogram 3 | in the project (control bot; imported only in `bot/`) |
-| DeepSeek client over plain httpx | planned, CYR-13 |
-| respx | planned, with CYR-13 |
+| DeepSeek client over plain httpx | in the project (`llm/`; the only package that imports httpx; not wired into `main.py` yet) |
+| httpx.MockTransport in tests | in the project (no respx) |
 
 ## Repository layout
 
@@ -66,7 +67,7 @@ Changing any of these is a large change (see Workflow expectations). Reasons:
 .
 ├── CLAUDE.md, CONTRIBUTING.md, README.md
 ├── pyproject.toml, uv.lock, .python-version
-├── Makefile                      includes login and login-docker
+├── Makefile                      includes login, login-docker and llm-check
 ├── Dockerfile, docker-compose.yml, docker-compose.override.yml
 ├── .env.example, .dockerignore, .gitignore
 ├── alembic.ini
@@ -74,7 +75,7 @@ Changing any of these is a large change (see Workflow expectations). Reasons:
 ├── .claude/docs/                 architecture, contact-lifecycle, safety-rules, decisions
 ├── .github/                      dependabot.yml, workflows/ci.yml
 ├── src/cyrano/
-│   ├── __main__.py, main.py      entrypoint (composition root), login subcommand, signals, heartbeat
+│   ├── __main__.py, main.py      entrypoint (composition root), login and llm-check subcommands, signals, heartbeat
 │   ├── config.py                 Settings, load_settings, ConfigError
 │   ├── logging.py                JSON-lines logging
 │   ├── health.py                 heartbeat file and the app healthcheck
@@ -82,11 +83,11 @@ Changing any of these is a large change (see Workflow expectations). Reasons:
 │   ├── db/                       SQLAlchemy models, engine and sessions, repositories
 │   ├── services/                 repositories (Protocols), intake, sanitize, contact_events, profile_source,
 │   │                             leomatch, profile_collector, card_sender, card_builder, card_announcer,
-│   │                             card_actions; the rest is planned
+│   │                             card_actions, llm_client, llm_check; the rest is planned
 │   ├── userbot/                  Telethon: protocols, filters, handler, client, login, runner, errors,
 │   │                             profile_source, leomatch_source, leomatch_match
 │   ├── bot/                      aiogram: app, middleware, handlers, rendering, callbacks, sender, messages, errors
-│   ├── llm/                      empty skeleton package
+│   ├── llm/                      DeepSeek client, retrying transport, factory; the only package that imports httpx
 │   └── worker/settings.py        Arq WorkerSettings, placeholder job
 └── tests/                        mirrors src/cyrano
 ```
@@ -112,7 +113,15 @@ Russian texts in `messages.py`, the readable fatal errors), `services/card_sende
 `CardSender` Protocol), `services/card_builder.py`, `services/card_announcer.py` (`CardAnnouncer`,
 started by `main.run` next to the control bot), `services/card_actions.py` (`CardActions`), the
 `ContactCard`, `CardLeomatch`, `ModeChoice`, `CardActionResult` models and the `CardOutcome` enum,
-and the tests with their fakes (a recording aiogram session, `FakeControlBot`).
+and the tests with their fakes (a recording aiogram session, `FakeControlBot`). CYR-13 added the
+`httpx` dependency and the `llm/` package (`DeepSeekClient`, `RetryingTransport` with retries,
+backoff and a per-attempt deadline, `LLMClientFactory` with one bound client per step, the JSON
+reply parsing with validation retries, the constants and prompt texts), `services/llm_client.py`
+(the `LLMClient` Protocol), `services/llm_check.py`, `domain/llm.py` (`LLMMessage`, `LLMUsage`,
+`LLMResult`), the `Role` and `LLMStep` enums, the `LLMError` family in `domain/errors.py`, the
+optional per-step `LLM_*`, `DEEPSEEK_BASE_URL` and `DEEPSEEK_THINKING` settings, the
+`python -m cyrano llm-check` command with `make llm-check`, and the tests with their fakes
+(`httpx.MockTransport` handlers, `FakeLLMClient`). Nothing in the app builds the client yet.
 
 ## Detailed guides
 

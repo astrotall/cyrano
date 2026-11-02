@@ -1,11 +1,15 @@
 from __future__ import annotations
 
 import asyncio
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Sequence
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime
 from pathlib import Path
 
+from pydantic import BaseModel
+
+from cyrano.domain.errors import LLMError
+from cyrano.domain.llm import LLMMessage, LLMResult, LLMUsage
 from cyrano.domain.models import (
     ContactCard,
     Mode,
@@ -210,3 +214,44 @@ def fake_card(**overrides: object) -> ContactCard:
         "profile_collected": True,
     }
     return ContactCard.model_validate({**fields, **overrides})
+
+
+FAKE_LLM_REPLY = "OK-but-secret-fake-reply"
+
+
+class FakeLLMClient:
+    def __init__(
+        self,
+        *,
+        result: LLMResult | None = None,
+        error: LLMError | None = None,
+    ) -> None:
+        self.result = result or LLMResult(
+            text=FAKE_LLM_REPLY,
+            usage=LLMUsage(input_tokens=11, output_tokens=2, cache_hit_tokens=None),
+            truncated=False,
+        )
+        self.error = error
+        self.calls: list[tuple[Sequence[LLMMessage], float | None, int | None]] = []
+
+    async def complete(
+        self,
+        messages: Sequence[LLMMessage],
+        *,
+        temperature: float | None = None,
+        max_tokens: int | None = None,
+    ) -> LLMResult:
+        self.calls.append((messages, temperature, max_tokens))
+        if self.error is not None:
+            raise self.error
+        return self.result
+
+    async def complete_json[T: BaseModel](
+        self,
+        messages: Sequence[LLMMessage],
+        schema: type[T],
+        *,
+        temperature: float | None = None,
+        max_tokens: int | None = None,
+    ) -> T:
+        raise NotImplementedError

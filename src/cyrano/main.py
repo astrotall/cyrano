@@ -19,13 +19,18 @@ from cyrano.db.repositories import (
     SqlModeRepository,
 )
 from cyrano.db.session import build_engine, build_session_factory
+from cyrano.domain.enums import LLMStep
+from cyrano.domain.errors import LLMError
 from cyrano.domain.models import ContactReadyEvent, NewContactEvent
 from cyrano.health import HEARTBEAT_INTERVAL, heartbeat_loop
+from cyrano.llm.factory import LLMClientFactory
 from cyrano.logging import configure_logging
 from cyrano.services.card_actions import CardActions
 from cyrano.services.card_announcer import CardAnnouncer
 from cyrano.services.contact_events import InMemoryContactEvents
 from cyrano.services.intake import IntakeService
+from cyrano.services.llm_check import check_llm
+from cyrano.services.llm_client import LLMClient
 from cyrano.services.profile_collector import ProfileCollector
 from cyrano.userbot.client import build_client, ensure_session_exists
 from cyrano.userbot.errors import UserbotError
@@ -38,8 +43,10 @@ from cyrano.userbot.runner import Userbot
 logger = logging.getLogger("cyrano")
 
 LOGIN_COMMAND = "login"
+LLM_CHECK_COMMAND = "llm-check"
 EXIT_USERBOT_ERROR = 1
 EXIT_CONFIG_ERROR = 2
+EXIT_LLM_ERROR = 1
 LOGIN_CANCELLED_MESSAGE = "Login cancelled. Nothing was saved."
 POLLING_ENDED_REASON = "polling ended unexpectedly"
 
@@ -150,10 +157,38 @@ async def run(
         logger.info("cyrano stopped", extra={"service": "app"})
 
 
+async def run_llm_check(client: LLMClient, model: str) -> int:
+    try:
+        report = await check_llm(client)
+    except LLMError as exc:
+        print(f"llm-check failed: {type(exc).__name__}: {exc}", file=sys.stderr)
+        return EXIT_LLM_ERROR
+    cache = (
+        f" cache_hit_tokens={report.cache_hit_tokens}"
+        if report.cache_hit_tokens is not None
+        else ""
+    )
+    print(
+        f"llm-check ok: model={model} input_tokens={report.input_tokens} "
+        f"output_tokens={report.output_tokens}{cache} latency_ms={report.latency_ms}"
+    )
+    return 0
+
+
+async def _run_llm_check_command(settings: Settings) -> int:
+    factory = LLMClientFactory(settings)
+    try:
+        client = factory.get(LLMStep.REPLY)
+        return await run_llm_check(client, client.model)
+    finally:
+        await factory.aclose()
+
+
 def _parse_args(argv: Sequence[str] | None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(prog="python -m cyrano", description=__doc__)
     commands = parser.add_subparsers(dest="command")
     commands.add_parser(LOGIN_COMMAND, help="log the second account in and save the session")
+    commands.add_parser(LLM_CHECK_COMMAND, help="send one tiny request to the LLM provider")
     return parser.parse_args(argv)
 
 
@@ -165,6 +200,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         print(exc, file=sys.stderr)
         return EXIT_CONFIG_ERROR
     configure_logging(settings.log_level, settings.library_log_levels)
+    if args.command == LLM_CHECK_COMMAND:
+        return asyncio.run(_run_llm_check_command(settings))
     try:
         if args.command == LOGIN_COMMAND:
             asyncio.run(run_login(settings))

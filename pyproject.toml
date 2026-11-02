@@ -19,6 +19,8 @@ dependencies = [
     "telethon>=1.45",
     # Control bot on the owner's main account; ships type information.
     "aiogram>=3.31,<4",
+    # Plain HTTP client for the LLM provider; imported only inside llm/. No provider SDK.
+    "httpx>=0.28",
 ]
 
 [dependency-groups]

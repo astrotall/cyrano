@@ -2,8 +2,9 @@
 
 The storage and the transition rules exist (CYR-9), and so does the registration of unknown senders
 (CYR-10): the userbot creates contacts with status `new` and stores their incoming messages. The
-other flows that drive the lifecycle are **planned**, each marked with its ticket; nothing changes
-a status yet.
+collection of the profile for the owner's card exists too (CYR-11): it fills `profile` and changes
+no status. The other flows that drive the lifecycle are **planned**, each marked with its ticket;
+nothing changes a status yet.
 
 ## Statuses
 
@@ -63,8 +64,8 @@ otherwise the `default` mode. If `default` itself is missing or disabled they ra
 | Step | What happens | Ticket |
 | --- | --- | --- |
 | 1 | An unknown sender writes to the second account; the userbot registers a contact (`new`) and stores the message. No reply is sent. Exists, see [Registration](#registration-cyr-10) | CYR-10, CYR-9 |
-| 2 | The userbot collects the profile: nick, name, bio, photo, and the matching-bot profile text if present | CYR-11 |
-| 3 | The control bot sends the owner a card with a Reply button per mode and an Ignore button; the contact becomes `pending` | CYR-12, CYR-15 |
+| 2 | The profile collector gathers nick, name, bio, photo and the matching-bot profile text if present, stores them in `profile` and publishes a `ContactReadyEvent`. Exists, see [Profile collection](#profile-collection-cyr-11) | CYR-11 |
+| 3 | The control bot sends the owner a card with a Reply button per mode and an Ignore button; the contact becomes `pending`. It starts from the `ContactReadyEvent` | CYR-12, CYR-15 |
 | 4 | On Reply the contact becomes `active` with the chosen mode; on Ignore it becomes `ignored` | CYR-12 |
 | 5 | Each incoming message from an `active` contact schedules one delayed Arq job; a burst of messages is debounced into one job | CYR-17, CYR-19 |
 | 6 | When the job runs it re-checks the status; anything but `active` ends the job with no reply | CYR-19 |
@@ -100,8 +101,8 @@ Steps of `IntakeService.handle`:
 | 5 | Only if this call created the contact: a `NewContactEvent` (contact id, message id) is published |
 
 - **What is stored.** On creation the contact gets `tg_id`, `username` and `display_name` (first and
-  last name joined) from the first message; both may be missing. Later messages do not update them:
-  profile collection belongs to CYR-11. A message from a known contact is stored whatever its
+  last name joined) from the first message; both may be missing. Later messages do not update them;
+  the profile collection (CYR-11) refreshes them once from Telegram. A message from a known contact is stored whatever its
   status is (`pending`, `active`, `paused`, `ignored`); only registration is stored here, nothing
   decides about a reply.
 - **Media-only messages.** A photo, sticker, voice message and so on still registers the contact and
@@ -130,9 +131,71 @@ Steps of `IntakeService.handle`:
   dropped; the listener keeps running. A message that failed all attempts (for example during a
   longer database outage) can stay unregistered. If the contact was created and a later step then
   failed, the repeat finds the contact and no `NewContactEvent` is published for it; the contact
-  stays in the database with status `new`.
-- **Not decided here.** Who consumes `NewContactEvent` and in which order (profile collection before
-  the card?) is an open question in [decisions.md](decisions.md).
+  stays in the database with status `new`; the startup sweep of the
+  [profile collection](#profile-collection-cyr-11) finds it.
+- **Who consumes the event.** The profile collector consumes `NewContactEvent` first; the card
+  (CYR-12) waits for the `ContactReadyEvent` that the collector publishes afterwards.
+
+## Profile collection (CYR-11)
+
+Exists. `ProfileCollector` in `services/profile_collector.py` runs as a background task of the app
+process, started after the userbot has connected and caught up, and cancelled before the client
+disconnects. It never sends and never changes a status.
+
+- **What triggers it.** A `NewContactEvent` from the in-memory queue, and a sweep at start: before
+  it consumes events, the collector processes every contact in status `new` whose profile has no
+  `collected_at`. The sweep repairs lost events (a crash, a full queue, a restart) and retries
+  contacts whose Telegram part failed earlier. A contact found by both the sweep and an event is
+  collected once: the second look sees `collected_at` and skips it.
+- **One at a time.** Events are handled strictly one after another, on purpose: it keeps the load
+  on Telegram low. Every exception of one event is caught and logged with the class name and a
+  counter; only cancellation stops the loop.
+- **Per contact.** Skip if `collected_at` is already set (idempotent; a skipped contact publishes
+  no ready event, its first run did). Otherwise three parts run in order, each in its own
+  `try/except`, so one failure never affects another:
+
+  | Part | What | Source |
+  | --- | --- | --- |
+  | Telegram profile | username, display name, bio | `ProfileSource.fetch_profile` |
+  | Photo | the current big profile photo | `ProfileSource.download_photo` |
+  | Leomatch | the card text and the match text from the chat with the matching bot | `LeomatchSource.find_texts` |
+
+  The Leomatch lookup uses the username that the Telegram part just fetched (the stored one if that
+  part failed). The whole contact has a time budget of 30 s (`COLLECTION_TIMEOUT_SECONDS`,
+  `asyncio.wait_for`). When it runs out, what was gathered so far is still stored.
+- **Stored.** The profile JSON is written through `ContactRepository.update`; when the Telegram
+  part succeeded, `ContactRepository.update_identity` first refreshes `username` and
+  `display_name`, which CYR-10 wrote once from the first message. NUL bytes are removed and every
+  text is truncated to a named limit (`domain/models.py`) before anything is stored.
+- **`collected_at`** is set (UTC) only if the Telegram profile part succeeded. Otherwise it stays
+  empty, so the next start retries the contact. A failed photo or Leomatch part does not prevent
+  it and is not retried; values gathered by an earlier run are kept when a later run fails that
+  part.
+- **Always ready.** `ContactReadyEvent(contact_id)` is published in a `finally` for every contact
+  that was attempted, also when every part failed or the budget ran out, so the card never waits
+  forever. It means "profile collection finished, successfully or not, the card may be shown"; the
+  consumer reads the profile and shows what is there. A contact that does not exist, or that is
+  already collected, publishes nothing. Both queues are in memory and lost on restart; CYR-12 finds
+  cards to show after a restart in the database.
+- **Photo.** Saved as `profiles/<internal contact id>.jpg` under `MEDIA_DIR`, never named by the
+  Telegram id or a name. It is downloaded to a `<id>.part.jpg` file first and renamed when the
+  download is complete, so a failed download leaves no half file. The path stored in the profile is
+  relative to `MEDIA_DIR`.
+
+### The stored profile
+
+`contacts.profile` is a JSONB object with this structure (`ContactProfile` in `domain/models.py`).
+An empty object `{}` means nothing was collected.
+
+| Field | Holds |
+| --- | --- |
+| `username`, `display_name`, `bio` | As fetched, sanitized and truncated; `null` when missing |
+| `photo` | Path relative to `MEDIA_DIR`, for example `profiles/17.jpg`, or `null` |
+| `leomatch` | `null` or an object: `raw_text` (the card text if a card was found, otherwise the match text), `related_texts` (the other one, at most 2), and, only when the text matches the assumed card format, `name`, `age` (18 to 99), `city`, `about` |
+| `collected_at` | ISO 8601 UTC time, or `null` while the Telegram part has not succeeded |
+
+The card format and the lookup in the matching-bot chat are assumptions that are not verified
+against real messages yet; see [decisions.md](decisions.md).
 
 ## What is stored per contact
 
@@ -145,7 +208,7 @@ Fixed in CYR-9. Table `contacts`:
 | `username`, `display_name` | Nick and name; both may be missing |
 | `status` | One of the statuses above, starts as `new` |
 | `mode_id` | Chosen mode, nullable, foreign key to `modes` |
-| `profile` | JSONB object: bio, photo reference, matching-bot profile text. Its schema arrives with CYR-11 |
+| `profile` | JSONB object: bio, photo path, matching-bot profile text, `collected_at`. Structure: [The stored profile](#the-stored-profile) (CYR-11) |
 | `summary` | JSONB object: contact summary. Its schema arrives with CYR-25 |
 | `last_message_at` | Time of the latest message; only moves forward, a late event does not take it back |
 | `created_at`, `updated_at` | `updated_at` moves only when a row really changes |

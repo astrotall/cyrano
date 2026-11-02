@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Awaitable, Callable
+from collections.abc import AsyncIterator, Awaitable, Callable, Sequence
 from datetime import datetime
 from typing import Protocol
 
@@ -59,6 +59,35 @@ class IncomingEvent(Protocol):
     async def get_sender(self) -> SenderLike | None: ...
 
 
+class FullUserInfo(Protocol):
+    @property
+    def about(self) -> str | None: ...
+
+
+class FullUserResponse(Protocol):
+    @property
+    def full_user(self) -> FullUserInfo: ...
+
+
+class FullUserRequestLike(Protocol):
+    @property
+    def id(self) -> object: ...
+
+
+class HistoryMessage(Protocol):
+    @property
+    def id(self) -> int: ...
+
+    @property
+    def out(self) -> bool | None: ...
+
+    @property
+    def raw_text(self) -> str | None: ...
+
+    @property
+    def entities(self) -> Sequence[object] | None: ...
+
+
 EventCallback = Callable[[IncomingEvent], Awaitable[None]]
 
 
@@ -77,6 +106,23 @@ class UserbotClient(Protocol):
     def add_event_handler(self, callback: EventCallback, event: object) -> None: ...
 
     def remove_event_handler(self, callback: EventCallback) -> int: ...
+
+    def __call__(self, request: FullUserRequestLike) -> Awaitable[FullUserResponse]: ...
+
+    async def get_entity(self, entity: int | str) -> SenderLike: ...
+
+    def download_profile_photo(
+        self, entity: SenderLike, file: str, *, download_big: bool = True
+    ) -> Awaitable[str | None]: ...
+
+    def iter_messages(
+        self,
+        entity: SenderLike,
+        limit: int | None = None,
+        *,
+        search: str | None = None,
+        offset_id: int = 0,
+    ) -> AsyncIterator[HistoryMessage]: ...
 
 
 class LoginClient(Protocol):

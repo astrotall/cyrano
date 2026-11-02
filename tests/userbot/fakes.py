@@ -1,7 +1,8 @@
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Awaitable
+import itertools
+from collections.abc import AsyncIterator, Awaitable, Sequence
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
@@ -18,7 +19,14 @@ from cyrano.domain.models import (
     MessageCreate,
 )
 from cyrano.services.intake import IntakeResult
-from cyrano.userbot.protocols import EventCallback, IncomingEvent, SenderLike
+from cyrano.userbot.protocols import (
+    EventCallback,
+    FullUserRequestLike,
+    FullUserResponse,
+    HistoryMessage,
+    IncomingEvent,
+    SenderLike,
+)
 
 FAKE_SENT_AT = datetime(2025, 1, 2, 3, 4, 5, tzinfo=UTC)
 FAKE_TEXT = "fake-incoming-text-that-must-not-leak"
@@ -37,6 +45,24 @@ class FakeSender:
     bot: bool | None = False
     deleted: bool | None = False
     is_self: bool | None = False
+
+
+@dataclass
+class FakeFullUserInfo:
+    about: str | None = None
+
+
+@dataclass
+class FakeFullUserResponse:
+    full_user: FakeFullUserInfo = field(default_factory=FakeFullUserInfo)
+
+
+@dataclass
+class FakeHistoryMessage:
+    id: int
+    raw_text: str | None = ""
+    out: bool | None = False
+    entities: Sequence[object] | None = None
 
 
 @dataclass
@@ -92,10 +118,22 @@ class FakeClient:
         hang_on_catch_up: bool = False,
         connect_error: OSError | None = None,
         calls: list[str] | None = None,
+        hang_on_read: bool = False,
+        read_error: Exception | None = None,
     ) -> None:
         self.calls = calls if calls is not None else []
         self.handlers: list[tuple[EventCallback, object]] = []
         self.write_attempts: list[str] = []
+        self.users: dict[int, SenderLike] = {}
+        self.chats: dict[str, SenderLike] = {}
+        self.about: str | None = None
+        self.photo_bytes: bytes | None = None
+        self.history: list[HistoryMessage] = []
+        self.requests: list[FullUserRequestLike] = []
+        self.history_queries: list[tuple[int | None, str | None, int]] = []
+        self.photo_downloads: list[tuple[str, bool]] = []
+        self._hang_on_read = hang_on_read
+        self._read_error = read_error
         self._authorized = authorized
         self._hang_on_connect = hang_on_connect
         self._hang_on_catch_up = hang_on_catch_up
@@ -144,6 +182,57 @@ class FakeClient:
         before = len(self.handlers)
         self.handlers = [(cb, ev) for cb, ev in self.handlers if cb != callback]
         return before - len(self.handlers)
+
+    async def _read(self, name: str) -> None:
+        self.calls.append(name)
+        if self._hang_on_read:
+            try:
+                await asyncio.sleep(3600)
+            except asyncio.CancelledError:
+                self.calls.append(f"{name} cancelled")
+                raise
+        if self._read_error is not None:
+            raise self._read_error
+
+    async def __call__(self, request: FullUserRequestLike) -> FullUserResponse:
+        await self._read("request")
+        self.requests.append(request)
+        return FakeFullUserResponse(FakeFullUserInfo(self.about))
+
+    async def get_entity(self, entity: int | str) -> SenderLike:
+        await self._read("get_entity")
+        found = self.users.get(entity) if isinstance(entity, int) else self.chats.get(entity)
+        if found is None:
+            raise ValueError("fake entity is not in the cache")
+        return found
+
+    async def download_profile_photo(
+        self, entity: SenderLike, file: str, *, download_big: bool = True
+    ) -> str | None:
+        await self._read("download_profile_photo")
+        self.photo_downloads.append((file, download_big))
+        if self.photo_bytes is None:
+            return None
+        await asyncio.to_thread(Path(file).write_bytes, self.photo_bytes)
+        return file
+
+    async def iter_messages(
+        self,
+        entity: SenderLike,
+        limit: int | None = None,
+        *,
+        search: str | None = None,
+        offset_id: int = 0,
+    ) -> AsyncIterator[HistoryMessage]:
+        await self._read("iter_messages")
+        self.history_queries.append((limit, search, offset_id))
+        newest_first = sorted(self.history, key=lambda message: message.id, reverse=True)
+        older = [m for m in newest_first if not offset_id or m.id < offset_id]
+        wanted = [
+            m for m in older if search is None or search.casefold() in (m.raw_text or "").casefold()
+        ]
+        for message in itertools.islice(wanted, limit):
+            yield message
 
     async def deliver(self, event: IncomingEvent) -> None:
         for callback, _ in list(self.handlers):
@@ -202,7 +291,43 @@ class InMemoryContacts:
         raise NotImplementedError
 
     async def update(self, contact_id: int, data: ContactUpdate) -> Contact:
-        raise NotImplementedError
+        contact = await self.get_by_id(contact_id)
+        assert contact is not None
+        changes: dict[str, object] = {}
+        if data.profile is not None:
+            changes["profile"] = data.profile
+        if data.summary is not None:
+            changes["summary"] = data.summary
+        changed = contact.model_copy(update=changes)
+        self.stored[contact.tg_id] = changed
+        return changed
+
+    async def update_identity(
+        self, contact_id: int, username: str | None, display_name: str | None
+    ) -> Contact:
+        contact = await self.get_by_id(contact_id)
+        assert contact is not None
+        changed = contact.model_copy(update={"username": username, "display_name": display_name})
+        self.stored[contact.tg_id] = changed
+        return changed
+
+    async def seed(
+        self,
+        tg_id: int,
+        *,
+        status: ContactStatus = ContactStatus.NEW,
+        username: str | None = None,
+        display_name: str | None = None,
+        profile: dict[str, object] | None = None,
+    ) -> Contact:
+        created = await self.create(
+            ContactCreate(
+                tg_id=tg_id, username=username, display_name=display_name, profile=profile or {}
+            )
+        )
+        seeded = created.model_copy(update={"status": status})
+        self.stored[tg_id] = seeded
+        return seeded
 
     async def touch_last_message_at(self, contact_id: int, at: datetime) -> Contact:
         contact = await self.get_by_id(contact_id)

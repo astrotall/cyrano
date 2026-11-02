@@ -16,3 +16,8 @@ class ContactStatus(StrEnum):
 class MessageDirection(StrEnum):
     INCOMING = "incoming"
     OUTGOING = "outgoing"
+
+
+class LeomatchTextKind(StrEnum):
+    CARD = "card"
+    MATCH = "match"

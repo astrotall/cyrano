@@ -7,13 +7,15 @@ import signal
 import subprocess
 import sys
 import time
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
+from dataclasses import dataclass
 from pathlib import Path
 
 import pytest
 
 from cyrano import main as main_module
 from cyrano.config import Settings, load_settings
+from cyrano.domain.models import ContactProfile
 from cyrano.logging import configure_logging
 from cyrano.main import main, run
 from cyrano.userbot.errors import Disconnected, SessionMissing, SessionNotAuthorized
@@ -26,7 +28,15 @@ from tests.conftest import (
     SECRET_VALUES,
 )
 from tests.fake_app import CONNECTING_MARKER, HANGING_CONNECT_SCENARIO
-from tests.userbot.fakes import FakeClient, touch_session_file
+from tests.userbot.fakes import (
+    FAKE_SENDER_ID,
+    FakeClient,
+    FakeEvent,
+    FakeSender,
+    InMemoryContacts,
+    InMemoryMessages,
+    touch_session_file,
+)
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 SIGNAL_EXIT_LIMIT_SECONDS = 2.0
@@ -39,7 +49,22 @@ def session_env(
     session_path = tmp_path / "session" / "userbot"
     touch_session_file(tmp_path / "session" / "userbot.session")
     monkeypatch.setenv("USERBOT_SESSION_PATH", str(session_path))
+    monkeypatch.setenv("MEDIA_DIR", str(tmp_path / "media"))
     return {**full_env, "USERBOT_SESSION_PATH": str(session_path)}
+
+
+@dataclass
+class Repositories:
+    contacts: InMemoryContacts
+    messages: InMemoryMessages
+
+
+@pytest.fixture(autouse=True)
+def repositories(monkeypatch: pytest.MonkeyPatch) -> Repositories:
+    stored = Repositories(InMemoryContacts(), InMemoryMessages())
+    monkeypatch.setattr("cyrano.main.SqlContactRepository", lambda _: stored.contacts)
+    monkeypatch.setattr("cyrano.main.SqlMessageRepository", lambda _: stored.messages)
+    return stored
 
 
 def _factory(client: FakeClient) -> Callable[[Settings], UserbotClient]:
@@ -388,3 +413,156 @@ def test_unknown_subcommand_is_rejected(capsys: pytest.CaptureFixture[str]) -> N
         main(["unknown"])
 
     assert raised.value.code == 2
+
+
+POLL_ATTEMPTS = 200
+POLL_INTERVAL_SECONDS = 0.01
+
+
+async def _wait_until(condition: Callable[[], Awaitable[bool]]) -> None:
+    for _ in range(POLL_ATTEMPTS):
+        if await condition():
+            return
+        await asyncio.sleep(POLL_INTERVAL_SECONDS)
+    pytest.fail("the condition was never met")
+
+
+async def _collected(repositories: Repositories, tg_id: int) -> bool:
+    contact = await repositories.contacts.get_by_tg_id(tg_id)
+    return (
+        contact is not None
+        and ContactProfile.model_validate(contact.profile).collected_at is not None
+    )
+
+
+def _readable_client(**kwargs: object) -> FakeClient:
+    client = FakeClient(**kwargs)  # type: ignore[arg-type]
+    client.users[FAKE_SENDER_ID] = FakeSender()
+    client.about = "fake bio"
+    return client
+
+
+async def test_the_collector_is_started_and_sweeps_waiting_contacts(
+    session_env: dict[str, str], heartbeat_file: Path, repositories: Repositories
+) -> None:
+    await repositories.contacts.seed(FAKE_SENDER_ID)
+    client = _readable_client()
+    stop = asyncio.Event()
+
+    task = asyncio.create_task(
+        run(load_settings(env_file=None), stop, client_factory=_factory(client))
+    )
+    await _wait_until(lambda: _collected(repositories, FAKE_SENDER_ID))
+    stop.set()
+    await asyncio.wait_for(task, timeout=2)
+
+    assert client.write_attempts == []
+    assert client.calls.index("catch_up") < client.calls.index("get_entity")
+
+
+async def test_a_new_contact_registered_by_the_intake_is_collected(
+    session_env: dict[str, str], heartbeat_file: Path, repositories: Repositories
+) -> None:
+    client = _readable_client()
+    stop = asyncio.Event()
+    task = asyncio.create_task(
+        run(load_settings(env_file=None), stop, client_factory=_factory(client))
+    )
+    await asyncio.sleep(0.05)
+
+    await client.deliver(FakeEvent())
+    await _wait_until(lambda: _collected(repositories, FAKE_SENDER_ID))
+    stop.set()
+    await asyncio.wait_for(task, timeout=2)
+
+    contact = await repositories.contacts.get_by_tg_id(FAKE_SENDER_ID)
+    assert contact is not None
+    assert len(repositories.messages.stored) == 1
+    assert client.write_attempts == []
+
+
+async def test_the_collector_is_cancelled_before_the_client_disconnects(
+    session_env: dict[str, str], heartbeat_file: Path, repositories: Repositories
+) -> None:
+    await repositories.contacts.seed(FAKE_SENDER_ID)
+    calls: list[str] = []
+    client = _readable_client(hang_on_read=True, calls=calls)
+    stop = asyncio.Event()
+    task = asyncio.create_task(
+        run(load_settings(env_file=None), stop, client_factory=_factory(client))
+    )
+
+    await _wait_until(lambda: _contains(calls, "get_entity"))
+    stop.set()
+    await asyncio.wait_for(task, timeout=2)
+
+    assert calls.index("get_entity cancelled") < calls.index("remove_event_handler")
+    assert calls.index("remove_event_handler") < calls.index("disconnect")
+    assert not await _collected(repositories, FAKE_SENDER_ID)
+
+
+async def _contains(calls: list[str], name: str) -> bool:
+    return name in calls
+
+
+async def test_a_crashing_collector_does_not_stop_the_intake(
+    session_env: dict[str, str],
+    heartbeat_file: Path,
+    repositories: Repositories,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    class _CrashingCollector:
+        def __init__(self, *args: object, **kwargs: object) -> None:
+            pass
+
+        async def run(self) -> None:
+            raise RuntimeError("fake collector crash")
+
+    monkeypatch.setattr("cyrano.main.ProfileCollector", _CrashingCollector)
+    configure_logging("INFO")
+    client = _readable_client()
+    stop = asyncio.Event()
+    task = asyncio.create_task(
+        run(load_settings(env_file=None), stop, client_factory=_factory(client))
+    )
+    await asyncio.sleep(0.05)
+
+    await client.deliver(FakeEvent())
+    await asyncio.sleep(0.05)
+
+    assert not task.done()
+    assert len(repositories.messages.stored) == 1
+    stop.set()
+    await asyncio.wait_for(task, timeout=2)
+    records = [json.loads(line) for line in capsys.readouterr().out.splitlines() if line]
+    crashes = [r for r in records if r["msg"] == "profile collector stopped"]
+    assert [r["error"] for r in crashes] == ["RuntimeError"]
+    assert "fake collector crash" not in json.dumps(records)
+
+
+async def test_the_collector_is_not_started_when_the_start_is_interrupted(
+    session_env: dict[str, str],
+    heartbeat_file: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    created: list[object] = []
+
+    class _RecordingCollector:
+        def __init__(self, *args: object, **kwargs: object) -> None:
+            created.append(self)
+
+        async def run(self) -> None:
+            created.append("run")
+
+    monkeypatch.setattr("cyrano.main.ProfileCollector", _RecordingCollector)
+    client = FakeClient(hang_on_connect=True)
+    stop = asyncio.Event()
+    asyncio.get_running_loop().call_later(0.05, stop.set)
+
+    await asyncio.wait_for(
+        run(load_settings(env_file=None), stop, client_factory=_factory(client)), timeout=2
+    )
+
+    assert "run" not in created
+    assert client.write_attempts == []

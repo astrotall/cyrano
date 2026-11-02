@@ -108,6 +108,16 @@ class SqlContactRepository:
             await session.flush()
             return Contact.model_validate(row)
 
+    async def update_identity(
+        self, contact_id: int, username: str | None, display_name: str | None
+    ) -> Contact:
+        async with self._session_factory.begin() as session:
+            row = await _locked_contact(session, contact_id)
+            row.username = username
+            row.display_name = display_name
+            await session.flush()
+            return Contact.model_validate(row)
+
     async def touch_last_message_at(self, contact_id: int, at: datetime) -> Contact:
         if at.utcoffset() is None:
             msg = "last_message_at must be timezone-aware"

@@ -7,7 +7,7 @@ from datetime import UTC, datetime
 import pytest
 from telethon import events
 
-from cyrano.domain.models import IncomingMessage
+from cyrano.domain.models import IncomingMessage, NewContactEvent
 from cyrano.services.contact_events import InMemoryContactEvents
 from cyrano.services.intake import IntakeService
 from cyrano.userbot.filters import Rejection
@@ -368,7 +368,7 @@ async def test_a_transient_failure_then_success_stores_one_message_and_publishes
 ):
     contacts = InMemoryContacts(lookup_failures=1)
     messages = InMemoryMessages()
-    events = InMemoryContactEvents()
+    events = InMemoryContactEvents[NewContactEvent]()
     handler = IncomingHandler(IntakeService(contacts, messages, events), sleep=RecordingSleep())
 
     await handler.handle(FakeEvent(id=51))

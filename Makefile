@@ -1,4 +1,4 @@
-.PHONY: install check test fmt up down logs migrate revision db-up
+.PHONY: install check test fmt up down logs migrate revision db-up login login-docker
 
 install:
 	uv sync --locked
@@ -35,3 +35,9 @@ revision:
 
 db-up:
 	docker compose -f docker-compose.yml -f docker-compose.override.yml up -d --wait postgres
+
+login:
+	uv run python -m cyrano login
+
+login-docker:
+	docker compose run --rm app python -m cyrano login

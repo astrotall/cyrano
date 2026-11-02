@@ -36,11 +36,13 @@ Key principles:
 - **Personal data stays local.** Persona, examples, sessions, media and messages never go to git.
   Message text, names and other personal data are never logged at INFO or above.
 
-> The project skeleton (CYR-8) and the storage layer (CYR-9) exist. The flow below is the plan.
+> The project skeleton (CYR-8), the storage layer (CYR-9) and the userbot intake (CYR-10) exist.
+> The flow below is the plan.
 
 ## Architecture diagram
 
-Planned flow. The boxes marked (planned) do not exist yet.
+Planned flow. The boxes marked (planned) do not exist yet. The userbot box exists for listening and
+registering contacts only.
 
 ```
  unknown sender
@@ -49,7 +51,7 @@ Planned flow. The boxes marked (planned) do not exist yet.
  +-----------------------+   registers contact (new),     +------------------+
  | userbot (Telethon)    |   collects profile             | PostgreSQL       |
  | second account        |------------------------------->| contacts,        |
- | (planned)             |                                | messages,        |
+ | (registers, exists)   |                                | messages,        |
  +-----------------------+                                | modes            |
       |  card                                              +------------------+
       v                                                           ^
@@ -78,13 +80,34 @@ Planned flow. The boxes marked (planned) do not exist yet.
 
 What exists: configuration, JSON logging, the app process with a heartbeat, the Arq worker with a
 placeholder job, the contact status rules, the database schema with its migrations and
-repositories, Docker and CI. Nothing calls the repositories yet. The userbot, bot and LLM packages
-are empty; `services` holds only the repository interfaces. Details:
-[.claude/docs/contact-lifecycle.md](.claude/docs/contact-lifecycle.md).
+repositories, Docker and CI, and the userbot: it logs the second account in, listens for private
+messages, registers unknown senders as contacts with status `new`, stores their messages and
+publishes an in-memory event for each new contact. It never sends anything. The bot and LLM
+packages are empty; `services` holds the repository interfaces, the intake and the event queue.
+Details: [.claude/docs/contact-lifecycle.md](.claude/docs/contact-lifecycle.md).
+
+### What the userbot does and does not do
+
+Does:
+
+- listens on the second account and handles only real private messages from real users;
+- registers an unknown sender as a contact with status `new` and stores the message (a photo or
+  sticker counts too: the text is the caption or empty, the media is not downloaded);
+- processes messages that arrived while the app was down (catch-up on start); a redelivered message
+  is stored once.
+
+Does not:
+
+- send anything, mark messages as read or answer anyone, unknown senders included. Replies are a
+  later ticket and will go only through the guarded sender;
+- react to groups, channels, bots, deleted accounts, Telegram's service account or its own
+  messages;
+- change a status. The step from `new` to `pending` belongs to the control bot (CYR-12).
 
 ### Code layers
 
-Import direction (enforced by review, and by a test for `domain`, `db` and `services`; full rules in
+Import direction (enforced by review, and by a test for `domain`, `db`, `services` and `userbot`,
+which is also the only package that may import Telethon; full rules in
 [.claude/docs/architecture.md](.claude/docs/architecture.md)):
 
 ```
@@ -111,9 +134,9 @@ Import direction (enforced by review, and by a test for `domain`, `db` and `serv
 | Delayed jobs | Arq on Redis | now (skeleton worker, placeholder job) |
 | Cache and queue | Redis 7.4 (AOF) | now (compose service) |
 | Database server | PostgreSQL 16.15 | now (compose service, migrations, tests) |
-| Userbot | Telethon | planned, CYR-10 |
+| Userbot | Telethon | now (listens and registers contacts; sends nothing) |
 | Control bot | aiogram | planned, CYR-12 |
-| ORM and migrations | SQLAlchemy 2.x (async), asyncpg, Alembic | now (schema and repositories; nothing calls them yet) |
+| ORM and migrations | SQLAlchemy 2.x (async), asyncpg, Alembic | now (schema and repositories, used by the intake) |
 | LLM client | DeepSeek over plain httpx, no SDK | planned, CYR-13 |
 | Lint, format | Ruff | now |
 | Types | mypy strict with the Pydantic plugin | now |
@@ -134,7 +157,7 @@ What exists now:
 ├── pyproject.toml                # dependencies, Ruff, mypy, pytest config
 ├── uv.lock
 ├── .python-version               # 3.14
-├── Makefile                      # install, check, test, fmt, up, down, logs, migrate, revision, db-up
+├── Makefile                      # install, check, test, fmt, up, down, logs, migrate, revision, db-up, login, login-docker
 ├── Dockerfile                    # multi-stage, non-root runtime
 ├── docker-compose.yml            # app, worker, one-shot migrate, postgres, redis
 ├── docker-compose.override.yml   # dev: Postgres and Redis on 127.0.0.1
@@ -154,18 +177,21 @@ What exists now:
 │   ├── dependabot.yml            # weekly: Actions, Docker, Compose, uv
 │   └── workflows/ci.yml
 ├── src/cyrano/
-│   ├── __main__.py               # python -m cyrano
-│   ├── main.py                   # app entrypoint, signals, heartbeat
+│   ├── __main__.py               # python -m cyrano [login]
+│   ├── main.py                   # app entrypoint, login subcommand, signals, heartbeat
 │   ├── config.py                 # Settings, load_settings, ConfigError
 │   ├── logging.py                # JSON-lines logging
 │   ├── health.py                 # heartbeat file and the app healthcheck
-│   ├── userbot/                  # empty skeleton
+│   ├── userbot/                  # Telethon: protocols, filters, handler, client, login, runner
 │   ├── bot/                      # empty skeleton
 │   ├── llm/                      # empty skeleton
 │   ├── domain/                   # enums, status transition rules, errors, Pydantic models
 │   ├── db/                       # SQLAlchemy models, engine and sessions, repositories
 │   ├── services/
-│   │   └── repositories.py       # repository Protocols, the rest of the package is planned
+│   │   ├── repositories.py       # repository Protocols
+│   │   ├── intake.py             # IntakeService: register contact and message
+│   │   ├── sanitize.py           # NUL-byte removal
+│   │   └── contact_events.py     # ContactEventPublisher, bounded in-memory queue
 │   └── worker/
 │       └── settings.py           # Arq WorkerSettings, placeholder job
 └── tests/                        # mirrors src/cyrano; database tests need a real PostgreSQL
@@ -203,7 +229,8 @@ Empty values count as unset. If a required variable is missing or invalid, the a
 | `POSTGRES_HOST_PORT`, `REDIS_HOST_PORT` | optional override, Docker only; not in `.env.example` | ports 5432 and 6379 |
 | `TEST_DATABASE_URL` | for `make test` only, not an application setting | database tests fail with a message naming `make db-up` |
 
-The skeleton does not call Telegram or DeepSeek, so validation only checks types and formats.
+Validation only checks types and formats; it never calls Telegram or DeepSeek. The app itself
+connects to Telegram once a session exists (see [Telegram login](#telegram-login)).
 
 The template holds the values for running on the host with Postgres and Redis from compose:
 `DATABASE_URL` and `REDIS_URL` point at `localhost`, `USERBOT_SESSION_PATH` and `MEDIA_DIR` are
@@ -219,10 +246,47 @@ database in the local `DATABASE_URL` must match `POSTGRES_USER`, `POSTGRES_PASSW
 deployment. The password goes into a URL unescaped, so use only the URL-safe characters letters,
 digits and `-` `.` `_` `~` (for example `openssl rand -hex 24`).
 
+### Telegram login
+
+The userbot needs a session for the **second** Telegram account. That account is the one contacts
+talk to; it is separate from your main account, which owns the control bot. Use a number you can
+receive a login code on.
+
+1. **API credentials.** Log in at <https://my.telegram.org> with the second account's number, open
+   "API development tools", create an application and copy `api_id` and `api_hash` into
+   `TELEGRAM_API_ID` and `TELEGRAM_API_HASH` in `.env`.
+2. **Log in once.** Locally:
+
+   ```sh
+   make login          # uv run python -m cyrano login
+   ```
+
+   In Docker (same image, same volume as the app, so the app finds the session):
+
+   ```sh
+   make login-docker   # docker compose run --rm app python -m cyrano login
+   ```
+
+   The command asks for the phone number, then for the code Telegram sends, and for the two-step
+   verification password only if the account has one. It prints only that the session was saved.
+   Phone, code and password are never stored in a file, in `Settings` or in the logs.
+   `make login-docker` also starts Postgres, Redis and the one-shot `migrate` service, because
+   `app` depends on them; it needs an interactive terminal.
+3. **Start the app.** `python -m cyrano` or `make up`. Without a session file the app exits at once
+   with "run `make login`" and does not touch the network; with a revoked session it says so too.
+   Run the login before `make up`, otherwise the container keeps restarting with that message.
+
+**The session file is a secret.** It is `USERBOT_SESSION_PATH` plus `.session` (for example
+`data/session/userbot.session` locally, `/data/session/userbot.session` in the `userbot_session`
+volume). Whoever has it controls the second account without a code. It is created with mode `0600`
+and is git-ignored and docker-ignored; never commit, copy or share it. To revoke it, end the session
+in Telegram under Settings, Devices.
+
 ### Run with Docker
 
 ```sh
 cp .env.example .env   # once
+make login-docker   # once, before the first start (see Telegram login)
 make up      # docker compose up -d --build: migrate, app, worker, postgres, redis
 make logs    # follow logs; app and worker each print a "started" line
 make down    # stop everything (named volumes are kept)
@@ -239,8 +303,8 @@ make down    # stop everything (named volumes are kept)
   Arq's delayed jobs survive restarts.
 - **Pinned images.** `postgres:16.15-alpine` and `redis:7.4-alpine`. Dependabot proposes bumps
   weekly (`.github/dependabot.yml`).
-- **Volumes.** `postgres_data`, `redis_data`, `userbot_session` (app only), `media` (app and
-  worker). `down` keeps them.
+- **Volumes.** `postgres_data`, `redis_data`, `userbot_session` (app and the login command),
+  `media` (app and worker). `down` keeps them.
 
 ### Postgres and Redis from the host
 
@@ -264,15 +328,29 @@ override, for example on a server: `docker compose -f docker-compose.yml up -d`.
 make install   # uv sync --locked
 make db-up     # Postgres from compose; needed by the next line
 make migrate   # alembic upgrade head against DATABASE_URL
+make login     # once: create the Telegram session
 uv run python -m cyrano                                                   # app
 uv run arq --custom-log-dict cyrano.worker.settings.LOG_CONFIG \
     cyrano.worker.settings.WorkerSettings                                 # worker
 ```
 
 `.env` in the current directory is loaded; real environment variables take precedence over it.
-The app builds a database engine but opens no connection until a later ticket uses it, and it does
-not connect to Redis. The worker connects to Redis; the compose one works via
-`docker compose up -d redis`.
+The app connects to Telegram and to Postgres (when the first message arrives); it does not connect
+to Redis. The worker connects to Redis; the compose one works via `docker compose up -d redis`.
+
+### Makefile targets
+
+| Target | What it does |
+| --- | --- |
+| `make install` | `uv sync --locked` |
+| `make check` | Ruff lint, Ruff format check, mypy strict |
+| `make test` | pytest; database tests need `make db-up` |
+| `make fmt` | Ruff fix and format |
+| `make up`, `make down`, `make logs` | Start the stack in Docker (build included), stop it, follow logs |
+| `make db-up` | Postgres from compose, with the dev override |
+| `make migrate`, `make revision m="..."` | Run Alembic, or autogenerate a revision |
+| `make login` | Log the second account in locally and save the session |
+| `make login-docker` | The same inside the compose image and volume |
 
 ### Migrations
 
@@ -299,7 +377,7 @@ the default applies.
 | Variable | Required | Default | Description |
 | --- | --- | --- | --- |
 | `TELEGRAM_API_ID`, `TELEGRAM_API_HASH` | yes | | Telegram API credentials of the second account (the userbot). Create them on my.telegram.org, menu "API development tools" |
-| `USERBOT_SESSION_PATH` | yes | | Where the Telethon session file is stored |
+| `USERBOT_SESSION_PATH` | yes | | Where the Telethon session file is stored; Telethon appends `.session`, and the parent directory is created if needed. The file is a secret |
 | `BOT_TOKEN` | yes | | Control bot token from @BotFather |
 | `OWNER_TELEGRAM_ID` | yes | | Telegram id of the main account; the only user the control bot will answer (planned, CYR-12) |
 | `DEEPSEEK_API_KEY` | yes | | DeepSeek API key |
@@ -317,7 +395,8 @@ the default applies.
 | `TEST_DATABASE_URL` | for `make test` | | Not an application setting; see [Testing](#testing) |
 
 A relative `USERBOT_SESSION_PATH` or `MEDIA_DIR` is kept as written; when something opens it
-(nothing does yet), it is relative to the current working directory of the process. Inside the
+(the userbot opens the session path; nothing opens the media directory yet), it is relative to the
+current working directory of the process. Inside the
 containers compose sets both to absolute paths.
 
 Logs are JSON lines on stdout for the app, the worker and Arq's own lines. Timestamps in log lines
@@ -333,7 +412,9 @@ make test      # uv run pytest
 pytest with `asyncio_mode = auto`; tests live in `tests/` and mirror `src/cyrano`. Current tests
 cover configuration, logging (including secret masking), the heartbeat and healthcheck, the app
 loop, a real-process SIGTERM check, the Arq worker settings, the status transition rules, the
-migration and the repositories. All tests use fake values only.
+migration and the repositories, and for the userbot: the filters, the handler, the client and
+startup logic, the login flow, the intake on real PostgreSQL and the check that the userbot never
+sends. Telegram is always faked: no test connects to it. All tests use fake values only.
 
 Database tests run against real PostgreSQL, never SQLite, because JSONB and native enums must be
 tested for real. `TEST_DATABASE_URL` (from the environment or `.env`; the template value targets

@@ -87,3 +87,17 @@ class ModeCreate(_Input):
     prompt_fragment: str
     few_shot_examples: list[dict[str, object]] = Field(default_factory=list)
     enabled: bool = True
+
+
+class IncomingMessage(_Input):
+    tg_id: TelegramId
+    username: str | None = None
+    display_name: str | None = None
+    tg_message_id: TelegramId
+    text: str
+    sent_at: UtcDatetime
+
+
+class NewContactEvent(_Input):
+    contact_id: int
+    message_id: int

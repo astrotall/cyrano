@@ -1,0 +1,93 @@
+"""The small surface of Telethon the application uses, so tests need no real Telethon objects."""
+
+from __future__ import annotations
+
+import asyncio
+from collections.abc import Awaitable, Callable
+from datetime import datetime
+from typing import Protocol
+
+
+class SenderLike(Protocol):
+    @property
+    def id(self) -> int: ...
+
+    @property
+    def username(self) -> str | None: ...
+
+    @property
+    def first_name(self) -> str | None: ...
+
+    @property
+    def last_name(self) -> str | None: ...
+
+    @property
+    def bot(self) -> bool | None: ...
+
+    @property
+    def deleted(self) -> bool | None: ...
+
+    @property
+    def is_self(self) -> bool | None: ...
+
+
+class IncomingEvent(Protocol):
+    @property
+    def id(self) -> int: ...
+
+    @property
+    def date(self) -> datetime: ...
+
+    @property
+    def out(self) -> bool: ...
+
+    @property
+    def is_private(self) -> bool | None: ...
+
+    @property
+    def is_group(self) -> bool | None: ...
+
+    @property
+    def is_channel(self) -> bool | None: ...
+
+    @property
+    def sender_id(self) -> int | None: ...
+
+    @property
+    def raw_text(self) -> str | None: ...
+
+    async def get_sender(self) -> SenderLike | None: ...
+
+
+EventCallback = Callable[[IncomingEvent], Awaitable[None]]
+
+
+class UserbotClient(Protocol):
+    @property
+    def disconnected(self) -> asyncio.Future[object]: ...
+
+    async def connect(self) -> None: ...
+
+    def disconnect(self) -> Awaitable[None]: ...
+
+    async def is_user_authorized(self) -> bool: ...
+
+    async def catch_up(self) -> None: ...
+
+    def add_event_handler(self, callback: EventCallback, event: object) -> None: ...
+
+    def remove_event_handler(self, callback: EventCallback) -> int: ...
+
+
+class LoginClient(Protocol):
+    async def connect(self) -> None: ...
+
+    def disconnect(self) -> Awaitable[None]: ...
+
+    async def is_user_authorized(self) -> bool: ...
+
+    async def send_code_request(self, phone: str) -> object: ...
+
+    async def sign_in(
+        self, phone: str | None = None, code: str | None = None, *, password: str | None = None
+    ) -> object: ...

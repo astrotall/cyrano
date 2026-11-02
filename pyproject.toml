@@ -15,6 +15,8 @@ dependencies = [
     "sqlalchemy[asyncio]>=2.0,<3",
     "asyncpg>=0.30",
     "alembic>=1.14",
+    # MTProto client for the userbot on the second account; untyped, so mypy has an override.
+    "telethon>=1.45",
 ]
 
 [dependency-groups]
@@ -55,6 +57,10 @@ python_version = "3.14"
 strict = true
 files = ["src", "tests", "migrations"]
 plugins = ["pydantic.mypy"]
+
+[[tool.mypy.overrides]]
+module = ["telethon", "telethon.*"]
+ignore_missing_imports = true
 
 [tool.pydantic-mypy]
 init_forbid_extra = true

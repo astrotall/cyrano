@@ -43,6 +43,19 @@ changing one is a large change.
 | Database tests run on real PostgreSQL, one fresh database per test, migrated by Alembic; unreachable Postgres fails the test | JSONB and native enums behave differently on anything else; a skipped test proves nothing |
 | `TEST_DATABASE_URL` stays out of `Settings`; tests read it themselves from the environment or `.env` | The application must not know about a test database or require the variable in production |
 | Dependencies added for storage: `sqlalchemy[asyncio]`, `asyncpg`, `alembic` | Agreed for CYR-9; together they are the stack already decided above |
+| Dependency added for the userbot: `telethon` (1.45.0 at the time of CYR-10), imported only inside `userbot/`, typed through Protocols with a per-module mypy override (`ignore_missing_imports`) | Agreed for CYR-10; it ships no type information, and the Protocols keep our code free of `Any` and testable with fakes |
+| `NewContactEvent` is best-effort; the database is the source of truth | A lost event must not lose a contact. Contacts in status `new` are in the database whether or not their event was delivered, so CYR-12 can always find them |
+| A bounded in-memory queue (1000) carries the events; a full queue drops the new event and logs a warning with counters | Intake must never block or fail because a consumer is slow or missing. Nothing consumes the queue yet (CYR-12) |
+| A contact is registered on any private message from a real user, media-only messages included; the text is the caption or an empty string; media is not downloaded | The owner has to see everyone who wrote. `messages.text` allows an empty string, so no placeholder is needed. Downloads belong to a later ticket |
+| NUL bytes are removed from text, username and display name before any repository call | PostgreSQL rejects NUL in text and JSONB; otherwise one such message would fail every redelivery of itself |
+| Two simultaneous first messages are resolved by get-after-conflict: the loser of `create` reads the contact by `tg_id` and continues as for a known sender | The unique `tg_id` already arbitrates; no extra lock or retry loop. Exactly one call created the contact, so exactly one event is published |
+| Catch-up on every start: the client is built with `catch_up=True` and `catch_up()` is called after connect | Messages that arrived while the app was down are processed. Calling `catch_up()` alone would not load the update state saved in the session. Idempotency makes replays safe |
+| The handler is registered before the client connects | No update can arrive at a client without a handler |
+| The app exits at once with "run `make login`" when the session file is missing, before any client exists; an unauthorized session and a 30 s connect timeout are readable fatal errors too; normal startup never prompts | A restart loop must never hang, prompt for input or touch the network without a session. The restart policy handles the rest |
+| An unexpected disconnect ends the process with an error | Telethon already retries; when it gives up, a restart is the honest recovery, and the restart policy provides it |
+| The handler retries the intake call: 3 attempts in total, 1 s then 2 s apart, for any exception except `asyncio.CancelledError`; after the last attempt it logs an error with the class name and counters and drops the message | A transient failure (a database blip) should not lose a message. Intake is idempotent (message append on `(contact_id, tg_message_id)`, contact creation by get-after-conflict), so a repeat is safe. Updates are sequential, so a retry delays the next update by a few seconds; accepted. Limit: a failure after the contact was created but before its event was published still loses the event (events are best-effort) |
+| SIGTERM and SIGINT during startup end it at once: the connect and the catch-up are each raced against the stop event, the 30 s connect timeout stays for the real timeout case | The connect timeout is longer than Docker's 10 s grace period, so waiting it out meant SIGKILL. A stop request must give a clean shutdown (handler removed, client closed, engine disposed, exit 0) in about a second |
+| The session is created by `python -m cyrano login` (`make login`, `make login-docker`); phone, code and password are asked, passed on and never stored or logged; the phone is asked before any network call; the file gets mode `0600` | The session file is a secret that controls the second account. Asking first lets the owner abort without any network traffic |
 
 ## Open questions
 
@@ -52,7 +65,6 @@ changing one is a large change.
 | How does the worker reconnect to Redis after a Redis restart? | CYR-17 |
 | Scrubbing of free-text logs and coverage tooling | CYR-28 |
 | Explicit compose project name (today it defaults to the directory name) | open, no ticket |
-| `uv_build` is pinned `>=0.12.4,<0.13.0` in `pyproject.toml`; bump it when uv reaches 0.13 | open, no ticket |
 | Debounce mechanism and window length | CYR-17 |
 | How many last messages go into the prompt | CYR-16 |
 | Where the layered prompt builder lives (`llm`, `services` or `prompts`) | CYR-16 |
@@ -60,4 +72,5 @@ changing one is a large change.
 | Numbers: rate limits, humanized delay, quiet hours window | CYR-22, CYR-18 |
 | Numbers: limits on proactive messages beyond two unanswered | CYR-23 |
 | May `bot`, `userbot` and `worker` import each other, or only `services`? | open, no ticket |
+| Order of the consumers of `NewContactEvent`: profile collection (CYR-11) before the card (CYR-12)? | CYR-11, CYR-12 |
 | Which hooks CYR-29 installs and which tool manages them | CYR-29 |

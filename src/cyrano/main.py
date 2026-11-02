@@ -10,6 +10,8 @@ import signal
 import sys
 from collections.abc import Callable, Sequence
 
+from sqlalchemy.exc import SQLAlchemyError
+
 from cyrano.bot.app import ControlBot
 from cyrano.bot.errors import ControlBotError, PollingFailed
 from cyrano.config import ConfigError, Settings, load_settings
@@ -17,6 +19,8 @@ from cyrano.db.repositories import (
     SqlContactRepository,
     SqlMessageRepository,
     SqlModeRepository,
+    SqlPersonaRepository,
+    SqlStyleExampleRepository,
 )
 from cyrano.db.session import build_engine, build_session_factory
 from cyrano.domain.enums import LLMStep
@@ -31,7 +35,10 @@ from cyrano.services.contact_events import InMemoryContactEvents
 from cyrano.services.intake import IntakeService
 from cyrano.services.llm_check import check_llm
 from cyrano.services.llm_client import LLMClient
+from cyrano.services.persona_service import PersonaService
 from cyrano.services.profile_collector import ProfileCollector
+from cyrano.services.style_import import ExamplesImporter, PersonaImporter
+from cyrano.style_cli import StyleCommands, StyleRequest, add_style_parsers, style_request
 from cyrano.userbot.client import build_client, ensure_session_exists
 from cyrano.userbot.errors import UserbotError
 from cyrano.userbot.leomatch_source import TelethonLeomatchSource
@@ -47,8 +54,10 @@ LLM_CHECK_COMMAND = "llm-check"
 EXIT_USERBOT_ERROR = 1
 EXIT_CONFIG_ERROR = 2
 EXIT_LLM_ERROR = 1
+EXIT_STYLE_ERROR = 1
 LOGIN_CANCELLED_MESSAGE = "Login cancelled. Nothing was saved."
 POLLING_ENDED_REASON = "polling ended unexpectedly"
+STORAGE_FAILED_MESSAGE = "storage failed: {error}"
 
 
 def _report_collector_exit(task: asyncio.Task[None]) -> None:
@@ -184,11 +193,32 @@ async def _run_llm_check_command(settings: Settings) -> int:
         await factory.aclose()
 
 
+async def _run_style_command(settings: Settings, request: StyleRequest) -> int:
+    engine = build_engine(settings)
+    session_factory = build_session_factory(engine)
+    personas = SqlPersonaRepository(session_factory)
+    examples = SqlStyleExampleRepository(session_factory)
+    commands = StyleCommands(
+        PersonaImporter(personas),
+        ExamplesImporter(examples),
+        PersonaService(personas),
+        examples,
+    )
+    try:
+        return await commands.run(request)
+    except (SQLAlchemyError, OSError) as exc:
+        print(STORAGE_FAILED_MESSAGE.format(error=type(exc).__name__), file=sys.stderr)
+        return EXIT_STYLE_ERROR
+    finally:
+        await engine.dispose()
+
+
 def _parse_args(argv: Sequence[str] | None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(prog="python -m cyrano", description=__doc__)
     commands = parser.add_subparsers(dest="command")
     commands.add_parser(LOGIN_COMMAND, help="log the second account in and save the session")
     commands.add_parser(LLM_CHECK_COMMAND, help="send one tiny request to the LLM provider")
+    add_style_parsers(commands)
     return parser.parse_args(argv)
 
 
@@ -202,6 +232,9 @@ def main(argv: Sequence[str] | None = None) -> int:
     configure_logging(settings.log_level, settings.library_log_levels)
     if args.command == LLM_CHECK_COMMAND:
         return asyncio.run(_run_llm_check_command(settings))
+    request = style_request(args)
+    if request is not None:
+        return asyncio.run(_run_style_command(settings, request))
     try:
         if args.command == LOGIN_COMMAND:
             asyncio.run(run_login(settings))

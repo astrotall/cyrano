@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+from collections.abc import Sequence
+from dataclasses import dataclass
+
 from cyrano.domain.enums import ContactStatus
 
 
@@ -73,3 +76,27 @@ class LLMUnavailableError(LLMError):
 
 class LLMInvalidResponseError(LLMError):
     pass
+
+
+MAX_REPORTED_PROBLEMS = 20
+
+
+@dataclass(frozen=True)
+class ContentProblem:
+    path: str
+    rule: str
+
+
+class ImportFileError(DomainError):
+    pass
+
+
+class ContentValidationError(DomainError):
+    def __init__(self, subject: str, problems: Sequence[ContentProblem]) -> None:
+        shown = problems[:MAX_REPORTED_PROBLEMS]
+        header = f"{subject} is invalid: {len(problems)} problem(s)"
+        if len(problems) > len(shown):
+            header += f", showing the first {len(shown)}"
+        lines = [header, *(f"  {problem.path}: {problem.rule}" for problem in shown)]
+        super().__init__("\n".join(lines))
+        self.problems = tuple(problems)

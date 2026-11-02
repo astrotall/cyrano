@@ -22,8 +22,9 @@ Contact statuses: `new -> pending -> active -> paused / ignored`. Meaning and tr
 [contact-lifecycle.md](.claude/docs/contact-lifecycle.md).
 
 The skeleton (CYR-8), the storage layer (CYR-9), the userbot intake (CYR-10), the profile
-collection (CYR-11), the control bot with the contact card (CYR-12) and the LLM client (CYR-13,
-not used by the app yet) exist. Everything
+collection (CYR-11), the control bot with the contact card (CYR-12), the LLM client (CYR-13, not
+used by the app yet) and the persona and style examples import (CYR-14, not used by the app yet)
+exist. Everything
 else is planned and marked with its ticket key.
 Never describe planned behaviour as existing.
 
@@ -59,6 +60,7 @@ Changing any of these is a large change (see Workflow expectations). Reasons:
 | Telethon | in the project (userbot listens, registers contacts and reads profiles; imported only in `userbot/`) |
 | aiogram 3 | in the project (control bot; imported only in `bot/`) |
 | DeepSeek client over plain httpx | in the project (`llm/`; the only package that imports httpx; not wired into `main.py` yet) |
+| Persona and style examples | in the project (imported from local files into PostgreSQL by commands; selectors in `services/`; not wired into `main.run` yet) |
 | httpx.MockTransport in tests | in the project (no respx) |
 
 ## Repository layout
@@ -67,15 +69,17 @@ Changing any of these is a large change (see Workflow expectations). Reasons:
 .
 ├── CLAUDE.md, CONTRIBUTING.md, README.md
 ├── pyproject.toml, uv.lock, .python-version
-├── Makefile                      includes login, login-docker and llm-check
+├── Makefile                      includes login, login-docker, llm-check, persona-import, examples-import and examples-stats
 ├── Dockerfile, docker-compose.yml, docker-compose.override.yml
 ├── .env.example, .dockerignore, .gitignore
 ├── alembic.ini
 ├── migrations/                   async env.py, versions/
-├── .claude/docs/                 architecture, contact-lifecycle, safety-rules, decisions
+├── examples/                     invented sample persona and style examples (real files go to data/)
+├── .claude/docs/                 architecture, contact-lifecycle, safety-rules, decisions, persona-and-examples
 ├── .github/                      dependabot.yml, workflows/ci.yml
 ├── src/cyrano/
-│   ├── __main__.py, main.py      entrypoint (composition root), login and llm-check subcommands, signals, heartbeat
+│   ├── __main__.py, main.py      entrypoint (composition root), login, llm-check, persona and examples subcommands, signals, heartbeat
+│   ├── style_cli.py              the persona and examples commands
 │   ├── config.py                 Settings, load_settings, ConfigError
 │   ├── logging.py                JSON-lines logging
 │   ├── health.py                 heartbeat file and the app healthcheck
@@ -83,7 +87,8 @@ Changing any of these is a large change (see Workflow expectations). Reasons:
 │   ├── db/                       SQLAlchemy models, engine and sessions, repositories
 │   ├── services/                 repositories (Protocols), intake, sanitize, contact_events, profile_source,
 │   │                             leomatch, profile_collector, card_sender, card_builder, card_announcer,
-│   │                             card_actions, llm_client, llm_check; the rest is planned
+│   │                             card_actions, llm_client, llm_check, style_files, style_import, persona_service,
+│   │                             style_examples; the rest is planned
 │   ├── userbot/                  Telethon: protocols, filters, handler, client, login, runner, errors,
 │   │                             profile_source, leomatch_source, leomatch_match
 │   ├── bot/                      aiogram: app, middleware, handlers, rendering, callbacks, sender, messages, errors
@@ -122,6 +127,14 @@ reply parsing with validation retries, the constants and prompt texts), `service
 optional per-step `LLM_*`, `DEEPSEEK_BASE_URL` and `DEEPSEEK_THINKING` settings, the
 `python -m cyrano llm-check` command with `make llm-check`, and the tests with their fakes
 (`httpx.MockTransport` handlers, `FakeLLMClient`). Nothing in the app builds the client yet.
+CYR-14 added the persona and the style examples: `domain/style.py` (models, limits, the content
+hash), the import errors in `domain/errors.py`, `services/style_files.py`, `style_import.py`
+(`PersonaImporter`, `ExamplesImporter`), `persona_service.py` and `style_examples.py`
+(`ExampleSelector`), the two repository Protocols, `SqlPersonaRepository` and
+`SqlStyleExampleRepository`, migration `0002` (`persona`, `style_examples`), `style_cli.py` with the
+`persona` and `examples` subcommands and their Makefile targets, the optional `STYLE_EXAMPLES_MAX`
+setting, the invented samples in `examples/`, the `.gitignore` rules for real files, and the tests.
+They are stored in PostgreSQL, not read from a path at runtime; nothing in the app uses them yet.
 
 ## Detailed guides
 
@@ -130,6 +143,8 @@ optional per-step `LLM_*`, `DEEPSEEK_BASE_URL` and `DEEPSEEK_THINKING` settings,
 - [contact-lifecycle.md](.claude/docs/contact-lifecycle.md): statuses, transitions, the message
   flow step by step, debounce and re-check rules.
 - [safety-rules.md](.claude/docs/safety-rules.md): rules S1..S10, why, where enforced, how tested.
+- [persona-and-examples.md](.claude/docs/persona-and-examples.md): the persona and style examples:
+  file formats, limits, import commands, selection, privacy.
 - [decisions.md](.claude/docs/decisions.md): what is decided and why; open questions.
 - [CONTRIBUTING.md](CONTRIBUTING.md): branches, commits, Jira, pull requests, checks.
 

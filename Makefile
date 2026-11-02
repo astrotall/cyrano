@@ -1,4 +1,4 @@
-.PHONY: install check test fmt up down logs migrate revision db-up login login-docker llm-check
+.PHONY: install check test fmt up down logs migrate revision db-up login login-docker llm-check persona-import examples-import examples-stats
 
 install:
 	uv sync --locked
@@ -26,6 +26,17 @@ logs:
 
 migrate:
 	uv run alembic upgrade head
+
+persona-import:
+	@test -n "$(FILE)" || (echo 'usage: make persona-import FILE=data/persona.md' >&2; exit 2)
+	uv run python -m cyrano persona import "$(FILE)"
+
+examples-import:
+	@test -n "$(FILE)" || (echo 'usage: make examples-import FILE=data/style-examples.json' >&2; exit 2)
+	uv run python -m cyrano examples import "$(FILE)"
+
+examples-stats:
+	uv run python -m cyrano examples stats
 
 revision:
 	@test -n "$(m)" || (echo 'usage: make revision m="what changed"' >&2; exit 2)

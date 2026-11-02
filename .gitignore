@@ -3,6 +3,11 @@
 *.session-journal
 media/
 data/
+persona*.md
+style-examples*.json
+!examples/persona.sample.md
+!examples/style-examples.sample.json
+!.claude/docs/persona-and-examples.md
 
 .venv/
 __pycache__/

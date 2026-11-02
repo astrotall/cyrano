@@ -15,7 +15,13 @@ from sqlalchemy.engine import URL
 from sqlalchemy.ext.asyncio import create_async_engine
 
 from cyrano.config import load_settings
-from cyrano.db.repositories import SqlContactRepository, SqlMessageRepository, SqlModeRepository
+from cyrano.db.repositories import (
+    SqlContactRepository,
+    SqlMessageRepository,
+    SqlModeRepository,
+    SqlPersonaRepository,
+    SqlStyleExampleRepository,
+)
 from cyrano.db.session import SessionFactory, build_engine, build_session_factory
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -144,3 +150,13 @@ def messages(session_factory: SessionFactory) -> SqlMessageRepository:
 @pytest.fixture
 def modes(session_factory: SessionFactory) -> SqlModeRepository:
     return SqlModeRepository(session_factory)
+
+
+@pytest.fixture
+def personas(session_factory: SessionFactory) -> SqlPersonaRepository:
+    return SqlPersonaRepository(session_factory)
+
+
+@pytest.fixture
+def style_examples(session_factory: SessionFactory) -> SqlStyleExampleRepository:
+    return SqlStyleExampleRepository(session_factory)

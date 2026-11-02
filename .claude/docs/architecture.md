@@ -1,7 +1,7 @@
 # Architecture
 
-State as of CYR-13: the skeleton, the storage layer, the userbot intake, the profile collection, the
-control bot with the contact card and the LLM client exist (the LLM client has no consumer yet). Anything else is marked **planned** with its ticket.
+State as of CYR-14: the skeleton, the storage layer, the userbot intake, the profile collection, the
+control bot with the contact card, the LLM client and the persona with the style examples exist (the LLM client, the persona and the examples have no consumer yet). Anything else is marked **planned** with its ticket.
 Product and decisions: [CLAUDE.md](../../CLAUDE.md). Reasons: [decisions.md](decisions.md).
 
 ## Layers
@@ -13,18 +13,19 @@ Source lives in `src/cyrano/`.
 | `userbot/` | The only package that imports Telethon: client, session and login, event filters, the incoming-message handler, the listener lifecycle. Receives private messages on the second account and converts events into plain objects. Also holds the read-only adapters of the profile collection: `profile_source.py` (bio, names, photo) and `leomatch_source.py` with `leomatch_match.py` (the matching-bot chat). Planned: the actual Telegram send behind the sender (CYR-19) | exists for listening and registration (CYR-10) and for reading profiles (CYR-11); it sends nothing |
 | `bot/` | The only package that imports aiogram: the owner-only control bot. `app.py` (`ControlBot`: bot, dispatcher, polling, stop), `middleware.py` (owner-only), `handlers.py` (`/start`, the card buttons), `rendering.py` (pure card text, keyboard, decision), `callbacks.py` (callback data), `sender.py` (`TelegramCardSender`), `messages.py` (every Russian text), `errors.py` (readable fatal errors). Planned: notifications of stop-triggers and the rest of the panel (CYR-20, CYR-26) | exists for the card and its two buttons (CYR-12) |
 | `llm/` | The only package that imports httpx and the only one that knows the provider: `deepseek.py` (`DeepSeekClient`, `StepConfig`), `transport.py` (`RetryingTransport`), `factory.py` (`LLMClientFactory`), `wire.py` (the response fields it reads), `json_reply.py` (JSON extraction and validation problems), `prompts.py` (the texts it adds for JSON), `constants.py` (every number and string). See [LLM client](#llm-client-cyr-13) | exists (CYR-13); not wired into `main.py` yet, the first consumers are CYR-16, CYR-17 and CYR-25 |
-| `db/` | SQLAlchemy models (`models.py`), engine and session factory (`session.py`), repositories (`repositories.py`) | exists; called by the intake (CYR-10) |
-| `services/` | Business logic shared by userbot, bot and worker: contact lifecycle, sender, reply pipeline. `repositories.py` holds the repository Protocols, `intake.py` the `IntakeService`, `sanitize.py` the NUL-byte removal, `contact_events.py` the generic `ContactEventPublisher[T]` and `ContactEventSubscriber[T]` Protocols and the in-memory queue; CYR-11 added `profile_source.py` (the `ProfileSource` and `LeomatchSource` Protocols and `ProfileSourceError`), `leomatch.py` (the card parser) and `profile_collector.py` (`ProfileCollector`); CYR-12 added `card_sender.py` (the `CardSender` Protocol), `card_builder.py` (assembles the `ContactCard`), `card_announcer.py` (`CardAnnouncer`) and `card_actions.py` (`CardActions`); CYR-13 added `llm_client.py` (the `LLMClient` Protocol) and `llm_check.py` (`check_llm`, the request behind `llm-check`) | Protocols, intake, sanitization, events (CYR-10), the profile collector (CYR-11), the card announcer and actions (CYR-12) and the LLM Protocol (CYR-13) exist; the rest is planned from CYR-15 on |
+| `db/` | SQLAlchemy models (`models.py`), engine and session factory (`session.py`), repositories (`repositories.py`; CYR-14 added `SqlPersonaRepository` and `SqlStyleExampleRepository`) | exists; called by the intake (CYR-10) and by the import commands (CYR-14) |
+| `services/` | Business logic shared by userbot, bot and worker: contact lifecycle, sender, reply pipeline. `repositories.py` holds the repository Protocols, `intake.py` the `IntakeService`, `sanitize.py` the NUL-byte removal, `contact_events.py` the generic `ContactEventPublisher[T]` and `ContactEventSubscriber[T]` Protocols and the in-memory queue; CYR-11 added `profile_source.py` (the `ProfileSource` and `LeomatchSource` Protocols and `ProfileSourceError`), `leomatch.py` (the card parser) and `profile_collector.py` (`ProfileCollector`); CYR-12 added `card_sender.py` (the `CardSender` Protocol), `card_builder.py` (assembles the `ContactCard`), `card_announcer.py` (`CardAnnouncer`) and `card_actions.py` (`CardActions`); CYR-13 added `llm_client.py` (the `LLMClient` Protocol) and `llm_check.py` (`check_llm`, the request behind `llm-check`); CYR-14 added `style_files.py` (reading and validating the two import files), `style_import.py` (`PersonaImporter`, `ExamplesImporter`), `persona_service.py` (`PersonaService`) and `style_examples.py` (`ExampleSelector`, `collect_example_stats`), and the `PersonaRepository` and `StyleExampleRepository` Protocols in `repositories.py` | Protocols, intake, sanitization, events (CYR-10), the profile collector (CYR-11), the card announcer and actions (CYR-12), the LLM Protocol (CYR-13) and the persona and example services (CYR-14) exist; the rest is planned from CYR-15 on |
 | `worker/` | Arq worker: `settings.py` holds `WorkerSettings`, `startup`, `shutdown`, a placeholder `noop` job (Arq refuses to start a worker with no registered functions) | skeleton works; real jobs planned CYR-17 |
 | `config.py` | `Settings` (pydantic-settings), `load_settings`, `ConfigError` | exists |
 | `logging.py` | JSON-lines formatter, `build_log_config`, `configure_logging` | exists |
 | `health.py` | Heartbeat file, `is_alive`, `python -m cyrano.health` | exists |
-| `main.py`, `__main__.py` | App entrypoint (composition root), the `login` and `llm-check` subcommands, signal handling, heartbeat task | exists; the userbot is plugged in (CYR-10), the collector (CYR-11), the control bot and the announcer (CYR-12); `llm-check` builds the LLM factory (CYR-13), the app itself does not yet |
-| `domain/` | Leaf package, imports only pydantic and the standard library: enums, status transition rules, domain errors (the LLM errors among them), Pydantic models the layers exchange (`llm.py`: `LLMMessage`, `LLMUsage`, `LLMResult`) | exists |
+| `main.py`, `__main__.py` | App entrypoint (composition root), the `login`, `llm-check`, `persona` and `examples` subcommands, signal handling, heartbeat task | exists; the userbot is plugged in (CYR-10), the collector (CYR-11), the control bot and the announcer (CYR-12); `llm-check` builds the LLM factory (CYR-13); the persona and examples commands build the two repositories and the importers (CYR-14); `run` builds neither the LLM client nor the persona and example services yet |
+| `style_cli.py` | The `persona` and `examples` commands: the argparse definitions, `StyleRequest` and `StyleCommands`, which receive their importers, service and repository by injection and print counts only. `main.py` builds the concrete objects | exists (CYR-14); see [Persona and style examples](#persona-and-style-examples-cyr-14) |
+| `domain/` | Leaf package, imports only pydantic and the standard library: enums, status transition rules, domain errors (the LLM errors and the import validation errors among them), Pydantic models the layers exchange (`llm.py`: `LLMMessage`, `LLMUsage`, `LLMResult`; `style.py`: `Persona`, `Turn`, `StyleExample`, `StyleExampleCreate`, the persona and example limits, the content hash) | exists |
 | `prompts` | Prompt texts, few-shot data loading, trigger lists | planned, not created; the layered builder's location is decided in CYR-16 |
 
 `tests/` mirrors the packages (`tests/userbot`, `tests/bot`, `tests/llm`, `tests/domain`,
-`tests/db`, `tests/services`, `tests/worker`); the skeleton packages have empty test packages.
+`tests/db`, `tests/services`, `tests/worker`, and `tests/cli` for `style_cli.py`); the skeleton packages have empty test packages.
 `tests/userbot/fakes.py` holds the fake Telethon client, event and sender; `tests/llm/fakes.py` the scripted `httpx.MockTransport` handlers.
 
 ## Import direction
@@ -76,6 +77,8 @@ question in [decisions.md](decisions.md).
 | Arq job functions and worker settings | `worker` |
 | A data type or rule used by several layers | `domain` |
 | Prompt text, few-shot loading, trigger lists | `prompts` (planned) or config |
+| Parsing or validating a persona or examples file, choosing the examples for a mode | `services` (`style_files.py`, `style_examples.py`) |
+| A command-line subcommand and its output | an injected class in a top-level module like `style_cli.py`; `main.py` parses, builds and dispatches |
 | An environment-driven setting | `config.py` and the README Settings section, together; `.env.example` too when the variable is required |
 | Wiring concrete objects together | `main.py` |
 | Alembic migrations | `migrations/versions/` at the repository root |
@@ -384,10 +387,47 @@ only `python -m cyrano llm-check` does.
   the DeepSeek documentation read at the time of CYR-13; see [decisions.md](decisions.md) for exactly
   what was and was not confirmed.
 
+## Persona and style examples (CYR-14)
+
+Data and rules for the user: [persona-and-examples.md](persona-and-examples.md). This section is the
+code map. Nothing here is wired into `main.run`, calls an LLM, builds a prompt or sends a message;
+the prompt builder (CYR-16) will consume `PersonaService` and `ExampleSelector`.
+
+| Where | What |
+| --- | --- |
+| `domain/style.py` | Limits as named constants, `Turn`, `PersonaCreate`, `Persona`, `StyleExampleCreate`, `StyleExample`, `ExamplesAddResult`, `content_hash`. Texts are cleaned (NUL removed, trimmed) by the types; every model hides input values in its validation errors |
+| `domain/errors.py` | `ContentProblem` (a location and a rule), `ContentValidationError` (prints up to 20 problems), `ImportFileError` |
+| `services/style_files.py` | `read_import_file`, `parse_persona`, `parse_examples`: the file formats and their validation, pure apart from reading. Pydantic errors become `ContentProblem`s from the error location and type only |
+| `services/style_import.py` | `PersonaImporter` and `ExamplesImporter`: read, parse, store, return counts (`PersonaImportResult`, `ExamplesImportResult`) |
+| `services/persona_service.py` | `PersonaService.get()` |
+| `services/style_examples.py` | `ExampleSelector.select(mode_name, limit)` and `collect_example_stats` |
+| `services/repositories.py` | `PersonaRepository` (`get`, `replace`) and `StyleExampleRepository` (`add_many`, `list_all`, `count`, `delete_all`) |
+| `db/models.py`, `db/repositories.py` | `PersonaRow`, `StyleExampleRow`, `SqlPersonaRepository`, `SqlStyleExampleRepository`; migration `0002` |
+| `style_cli.py`, `main.py` | The commands `persona import FILE`, `persona show`, `examples import FILE [--replace --yes]`, `examples stats` and the Makefile targets `persona-import`, `examples-import`, `examples-stats` |
+
+- **Stored, not read from a path.** The containers cannot see the owner's files, so the commands
+  run locally against the host database port (like `make migrate`, with the same `Settings`) and
+  the runtime reads PostgreSQL.
+- **Validation first.** The whole examples file is validated before anything is written. Failures
+  report locations and rules, never texts. The import is one transaction; `add_many` with
+  `replace=True` deletes and inserts in that same transaction.
+- **Selection** reads all examples (`list_all`, newest first) and filters in Python. That is fine
+  for the hundreds of dialogues this product holds; a SQL filter is a later optimization if it
+  ever matters.
+- **Logging.** Logger `cyrano.services.style_import`: INFO with counts only. A test imports the
+  sample files with all loggers at DEBUG and asserts that no persona or example text appears in
+  the logs or in the errors.
+- **Exit codes.** The commands exit with 0, or with 1 and a readable message on any error (a
+  storage failure prints the exception class only). An invalid configuration exits with 2 like
+  every command.
+
 ## Persistence
 
 - **Tables**: `contacts`, `messages`, `modes`; native enums `contact_status` and
-  `message_direction`. Columns and rules: [contact-lifecycle.md](contact-lifecycle.md).
+  `message_direction`. Columns and rules: [contact-lifecycle.md](contact-lifecycle.md). Since
+  CYR-14 also `persona` (one row, `id` fixed to 1 by a check constraint) and `style_examples`
+  (JSONB `tags` and `turns`, unique `content_hash`); see
+  [persona-and-examples.md](persona-and-examples.md).
 - **Names**: table names and enum type names live in `db/models.py`, enum values in
   `domain/enums.py`. `Base.metadata` has a naming convention, so constraint and index names are
   stable and need no spelling out. The migration repeats these strings on purpose: a revision is a
@@ -395,7 +435,7 @@ only `python -m cyrano llm-check` does.
   `tests/db/test_migrations.py` prove the two agree.
 - **Time**: every timestamp is `timestamptz`; the domain models reject naive values and normalize
   to UTC. `touch_last_message_at` refuses a naive `datetime`.
-- **Repositories**: take a session factory. Every method is one transaction, returns domain models
+- **Repositories**: take a session factory. Every method is one transaction (`StyleExampleRepository.add_many(..., replace=True)` deletes and inserts in that one transaction, which is how the import's `--replace` stays atomic), returns domain models
   and never an ORM object, and turns constraint violations into domain errors with `from None`, so
   the driver's message (which names key values) does not travel. Writes that read first lock the
   row with `FOR UPDATE`. Nothing spans several repository calls yet; when a later ticket needs that
@@ -443,6 +483,7 @@ the raw input. `load_settings(env_file=None)` ignores any `.env`.
 | `AIOGRAM_LOG_LEVEL` | no | `WARNING` | |
 | `HTTPX_LOG_LEVEL` | no | `WARNING` | also applied to `httpcore` |
 | `LEOMATCH_BOT_USERNAME` | no | `leomatchbot` | username of the matching bot whose chat is searched for a contact's texts; a leading `@` is removed; the default is an assumption to check in Telegram; not in the startup log line |
+| `STYLE_EXAMPLES_MAX` | no | `8` | most style examples one selection returns; 1 to 50; not in the startup log line |
 | `HEARTBEAT_PATH` | no | `<tmpdir>/cyrano-heartbeat` | liveness file; also read straight from `os.environ` by `cyrano.health`, the one exception to hard rule 3 ([decisions.md](decisions.md)) |
 
 `TEST_DATABASE_URL` is not in this table: tests read it themselves
@@ -475,8 +516,9 @@ the raw input. `load_settings(env_file=None)` ignores any `.env`.
 - The userbot loggers are `cyrano.userbot`, `cyrano.userbot.handler` and
   `cyrano.userbot.leomatch_source`, intake is `cyrano.services.intake`, events
   `cyrano.services.contact_events`, the collector `cyrano.services.profile_collector`, the announcer
-  `cyrano.services.card_announcer`, the control bot `cyrano.bot` with its submodules and the LLM
-  client `cyrano.llm.deepseek` and `cyrano.llm.transport`.
+  `cyrano.services.card_announcer`, the control bot `cyrano.bot` with its submodules, the LLM
+  client `cyrano.llm.deepseek` and `cyrano.llm.transport`, and the persona and example import
+  `cyrano.services.style_import` (INFO: counts only).
 - Library loggers (`telethon`, `aiogram`, `httpx`, `httpcore`) have their own levels
   (`*_LOG_LEVEL`, default `WARNING`), independent of `LOG_LEVEL`. `httpcore` follows
   `HTTPX_LOG_LEVEL` because it is httpx's transport.
@@ -569,6 +611,16 @@ the raw input. `load_settings(env_file=None)` ignores any `.env`.
   sleep), the per-step settings and their validation, the logs, `llm-check` with a fake client and
   with a mocked transport, and the import direction for httpx and the provider. `FakeLLMClient` in
   `tests/services/fakes.py` is the scripted fake for the consumers (CYR-16, CYR-17, CYR-25).
+  CYR-14 added: the domain models (limits at, under and over the boundary, tag normalization, the
+  content hash, validation errors without input values), the file validation (every rule violated
+  once, 20 problems at most printed, invalid JSON, a missing, oversized, non-UTF-8 file and a
+  directory, no text in any message), the repositories on real PostgreSQL (counts, idempotency, the
+  single persona row, a replace that fails and leaves the old rows intact), the importers, the
+  selector (mode before generic, newest first, other modes never leak, case-insensitive tags,
+  limits, deterministic ties), the commands with the real repositories and through `main`, migration
+  `0002` (upgrade, downgrade to `0001`, no drift), the new setting, the sample files against the real
+  validators with the `.gitignore` and `.dockerignore` content, and a captured full import that
+  must not contain any sample text.
 - Failure cases to cover for new behaviour:
   empty input, malformed Telegram event, invalid LLM JSON, status changed between scheduling and
   sending, FloodWait.
@@ -576,5 +628,6 @@ the raw input. `load_settings(env_file=None)` ignores any `.env`.
 ## Open design questions
 
 Listed in [decisions.md](decisions.md) under "Open questions": how the worker sends through the
-userbot session, worker reconnect to Redis, where the layered prompt builder lives, whether `bot`,
+userbot session, worker reconnect to Redis, where the layered prompt builder lives, how the persona
+and the examples share the prompt's token budget, whether `bot`,
 `userbot` and `worker` may import each other, and the Leomatch cases not yet observed (a card with a description, search, the caption position and message order inside an album, a video card).

@@ -117,10 +117,17 @@ only.
   (valid or not) or a response body at any level, and its errors carry the status code or the
   exception class only. Its log lines carry the step, the model, token counts, the duration and
   retry counters. It never logs the API key.
+  The persona text and the style examples are personal data too (CYR-14): they are never logged
+  at any level and never go to git. The import commands and the services print and log counts,
+  paths and JSON-path style locations of problems, never a persona or example text; `persona show`
+  prints the length and the update time only and `examples stats` prints counts per tag. The real
+  files live only in `data/`.
 - **Why:** the data belongs to real people.
 - **Enforced where:** exists today: `.gitignore` and `.dockerignore` exclude `.env`, `*.session`,
   `media/` and `data/` (profile photos live under `MEDIA_DIR`, `.env.example` and compose put it
-  in `data/media` and `/data/media`, `media` is the default); secrets are `SecretStr` and masked in logs; `Settings.safe_summary()`, the
+  in `data/media` and `/data/media`, `media` is the default); `.gitignore` also ignores
+  `persona*.md` and `style-examples*.json` anywhere, except the two invented samples in
+  `examples/` and the guide, which are un-ignored by their exact names (CYR-14); secrets are `SecretStr` and masked in logs; `Settings.safe_summary()`, the
   only settings in the startup log lines, returns an allowlist (`LOGGED_SETTINGS`) with no secrets,
   no `OWNER_TELEGRAM_ID` and no `TELEGRAM_API_ID`. Planned: scrubbing of free-text
   logs and observability (CYR-28); until then, review enforces it (hard rules 8 and 9).
@@ -133,6 +140,11 @@ only.
   (`tests/llm/test_logging.py`, `tests/llm/test_complete_json.py`): all log output is captured at
   DEBUG during retries, invalid JSON replies and failures, and the prompt, the reply, the response
   body and the key are asserted absent; the raw invalid reply is also absent from the raised error.
+  Exists for the persona and the examples (CYR-14): validation errors carry no input values, every
+  file error is asserted to contain no marker text, the commands' output is asserted to contain no
+  sample text, and a full import of the sample files with all loggers at DEBUG must leave no sample
+  text in the captured logs or in the raised errors; the `.gitignore` and `.dockerignore` content
+  is tested too.
 
 ## S10. The assistant never answers a direct bot question
 

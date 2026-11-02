@@ -5,7 +5,9 @@ from tests.db.conftest import (
     messages,
     migrated_url,
     modes,
+    personas,
     session_factory,
+    style_examples,
 )
 
 __all__ = [
@@ -15,5 +17,7 @@ __all__ = [
     "messages",
     "migrated_url",
     "modes",
+    "personas",
     "session_factory",
+    "style_examples",
 ]

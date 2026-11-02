@@ -27,6 +27,9 @@ DEFAULT_LLM_REPLY_TEMPERATURE = 1.0
 DEFAULT_LLM_SUMMARY_TEMPERATURE = 0.2
 DEFAULT_LLM_REPLY_MAX_TOKENS = 400
 DEFAULT_LLM_SUMMARY_MAX_TOKENS = 1500
+DEFAULT_STYLE_EXAMPLES_MAX = 8
+MIN_STYLE_EXAMPLES_MAX = 1
+MAX_STYLE_EXAMPLES_MAX = 50
 
 LOGGED_SETTINGS = frozenset(
     {
@@ -86,6 +89,9 @@ class Settings(BaseSettings):
     httpx_log_level: LogLevel = "WARNING"
     heartbeat_path: Path = Field(default_factory=default_heartbeat_path)
     leomatch_bot_username: str = DEFAULT_LEOMATCH_BOT_USERNAME
+    style_examples_max: int = Field(
+        default=DEFAULT_STYLE_EXAMPLES_MAX, ge=MIN_STYLE_EXAMPLES_MAX, le=MAX_STYLE_EXAMPLES_MAX
+    )
 
     @field_validator(
         "log_level",

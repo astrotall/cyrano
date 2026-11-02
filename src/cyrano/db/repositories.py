@@ -2,14 +2,22 @@
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from datetime import datetime
 
-from sqlalchemy import select
+from sqlalchemy import delete, func, select
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from cyrano.db.models import ContactRow, MessageRow, ModeRow
+from cyrano.db.models import (
+    PERSONA_ROW_ID,
+    ContactRow,
+    MessageRow,
+    ModeRow,
+    PersonaRow,
+    StyleExampleRow,
+)
 from cyrano.db.session import SessionFactory
 from cyrano.domain.enums import ContactStatus
 from cyrano.domain.errors import (
@@ -29,6 +37,7 @@ from cyrano.domain.models import (
     Mode,
     ModeCreate,
 )
+from cyrano.domain.style import ExamplesAddResult, Persona, StyleExample, StyleExampleCreate
 from cyrano.domain.transitions import transition_needed
 
 
@@ -231,3 +240,79 @@ class SqlModeRepository:
         if default is None or not default.enabled:
             raise DefaultModeUnavailable
         return default
+
+
+class SqlPersonaRepository:
+    def __init__(self, session_factory: SessionFactory) -> None:
+        self._session_factory = session_factory
+
+    async def get(self) -> Persona | None:
+        async with self._session_factory() as session:
+            row = await session.get(PersonaRow, PERSONA_ROW_ID)
+            return None if row is None else Persona.model_validate(row)
+
+    async def replace(self, text: str) -> Persona:
+        statement = (
+            insert(PersonaRow)
+            .values(id=PERSONA_ROW_ID, text=text)
+            .on_conflict_do_update(
+                index_elements=[PersonaRow.id], set_={"text": text, "updated_at": func.now()}
+            )
+            .returning(PersonaRow)
+        )
+        async with self._session_factory.begin() as session:
+            row = (await session.scalars(statement)).one()
+            return Persona.model_validate(row)
+
+
+class SqlStyleExampleRepository:
+    def __init__(self, session_factory: SessionFactory) -> None:
+        self._session_factory = session_factory
+
+    async def add_many(
+        self, examples: Sequence[StyleExampleCreate], *, replace: bool = False
+    ) -> ExamplesAddResult:
+        async with self._session_factory.begin() as session:
+            if replace:
+                await session.execute(delete(StyleExampleRow))
+            added = await self._insert_new(session, examples)
+        return ExamplesAddResult(added=added, skipped=len(examples) - added)
+
+    async def list_all(self) -> list[StyleExample]:
+        async with self._session_factory() as session:
+            rows = await session.scalars(
+                select(StyleExampleRow).order_by(
+                    StyleExampleRow.created_at.desc(), StyleExampleRow.id.desc()
+                )
+            )
+            return [StyleExample.model_validate(row) for row in rows]
+
+    async def count(self) -> int:
+        async with self._session_factory() as session:
+            return await session.scalar(select(func.count()).select_from(StyleExampleRow)) or 0
+
+    async def delete_all(self) -> int:
+        async with self._session_factory.begin() as session:
+            removed = await session.scalars(delete(StyleExampleRow).returning(StyleExampleRow.id))
+            return len(removed.all())
+
+    @staticmethod
+    async def _insert_new(session: AsyncSession, examples: Sequence[StyleExampleCreate]) -> int:
+        if not examples:
+            return 0
+        statement = (
+            insert(StyleExampleRow)
+            .values(
+                [
+                    {
+                        "tags": example.tags,
+                        "turns": [turn.model_dump(mode="json") for turn in example.turns],
+                        "content_hash": example.content_hash,
+                    }
+                    for example in examples
+                ]
+            )
+            .on_conflict_do_nothing(index_elements=[StyleExampleRow.content_hash])
+            .returning(StyleExampleRow.id)
+        )
+        return len((await session.scalars(statement)).all())

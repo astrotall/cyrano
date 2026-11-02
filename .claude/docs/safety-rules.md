@@ -1,13 +1,14 @@
 # Safety rules
 
 **All rules below are planned until their tickets land, except where a rule says it exists.** As of
-CYR-10 nothing sends messages: the userbot only listens, and a test proves it (S1 and S2). The
-other rules are not enforced by code yet; they are the contract that the tickets must implement
-and test. Changing or dropping a rule is a large change (see [CLAUDE.md](../../CLAUDE.md)) and ships
+CYR-10 nothing sends messages to contacts: the userbot only listens, and a test proves it (S1 and
+S2). S8 is enforced since CYR-12. The other rules are not enforced by code yet; they are the
+contract that the tickets must implement and test. Changing or dropping a rule is a large change (see [CLAUDE.md](../../CLAUDE.md)) and ships
 with the code and the test ([CONTRIBUTING.md](../../CONTRIBUTING.md)). Statuses:
 [contact-lifecycle.md](contact-lifecycle.md).
 
-Tests named here are planned. They use scripted fakes and fake data only.
+Tests named here are planned unless a rule says they exist. They use scripted fakes and fake data
+only.
 
 ## S1. Only active contacts get replies
 
@@ -95,10 +96,15 @@ Tests named here are planned. They use scripted fakes and fake data only.
   change modes, resume or ignore.
 - **Why:** the card buttons are the approval mechanism; whoever can press them controls the
   account.
-- **Enforced where:** a check on every update in the control bot (CYR-12). The setting itself
-  already exists in `config.py`; the check does not.
-- **How it is tested:** an update from another user id gets no answer and no side effect; a
-  callback from another user does not change a status.
+- **Enforced where:** exists (CYR-12). `OwnerOnlyMiddleware` in `bot/middleware.py` is an outer
+  middleware on every update of the dispatcher: an update whose user is not `OWNER_TELEGRAM_ID`,
+  or has no user, is dropped before any handler runs, with no reply, no database access and no id
+  in the logs (only a counter). The `/start` handler also answers private chats only, and the card
+  sender takes the owner id from `Settings` and has no way to address another chat.
+- **How it is tested:** exists in `tests/bot/test_handlers.py`: a message and a button press from
+  another user id get no API call at all, change no status and leave no id or text in the logs; a
+  message without a sender is dropped; `/start` from the owner works; every recorded outgoing call
+  of the handler and sender tests targets the owner (`tests/bot/test_sender.py`).
 
 ## S9. No personal data in logs or git
 

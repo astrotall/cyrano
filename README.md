@@ -36,13 +36,14 @@ Key principles:
 - **Personal data stays local.** Persona, examples, sessions, media and messages never go to git.
   Message text, names and other personal data are never logged at INFO or above.
 
-> The project skeleton (CYR-8), the storage layer (CYR-9), the userbot intake (CYR-10) and the
-> profile collection (CYR-11) exist. The flow below is the plan.
+> The project skeleton (CYR-8), the storage layer (CYR-9), the userbot intake (CYR-10), the
+> profile collection (CYR-11) and the control bot with the contact card (CYR-12) exist. The flow
+> below is the plan.
 
 ## Architecture diagram
 
 Planned flow. The boxes marked (planned) do not exist yet. The userbot box exists for listening and
-registering contacts only.
+registering contacts only; the control bot box exists for the card and its two buttons.
 
 ```
  unknown sender
@@ -57,7 +58,7 @@ registering contacts only.
       v                                                           ^
  +-----------------------+  Reply (mode) / Ignore                 |
  | control bot (aiogram) |<--- owner, main account               |
- | owner only (planned)  |                                        |
+ | owner only (exists)    |                                        |
  +-----------------------+                                        |
       | contact -> active                                         |
       v                                                           |
@@ -84,8 +85,10 @@ repositories, Docker and CI, and the userbot: it logs the second account in, lis
 messages, registers unknown senders as contacts with status `new`, stores their messages and
 publishes an in-memory event for each new contact; a collector then reads their profile for the
 owner's card (see [What is collected](#what-is-collected-about-a-new-contact)). It never sends
-anything. The bot and LLM
-packages are empty; `services` holds the repository interfaces, the intake and the event queue.
+anything. The control bot then shows the owner a card for every new contact with a Reply button per
+mode and an Ignore button (see [The control bot](#the-control-bot-and-the-card)). The LLM package
+is empty; `services` holds the repository interfaces, the intake, the event queue, the collector
+and the card logic.
 Details: [.claude/docs/contact-lifecycle.md](.claude/docs/contact-lifecycle.md).
 
 ### What the userbot does and does not do
@@ -106,12 +109,13 @@ Does not:
   later ticket and will go only through the guarded sender;
 - react to groups, channels, bots, deleted accounts, Telegram's service account or its own
   messages;
-- change a status. The step from `new` to `pending` belongs to the control bot (CYR-12).
+- change a status. The step from `new` to `pending` happens in the card announcer, after the card
+  is delivered to the owner.
 
 ### What is collected about a new contact
 
 After a contact is registered, the profile collector gathers what the owner needs to decide from
-one card (the card itself is CYR-12): the username, the display name, the bio, the current
+one card: the username, the display name, the bio, the current
 profile photo and, if there is one, the contact's profile text from the matching bot. It reads
 only; it never sends anything to the contact or to the matching bot, and nothing is marked as
 read. A failed part never blocks the others or the registration.
@@ -132,10 +136,38 @@ read. A failed part never blocks the others or the registration.
   `profiles/<internal contact id>-card.jpg` under `MEDIA_DIR`, with its relative path stored next to
   the card text, and a failed download never blocks the rest.
 
+### The control bot and the card
+
+The control bot lives on the owner's main account and answers only `OWNER_TELEGRAM_ID`; an update
+from anyone else is dropped without a reply.
+
+**Starting it.** Create the bot with @BotFather and put its token in `BOT_TOKEN`. Then open the bot
+in Telegram **from the owner account and send `/start` once**. A bot cannot write to a person who has
+never started it, so without this step cards cannot be delivered; the contact stays `new` and the
+announcer retries every two minutes until the owner has pressed Start. The bot starts together
+with the app, after the userbot is connected. A rejected token ends the app with a readable error.
+
+**What the owner sees.** For every new contact, after its profile was collected (or after ten
+minutes at most, so a failing collection never keeps the owner waiting):
+
+- up to two photos first: the profile photo and the matching-bot card photo, each with a short
+  caption; a missing photo file is skipped;
+- then one message with the name, the nick, the first messages the contact wrote (up to three), the
+  bio and the matching-bot card, plus a line when the profile could not be collected. Names, bio
+  and message texts come from strangers and are shown as plain text, never as markup;
+- under that message the buttons: one **Отвечать: <mode>** per enabled mode and **Игнорировать**.
+
+Reply moves the contact from `pending` to `active` with that mode, Ignore from `pending` to
+`ignored`; the card is then edited to show the decision and the buttons disappear. A button on an
+old card never changes a contact that is no longer waiting for a decision: it shows a short alert
+instead. Nothing replies to an `active` contact yet (the autopilot is CYR-17); this ticket sends
+nothing to contacts.
+
 ### Code layers
 
-Import direction (enforced by review, and by a test for `domain`, `db`, `services` and `userbot`,
-which is also the only package that may import Telethon; full rules in
+Import direction (enforced by review, and by a test for `domain`, `db`, `services`, `userbot` and
+`bot`; `userbot` is the only package that may import Telethon and `bot` the only one that may
+import aiogram; full rules in
 [.claude/docs/architecture.md](.claude/docs/architecture.md)):
 
 ```
@@ -163,7 +195,7 @@ which is also the only package that may import Telethon; full rules in
 | Cache and queue | Redis 7.4 (AOF) | now (compose service) |
 | Database server | PostgreSQL 16.15 | now (compose service, migrations, tests) |
 | Userbot | Telethon | now (listens and registers contacts; sends nothing) |
-| Control bot | aiogram | planned, CYR-12 |
+| Control bot | aiogram 3 | now (owner-only, contact card with Reply and Ignore) |
 | ORM and migrations | SQLAlchemy 2.x (async), asyncpg, Alembic | now (schema and repositories, used by the intake) |
 | LLM client | DeepSeek over plain httpx, no SDK | planned, CYR-13 |
 | Lint, format | Ruff | now |
@@ -211,7 +243,7 @@ What exists now:
 │   ├── logging.py                # JSON-lines logging
 │   ├── health.py                 # heartbeat file and the app healthcheck
 │   ├── userbot/                  # Telethon: protocols, filters, handler, client, login, runner, profile and Leomatch readers
-│   ├── bot/                      # empty skeleton
+│   ├── bot/                      # aiogram: owner-only middleware, handlers, card rendering, card sender, polling
 │   ├── llm/                      # empty skeleton
 │   ├── domain/                   # enums, status transition rules, errors, Pydantic models
 │   ├── db/                       # SQLAlchemy models, engine and sessions, repositories
@@ -222,7 +254,11 @@ What exists now:
 │   │   ├── contact_events.py     # generic ContactEventPublisher, bounded in-memory queue
 │   │   ├── profile_source.py     # ProfileSource, LeomatchSource Protocols, ProfileSourceError
 │   │   ├── leomatch.py           # parser of the Leomatch card text
-│   │   └── profile_collector.py  # ProfileCollector: profile, photo, Leomatch text per new contact
+│   │   ├── profile_collector.py  # ProfileCollector: profile, photo, Leomatch text per new contact
+│   │   ├── card_builder.py       # the owner's card from the stored contact
+│   │   ├── card_sender.py        # CardSender Protocol
+│   │   ├── card_announcer.py     # CardAnnouncer: card to the owner, new -> pending
+│   │   └── card_actions.py       # CardActions: Reply (pending -> active) and Ignore
 │   └── worker/
 │       └── settings.py           # Arq WorkerSettings, placeholder job
 └── tests/                        # mirrors src/cyrano; database tests need a real PostgreSQL
@@ -378,8 +414,8 @@ uv run arq --custom-log-dict cyrano.worker.settings.LOG_CONFIG \
 ```
 
 `.env` in the current directory is loaded; real environment variables take precedence over it.
-The app connects to Telegram and to Postgres (when the first message arrives); it does not connect
-to Redis. The worker connects to Redis; the compose one works via `docker compose up -d redis`.
+The app connects to Telegram as the userbot and polls the control bot, and connects to Postgres
+(when the first message arrives); it does not connect to Redis. The worker connects to Redis; the compose one works via `docker compose up -d redis`.
 
 ### Makefile targets
 
@@ -422,7 +458,7 @@ the default applies.
 | `TELEGRAM_API_ID`, `TELEGRAM_API_HASH` | yes | | Telegram API credentials of the second account (the userbot). Create them on my.telegram.org, menu "API development tools" |
 | `USERBOT_SESSION_PATH` | yes | | Where the Telethon session file is stored; Telethon appends `.session`, and the parent directory is created if needed. The file is a secret |
 | `BOT_TOKEN` | yes | | Control bot token from @BotFather |
-| `OWNER_TELEGRAM_ID` | yes | | Telegram id of the main account; the only user the control bot will answer (planned, CYR-12) |
+| `OWNER_TELEGRAM_ID` | yes | | Telegram id of the main account; the only user the control bot will answer, and the only chat it writes to |
 | `DEEPSEEK_API_KEY` | yes | | DeepSeek API key |
 | `DEEPSEEK_MODEL` | no | `deepseek-chat` | DeepSeek model name |
 | `DATABASE_URL` | yes | | PostgreSQL URL, must start with `postgresql+asyncpg://` |
@@ -459,7 +495,9 @@ loop, a real-process SIGTERM check, the Arq worker settings, the status transiti
 migration and the repositories, and for the userbot: the filters, the handler, the client and
 startup logic, the login flow, the intake on real PostgreSQL, the profile collection (parser, match
 check, matching-bot lookup, collector, `update_identity` on real PostgreSQL) and the check that the
-userbot never sends. Telegram is always faked: no test connects to it. All tests use fake values only.
+userbot never sends, and for the control bot: owner-only access, the card rendering, the card sender,
+the handlers driven through the real dispatcher, the announcer and the Reply and Ignore actions on
+real PostgreSQL. Telegram is always faked: no test connects to it. All tests use fake values only.
 
 Database tests run against real PostgreSQL, never SQLite, because JSONB and native enums must be
 tested for real. `TEST_DATABASE_URL` (from the environment or `.env`; the template value targets

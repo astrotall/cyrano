@@ -21,8 +21,8 @@ owner, and pacing and limits are enforced centrally.
 Contact statuses: `new -> pending -> active -> paused / ignored`. Meaning and transitions:
 [contact-lifecycle.md](.claude/docs/contact-lifecycle.md).
 
-The skeleton (CYR-8), the storage layer (CYR-9), the userbot intake (CYR-10) and the profile
-collection (CYR-11) exist. Everything
+The skeleton (CYR-8), the storage layer (CYR-9), the userbot intake (CYR-10), the profile
+collection (CYR-11) and the control bot with the contact card (CYR-12) exist. Everything
 else is planned and marked with its ticket key.
 Never describe planned behaviour as existing.
 
@@ -33,7 +33,7 @@ Changing any of these is a large change (see Workflow expectations). Reasons:
 
 | Decision | Choice                                                                                                                                                                                         | Consequence |
 | --- |------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------| --- |
-| Users | One owner; the control bot answers only `OWNER_TELEGRAM_ID`                                                                                                                                    | No multi-user code, no roles; the control bot gives nobody else an answer (planned, CYR-12) |
+| Users | One owner; the control bot answers only `OWNER_TELEGRAM_ID`                                                                                                                                    | No multi-user code, no roles; the control bot gives nobody else an answer (CYR-12) |
 | Likes | The owner likes in the matching bot by hand                                                                                                                                                    | No automation of the matching bot, ever |
 | Automatic replies | Only to contacts in status `active`; checked at scheduling time and again right before sending                                                                                                 | A status change between the two checks cancels the reply |
 | One way out | Every outgoing message goes through the sender                                                                                                                                                 | No other code path sends; the status guard lives in the sender |
@@ -56,7 +56,7 @@ Changing any of these is a large change (see Workflow expectations). Reasons:
 | Ruff, mypy strict, pytest, pytest-asyncio | in the project |
 | Docker, Docker Compose, GitHub Actions, Dependabot | in the project |
 | Telethon | in the project (userbot listens, registers contacts and reads profiles; imported only in `userbot/`) |
-| aiogram | planned, CYR-12 |
+| aiogram 3 | in the project (control bot; imported only in `bot/`) |
 | DeepSeek client over plain httpx | planned, CYR-13 |
 | respx | planned, with CYR-13 |
 
@@ -81,10 +81,12 @@ Changing any of these is a large change (see Workflow expectations). Reasons:
 │   ├── domain/                   enums, status transition rules, errors, Pydantic models
 │   ├── db/                       SQLAlchemy models, engine and sessions, repositories
 │   ├── services/                 repositories (Protocols), intake, sanitize, contact_events, profile_source,
-│   │                             leomatch, profile_collector; the rest is planned
+│   │                             leomatch, profile_collector, card_sender, card_builder, card_announcer,
+│   │                             card_actions; the rest is planned
 │   ├── userbot/                  Telethon: protocols, filters, handler, client, login, runner, errors,
 │   │                             profile_source, leomatch_source, leomatch_match
-│   ├── bot/ llm/                 empty skeleton packages
+│   ├── bot/                      aiogram: app, middleware, handlers, rendering, callbacks, sender, messages, errors
+│   ├── llm/                      empty skeleton package
 │   └── worker/settings.py        Arq WorkerSettings, placeholder job
 └── tests/                        mirrors src/cyrano
 ```
@@ -103,7 +105,14 @@ card parser), the read-only Telethon adapters `userbot/profile_source.py`,
 `userbot/leomatch_source.py` and `userbot/leomatch_match.py`, the `ContactProfile`,
 `LeomatchProfile`, `TelegramProfile`, `LeomatchSourceText` and `ContactReadyEvent` models,
 `ContactRepository.update_identity`, the generic in-memory event queue (two instances), the
-`LEOMATCH_BOT_USERNAME` setting, and the tests with their fakes.
+`LEOMATCH_BOT_USERNAME` setting, and the tests with their fakes. CYR-12 added the `aiogram`
+dependency and the `bot/` package (the only one that imports aiogram: `ControlBot` with the polling,
+the owner-only middleware, the handlers, the card rendering and keyboard, `TelegramCardSender`, the
+Russian texts in `messages.py`, the readable fatal errors), `services/card_sender.py` (the
+`CardSender` Protocol), `services/card_builder.py`, `services/card_announcer.py` (`CardAnnouncer`,
+started by `main.run` next to the control bot), `services/card_actions.py` (`CardActions`), the
+`ContactCard`, `CardLeomatch`, `ModeChoice`, `CardActionResult` models and the `CardOutcome` enum,
+and the tests with their fakes (a recording aiogram session, `FakeControlBot`).
 
 ## Detailed guides
 

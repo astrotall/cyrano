@@ -3,11 +3,20 @@ from __future__ import annotations
 import asyncio
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
+from datetime import UTC, datetime
 from pathlib import Path
 
-from cyrano.domain.models import LeomatchSourceText, TelegramProfile
+from cyrano.domain.models import (
+    ContactCard,
+    LeomatchSourceText,
+    Mode,
+    ModeChoice,
+    ModeCreate,
+    TelegramProfile,
+)
 from cyrano.services.profile_source import CardPhoto, LeomatchLookup
 
+FAKE_MODE_TIME = datetime(2025, 1, 2, 3, 4, 5, tzinfo=UTC)
 FAKE_PHOTO = b"fake-jpeg-bytes"
 FAKE_BIO = "fake bio text"
 FAKE_CARD_PHOTO = b"fake-card-jpeg-bytes"
@@ -125,3 +134,79 @@ class FakeLeomatchSource:
         if self._error is not None:
             raise self._error
         return LeomatchLookup(self.texts, self.card_photo)
+
+
+class InMemoryModes:
+    def __init__(self) -> None:
+        self.stored: dict[int, Mode] = {}
+
+    async def get_by_id(self, mode_id: int) -> Mode | None:
+        return self.stored.get(mode_id)
+
+    async def get_by_name(self, name: str) -> Mode | None:
+        return next((m for m in self.stored.values() if m.name == name), None)
+
+    async def list_enabled(self) -> list[Mode]:
+        return [m for m in self.stored.values() if m.enabled]
+
+    async def create(self, data: ModeCreate) -> Mode:
+        mode = Mode(
+            id=len(self.stored) + 1,
+            name=data.name,
+            prompt_fragment=data.prompt_fragment,
+            few_shot_examples=data.few_shot_examples,
+            enabled=data.enabled,
+            created_at=FAKE_MODE_TIME,
+            updated_at=FAKE_MODE_TIME,
+        )
+        self.stored[mode.id] = mode
+        return mode
+
+    async def resolve_by_id(self, mode_id: int | None) -> Mode:
+        raise NotImplementedError
+
+    async def resolve_by_name(self, name: str) -> Mode:
+        raise NotImplementedError
+
+
+class FakeCardSender:
+    def __init__(
+        self,
+        *,
+        results: list[bool] | None = None,
+        error: Exception | None = None,
+        failing_ids: frozenset[int] = frozenset(),
+        delay: float = 0.0,
+    ) -> None:
+        self.cards: list[ContactCard] = []
+        self.active = 0
+        self.max_active = 0
+        self._results = results if results is not None else []
+        self._error = error
+        self._failing_ids = failing_ids
+        self._delay = delay
+
+    async def send_card(self, card: ContactCard) -> bool:
+        self.active += 1
+        self.max_active = max(self.max_active, self.active)
+        try:
+            self.cards.append(card)
+            await asyncio.sleep(self._delay)
+            if card.contact_id in self._failing_ids:
+                raise RuntimeError("fake failure for one contact")
+            if self._error is not None:
+                raise self._error
+            return self._results.pop(0) if self._results else True
+        finally:
+            self.active -= 1
+
+
+def fake_card(**overrides: object) -> ContactCard:
+    fields: dict[str, object] = {
+        "contact_id": 17,
+        "display_name": "Fakefirst Fakelast",
+        "username": "fake_user",
+        "modes": [ModeChoice(id=1, name="default"), ModeChoice(id=2, name="flirt")],
+        "profile_collected": True,
+    }
+    return ContactCard.model_validate({**fields, **overrides})

@@ -21,3 +21,11 @@ class MessageDirection(StrEnum):
 class LeomatchTextKind(StrEnum):
     CARD = "card"
     MATCH = "match"
+
+
+class CardOutcome(StrEnum):
+    APPLIED = "applied"
+    ALREADY_APPLIED = "already_applied"
+    REFUSED = "refused"
+    NOT_FOUND = "not_found"
+    MODE_UNAVAILABLE = "mode_unavailable"

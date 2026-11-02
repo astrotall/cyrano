@@ -9,17 +9,21 @@ import sys
 import time
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
 
 from cyrano import main as main_module
+from cyrano.bot.errors import BotTokenRejected, PollingFailed
 from cyrano.config import Settings, load_settings
+from cyrano.domain.enums import ContactStatus
 from cyrano.domain.models import ContactProfile
 from cyrano.logging import configure_logging
 from cyrano.main import main, run
 from cyrano.userbot.errors import Disconnected, SessionMissing, SessionNotAuthorized
 from cyrano.userbot.protocols import UserbotClient
+from tests.bot.fakes import fake_control_bot_class
 from tests.conftest import (
     OPTIONAL_ENV,
     PERSONAL_SETTING_NAMES,
@@ -28,6 +32,7 @@ from tests.conftest import (
     SECRET_VALUES,
 )
 from tests.fake_app import CONNECTING_MARKER, HANGING_CONNECT_SCENARIO
+from tests.services.fakes import FakeCardSender, InMemoryModes
 from tests.userbot.fakes import (
     FAKE_SENDER_ID,
     FakeClient,
@@ -57,14 +62,23 @@ def session_env(
 class Repositories:
     contacts: InMemoryContacts
     messages: InMemoryMessages
+    modes: InMemoryModes
 
 
 @pytest.fixture(autouse=True)
 def repositories(monkeypatch: pytest.MonkeyPatch) -> Repositories:
-    stored = Repositories(InMemoryContacts(), InMemoryMessages())
+    stored = Repositories(InMemoryContacts(), InMemoryMessages(), InMemoryModes())
     monkeypatch.setattr("cyrano.main.SqlContactRepository", lambda _: stored.contacts)
     monkeypatch.setattr("cyrano.main.SqlMessageRepository", lambda _: stored.messages)
+    monkeypatch.setattr("cyrano.main.SqlModeRepository", lambda _: stored.modes)
     return stored
+
+
+@pytest.fixture(autouse=True)
+def bot_calls(monkeypatch: pytest.MonkeyPatch) -> list[str]:
+    calls: list[str] = []
+    monkeypatch.setattr("cyrano.main.ControlBot", fake_control_bot_class(calls))
+    return calls
 
 
 def _factory(client: FakeClient) -> Callable[[Settings], UserbotClient]:
@@ -566,3 +580,278 @@ async def test_the_collector_is_not_started_when_the_start_is_interrupted(
 
     assert "run" not in created
     assert client.write_attempts == []
+
+
+class _Announcer:
+    def __init__(self, calls: list[str]) -> None:
+        self.calls = calls
+
+    async def run(self) -> None:
+        self.calls.append("announcer.run")
+        try:
+            await asyncio.sleep(3600)
+        except asyncio.CancelledError:
+            self.calls.append("announcer cancelled")
+            raise
+
+
+def _recording_announcer(monkeypatch: pytest.MonkeyPatch, calls: list[str]) -> None:
+    monkeypatch.setattr("cyrano.main.CardAnnouncer", lambda *args, **kwargs: _Announcer(calls))
+
+
+async def test_the_bot_and_the_announcer_start_only_after_the_userbot_is_ready(
+    session_env: dict[str, str],
+    heartbeat_file: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    bot_calls: list[str],
+) -> None:
+    _recording_announcer(monkeypatch, bot_calls)
+    client = FakeClient(calls=bot_calls)
+    stop = asyncio.Event()
+    task = asyncio.create_task(
+        run(load_settings(env_file=None), stop, client_factory=_factory(client))
+    )
+
+    await _wait_until(lambda: _contains(bot_calls, "bot.poll"))
+    await _wait_until(lambda: _contains(bot_calls, "announcer.run"))
+    stop.set()
+    await asyncio.wait_for(task, timeout=2)
+
+    assert bot_calls.index("catch_up") < bot_calls.index("bot.poll")
+    assert bot_calls.index("catch_up") < bot_calls.index("announcer.run")
+    assert client.write_attempts == []
+
+
+async def test_the_announcer_announces_a_waiting_contact_through_the_bot_sender(
+    session_env: dict[str, str],
+    heartbeat_file: Path,
+    repositories: Repositories,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    sender = FakeCardSender()
+    monkeypatch.setattr("cyrano.main.ControlBot", fake_control_bot_class(sender=sender))
+    contact = await repositories.contacts.seed(
+        FAKE_SENDER_ID,
+        profile=ContactProfile(collected_at=datetime.now(UTC)).model_dump(mode="json"),
+    )
+    stop = asyncio.Event()
+    task = asyncio.create_task(
+        run(load_settings(env_file=None), stop, client_factory=_factory(FakeClient()))
+    )
+
+    await _wait_until(lambda: _status_is(repositories, contact.tg_id, ContactStatus.PENDING))
+    stop.set()
+    await asyncio.wait_for(task, timeout=2)
+
+    assert [card.contact_id for card in sender.cards] == [contact.id]
+
+
+async def _status_is(repositories: Repositories, tg_id: int, status: ContactStatus) -> bool:
+    contact = await repositories.contacts.get_by_tg_id(tg_id)
+    return contact is not None and contact.status is status
+
+
+async def test_shutdown_cancels_the_announcer_then_stops_the_bot_then_the_collector_and_userbot(
+    session_env: dict[str, str],
+    heartbeat_file: Path,
+    repositories: Repositories,
+    monkeypatch: pytest.MonkeyPatch,
+    bot_calls: list[str],
+) -> None:
+    _recording_announcer(monkeypatch, bot_calls)
+    await repositories.contacts.seed(FAKE_SENDER_ID)
+    client = _readable_client(hang_on_read=True, calls=bot_calls)
+    stop = asyncio.Event()
+    task = asyncio.create_task(
+        run(load_settings(env_file=None), stop, client_factory=_factory(client))
+    )
+
+    await _wait_until(lambda: _contains(bot_calls, "get_entity"))
+    await _wait_until(lambda: _contains(bot_calls, "bot.poll"))
+    stop.set()
+    await asyncio.wait_for(task, timeout=2)
+
+    order = [
+        "announcer cancelled",
+        "bot.stop",
+        "bot.poll cancelled",
+        "get_entity cancelled",
+        "remove_event_handler",
+        "disconnect",
+    ]
+    assert [bot_calls.index(name) for name in order] == sorted(bot_calls.index(n) for n in order)
+
+
+async def test_neither_the_bot_nor_the_announcer_starts_when_the_start_is_interrupted(
+    session_env: dict[str, str],
+    heartbeat_file: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    bot_calls: list[str],
+) -> None:
+    _recording_announcer(monkeypatch, bot_calls)
+    client = FakeClient(hang_on_connect=True, calls=bot_calls)
+    stop = asyncio.Event()
+    asyncio.get_running_loop().call_later(0.05, stop.set)
+
+    await asyncio.wait_for(
+        run(load_settings(env_file=None), stop, client_factory=_factory(client)), timeout=2
+    )
+
+    assert "bot.poll" not in bot_calls
+    assert "announcer.run" not in bot_calls
+    assert bot_calls.count("bot.stop") == 1
+
+
+async def test_a_polling_failure_ends_the_app_with_a_readable_error(
+    session_env: dict[str, str],
+    heartbeat_file: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    bot_calls: list[str],
+) -> None:
+    monkeypatch.setattr(
+        "cyrano.main.ControlBot", fake_control_bot_class(bot_calls, poll_error=RuntimeError("boom"))
+    )
+    client = FakeClient(calls=bot_calls)
+
+    with pytest.raises(PollingFailed, match="RuntimeError"):
+        await asyncio.wait_for(
+            run(load_settings(env_file=None), asyncio.Event(), client_factory=_factory(client)),
+            timeout=2,
+        )
+
+    assert bot_calls[-2:] == ["remove_event_handler", "disconnect"]
+    assert "bot.stop" in bot_calls
+    assert not _exists(heartbeat_file)
+
+
+async def test_a_rejected_token_during_polling_ends_the_app_with_that_error(
+    session_env: dict[str, str], heartbeat_file: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(
+        "cyrano.main.ControlBot", fake_control_bot_class(poll_error=BotTokenRejected())
+    )
+
+    with pytest.raises(BotTokenRejected, match="BOT_TOKEN"):
+        await asyncio.wait_for(
+            run(
+                load_settings(env_file=None),
+                asyncio.Event(),
+                client_factory=_factory(FakeClient()),
+            ),
+            timeout=2,
+        )
+
+
+async def test_polling_that_ends_without_a_request_is_a_failure(
+    session_env: dict[str, str], heartbeat_file: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr("cyrano.main.ControlBot", fake_control_bot_class(poll_returns=True))
+
+    with pytest.raises(PollingFailed, match="unexpectedly"):
+        await asyncio.wait_for(
+            run(
+                load_settings(env_file=None),
+                asyncio.Event(),
+                client_factory=_factory(FakeClient()),
+            ),
+            timeout=2,
+        )
+
+
+async def test_a_bot_that_cannot_be_built_is_a_readable_error_before_anything_connects(
+    session_env: dict[str, str], heartbeat_file: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def refuse(*args: object) -> object:
+        raise BotTokenRejected
+
+    monkeypatch.setattr("cyrano.main.ControlBot", refuse)
+    client = FakeClient()
+
+    with pytest.raises(BotTokenRejected):
+        await run(load_settings(env_file=None), asyncio.Event(), client_factory=_factory(client))
+
+    assert client.calls == []
+    assert not _exists(heartbeat_file)
+
+
+async def test_a_crashing_announcer_is_logged_once_and_does_not_stop_the_intake(
+    session_env: dict[str, str],
+    heartbeat_file: Path,
+    repositories: Repositories,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    class _CrashingAnnouncer:
+        def __init__(self, *args: object, **kwargs: object) -> None:
+            pass
+
+        async def run(self) -> None:
+            raise RuntimeError("fake announcer crash")
+
+    monkeypatch.setattr("cyrano.main.CardAnnouncer", _CrashingAnnouncer)
+    configure_logging("INFO")
+    client = _readable_client()
+    stop = asyncio.Event()
+    task = asyncio.create_task(
+        run(load_settings(env_file=None), stop, client_factory=_factory(client))
+    )
+    await asyncio.sleep(0.05)
+
+    await client.deliver(FakeEvent())
+    await asyncio.sleep(0.05)
+
+    assert not task.done()
+    assert len(repositories.messages.stored) == 1
+    stop.set()
+    await asyncio.wait_for(task, timeout=2)
+    records = [json.loads(line) for line in capsys.readouterr().out.splitlines() if line]
+    crashes = [r for r in records if r["msg"] == "card announcer stopped"]
+    assert [r["error"] for r in crashes] == ["RuntimeError"]
+    assert "fake announcer crash" not in json.dumps(records)
+
+
+async def test_a_polling_failure_is_logged_with_the_class_name_only(
+    session_env: dict[str, str],
+    heartbeat_file: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    monkeypatch.setattr(
+        "cyrano.main.ControlBot", fake_control_bot_class(poll_error=RuntimeError("secret detail"))
+    )
+    configure_logging("INFO")
+
+    with pytest.raises(PollingFailed):
+        await asyncio.wait_for(
+            run(
+                load_settings(env_file=None),
+                asyncio.Event(),
+                client_factory=_factory(FakeClient()),
+            ),
+            timeout=2,
+        )
+
+    out = capsys.readouterr().out
+    assert "control bot polling failed" in out
+    assert "secret detail" not in out
+    for secret in (*SECRET_VALUES, *PERSONAL_VALUES):
+        assert secret not in out
+
+
+@pytest.mark.parametrize("error", [BotTokenRejected(), PollingFailed("RuntimeError")])
+def test_a_control_bot_error_is_a_readable_exit(
+    error: Exception,
+    full_env: dict[str, str],
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    monkeypatch.chdir(tmp_path)
+
+    async def failing(settings: Settings) -> None:
+        raise error
+
+    monkeypatch.setattr(main_module, "run", failing)
+
+    assert main([]) == 1
+    assert str(error) in capsys.readouterr().err

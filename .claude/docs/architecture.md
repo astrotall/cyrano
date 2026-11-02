@@ -1,7 +1,7 @@
 # Architecture
 
-State as of CYR-11: the skeleton, the storage layer, the userbot intake and the profile collection exist. Anything
-else is marked **planned** with its ticket.
+State as of CYR-12: the skeleton, the storage layer, the userbot intake, the profile collection and the
+control bot with the contact card exist. Anything else is marked **planned** with its ticket.
 Product and decisions: [CLAUDE.md](../../CLAUDE.md). Reasons: [decisions.md](decisions.md).
 
 ## Layers
@@ -11,15 +11,15 @@ Source lives in `src/cyrano/`.
 | Package or module | Role | State |
 | --- | --- | --- |
 | `userbot/` | The only package that imports Telethon: client, session and login, event filters, the incoming-message handler, the listener lifecycle. Receives private messages on the second account and converts events into plain objects. Also holds the read-only adapters of the profile collection: `profile_source.py` (bio, names, photo) and `leomatch_source.py` with `leomatch_match.py` (the matching-bot chat). Planned: the actual Telegram send behind the sender (CYR-19) | exists for listening and registration (CYR-10) and for reading profiles (CYR-11); it sends nothing |
-| `bot/` | aiogram control bot: owner-only, contact card, Reply/Ignore buttons, notifications | empty skeleton; planned CYR-12 |
+| `bot/` | The only package that imports aiogram: the owner-only control bot. `app.py` (`ControlBot`: bot, dispatcher, polling, stop), `middleware.py` (owner-only), `handlers.py` (`/start`, the card buttons), `rendering.py` (pure card text, keyboard, decision), `callbacks.py` (callback data), `sender.py` (`TelegramCardSender`), `messages.py` (every Russian text), `errors.py` (readable fatal errors). Planned: notifications of stop-triggers and the rest of the panel (CYR-20, CYR-26) | exists for the card and its two buttons (CYR-12) |
 | `llm/` | LLM client: DeepSeek over plain httpx, response parsing | empty skeleton; planned CYR-13 |
 | `db/` | SQLAlchemy models (`models.py`), engine and session factory (`session.py`), repositories (`repositories.py`) | exists; called by the intake (CYR-10) |
-| `services/` | Business logic shared by userbot, bot and worker: contact lifecycle, sender, reply pipeline. `repositories.py` holds the repository Protocols, `intake.py` the `IntakeService`, `sanitize.py` the NUL-byte removal, `contact_events.py` the generic `ContactEventPublisher[T]` and `ContactEventSubscriber[T]` Protocols and the in-memory queue; CYR-11 added `profile_source.py` (the `ProfileSource` and `LeomatchSource` Protocols and `ProfileSourceError`), `leomatch.py` (the card parser) and `profile_collector.py` (`ProfileCollector`) | Protocols, intake, sanitization, events (CYR-10) and the profile collector (CYR-11) exist; the rest is planned from CYR-12 on |
+| `services/` | Business logic shared by userbot, bot and worker: contact lifecycle, sender, reply pipeline. `repositories.py` holds the repository Protocols, `intake.py` the `IntakeService`, `sanitize.py` the NUL-byte removal, `contact_events.py` the generic `ContactEventPublisher[T]` and `ContactEventSubscriber[T]` Protocols and the in-memory queue; CYR-11 added `profile_source.py` (the `ProfileSource` and `LeomatchSource` Protocols and `ProfileSourceError`), `leomatch.py` (the card parser) and `profile_collector.py` (`ProfileCollector`); CYR-12 added `card_sender.py` (the `CardSender` Protocol), `card_builder.py` (assembles the `ContactCard`), `card_announcer.py` (`CardAnnouncer`) and `card_actions.py` (`CardActions`) | Protocols, intake, sanitization, events (CYR-10), the profile collector (CYR-11) and the card announcer and actions (CYR-12) exist; the rest is planned from CYR-13 on |
 | `worker/` | Arq worker: `settings.py` holds `WorkerSettings`, `startup`, `shutdown`, a placeholder `noop` job (Arq refuses to start a worker with no registered functions) | skeleton works; real jobs planned CYR-17 |
 | `config.py` | `Settings` (pydantic-settings), `load_settings`, `ConfigError` | exists |
 | `logging.py` | JSON-lines formatter, `build_log_config`, `configure_logging` | exists |
 | `health.py` | Heartbeat file, `is_alive`, `python -m cyrano.health` | exists |
-| `main.py`, `__main__.py` | App entrypoint (composition root), the `login` subcommand, signal handling, heartbeat task | exists; the userbot is plugged in (CYR-10), the bot by CYR-12 |
+| `main.py`, `__main__.py` | App entrypoint (composition root), the `login` subcommand, signal handling, heartbeat task | exists; the userbot is plugged in (CYR-10), the collector (CYR-11), the control bot and the announcer (CYR-12) |
 | `domain/` | Leaf package, imports only pydantic and the standard library: enums, status transition rules, domain errors, Pydantic models the layers exchange | exists |
 | `prompts` | Prompt texts, few-shot data loading, trigger lists | planned, not created; the layered builder's location is decided in CYR-16 |
 
@@ -31,8 +31,9 @@ Source lives in `src/cyrano/`.
 
 Enforced by review. `tests/test_import_direction.py` also checks the part that exists: `domain`
 imports only pydantic, the standard library and itself; `db` imports neither `services` nor `llm`;
-`services` imports neither `db`, `userbot` nor `bot`; `userbot` imports none of `db`, `llm`, `bot`;
-and only the `userbot` package imports `telethon`.
+`services` imports neither `db`, `userbot` nor `bot`, nor Telethon or aiogram; `userbot` imports
+none of `db`, `llm`, `bot`; `bot` imports none of `db`, `userbot`, `llm`; only the `userbot`
+package imports `telethon` and only the `bot` package imports `aiogram`.
 
 1. `bot`, `userbot` and `worker` may import `services`.
 2. `services` reach `llm` and `db` only through interfaces defined in `services`. The concrete
@@ -48,6 +49,9 @@ and only the `userbot` package imports `telethon`.
    to the layers.
 6. Telethon is imported only inside `userbot/`. The rest of the code, tests of other layers
    included, sees it through the Protocols in `userbot/protocols.py`.
+7. aiogram is imported only inside `bot/`. `services` reach the owner through the `CardSender`
+   Protocol and receive the owner's decisions through `CardActions`; `bot` calls `CardActions` and
+   implements `CardSender`, and `main` joins them.
 
 Never import upward. Whether `bot`, `userbot` and `worker` may import each other is an open
 question in [decisions.md](decisions.md).
@@ -75,7 +79,7 @@ Two Python processes, two stores, one external API each for Telegram and the LLM
 
 ```
  Telegram <--> app process (python -m cyrano)       worker process (arq)
-               userbot (exists) + control bot (planned)   delayed jobs (planned)
+               userbot + control bot (exist)         delayed jobs (planned)
                heartbeat task (exists)               placeholder job (exists)
                   |        |                            |        |
                   v        v                            v        v
@@ -88,14 +92,17 @@ Two Python processes, two stores, one external API each for Telegram and the LLM
 - **app**: `python -m cyrano`. It loads config, starts JSON logging and requires the session file
   (see [Userbot](#userbot-cyr-10)). Then it builds the database engine (which opens no connection
   until something uses it), the repositories, the `IntakeService` and the two in-memory event queues,
-  touches the heartbeat file, connects the userbot, registers the handler, catches up, starts the
-  profile collector as a background task (only once the userbot is connected, because it reads
-  through the same client) and waits for SIGTERM or SIGINT; a signal during connect or catch-up ends the start at once (see
+  touches the heartbeat file, connects the userbot, registers the handler, catches up, then starts the
+  profile collector, the card announcer and the control bot's polling as background tasks (only once
+  the userbot is connected, because the collector reads through the same client and the announcer
+  would otherwise show cards before the intake runs) and waits for SIGTERM or SIGINT; a signal during
+  connect or catch-up ends the start at once, and then none of the three is started (see
   [Userbot](#userbot-cyr-10)). A lost connection that Telethon cannot restore ends the process with an
-  error, and the restart policy starts it again. Planned: the control bot runs on the same event
-  loop (CYR-12). On shutdown it cancels the collector, removes the handler, disconnects the userbot, stops the heartbeat,
-  removes the file and disposes the engine; planned: stop the control bot and close the Redis
-  connections there. It has the `userbot_session` volume.
+  error, and the restart policy starts it again; so does a control bot that stops polling (see
+  [Control bot](#control-bot-cyr-12)). On shutdown it cancels the card announcer, stops polling and
+  closes the bot session, cancels the collector, removes the handler, disconnects the userbot, stops
+  the heartbeat, removes the file and disposes the engine; planned: close the Redis connections there.
+  It has the `userbot_session` volume.
 - **login**: `python -m cyrano login`, run on demand (`make login`, `make login-docker`). It is the
   same image and the same `Settings` as the app, shares the `userbot_session` volume and needs no
   database.
@@ -209,8 +216,7 @@ idempotency are in [contact-lifecycle.md](contact-lifecycle.md#registration-cyr-
 `ContactEventSubscriber[T]` (`subscribe()`) and `InMemoryContactEvents[T]` on a bounded
 `asyncio.Queue` (`EVENT_QUEUE_SIZE`, 1000) with an async `subscribe()` iterator. `main.run` builds
 two instances: `NewContactEvent` (published by the intake, consumed by the profile collector) and
-`ContactReadyEvent` (published by the collector, consumed by the card in CYR-12; nothing consumes
-it yet). A full queue drops the new event and logs
+`ContactReadyEvent` (published by the collector, consumed by the card announcer, CYR-12). A full queue drops the new event and logs
 a warning with counters; `publish` never raises. The queue lives in one process and is lost on
 restart, which is fine because events are best-effort and the database is the source of truth.
 
@@ -242,6 +248,50 @@ ready, media_dir)`. It depends on the `ContactRepository` Protocol, on the two s
 - **Logger.** `cyrano.services.profile_collector` (INFO: contact id and which parts produced data;
   WARNING: contact id, part name and error class of a failed part; ERROR: error class and counter
   of a failed event), `cyrano.userbot.leomatch_source` (DEBUG only).
+
+## Control bot (CYR-12)
+
+`src/cyrano/bot/`. The only package that imports aiogram (3.31 at the time of CYR-12; it ships type
+information, so mypy needs no override). It runs inside the app process on the same event loop as
+the userbot, by long polling.
+
+| Module | Role |
+| --- | --- |
+| `app.py` | `build_dispatcher(owner_id, actions)` and `ControlBot`: builds the `Bot` from `BOT_TOKEN` (HTML parse mode, link previews off), the dispatcher, and the `TelegramCardSender`; `poll()` runs `start_polling(handle_signals=False, close_bot_session=False)`; `stop()` stops polling (bounded) and closes the session |
+| `middleware.py` | `OwnerOnlyMiddleware`, an outer middleware on every update: a user other than `OWNER_TELEGRAM_ID`, or no user at all, is dropped silently. No reply, no database access, only a counter (DEBUG, no ids) |
+| `handlers.py` | `build_router(actions)`: `/start` (private chat only) and the card button handler |
+| `rendering.py` | Pure functions: `render_card`, `card_keyboard`, `append_decision`, `alert_text`. Text is HTML-escaped; the card is assembled from sections within `CARD_TEXT_BUDGET` (3500) so it stays below Telegram's 4096 whatever the input |
+| `callbacks.py` | `CardCallback` (`card:<action>:<contact id>:<mode id>`, a few bytes against Telegram's 64) |
+| `sender.py` | `TelegramCardSender`, the `CardSender` implementation. The owner id is a constructor argument taken from `Settings` and the only public method is `send_card`, so no caller can address another chat |
+| `messages.py` | Every Russian text the owner sees. Texts and constants live here, not in the handlers |
+| `errors.py` | `ControlBotError`, `BotTokenRejected`, `PollingFailed`; their messages are meant to be read by the owner |
+
+- **Sending.** Order: up to two photos (one with `send_photo`, two as a media group), then the card
+  text with the keyboard. A photo file that is missing, empty, unreadable or outside `MEDIA_DIR` is
+  skipped and counted. `TelegramRetryAfter` is waited for (at most `MAX_RETRY_AFTER_SECONDS`, 60) and
+  retried once; a second one, or a longer wait, gives up. `Forbidden` (the owner never pressed
+  Start), "chat not found", network errors and any other Telegram API error return `False`: the
+  contact stays `new` and the sweep retries. One deliberate exception: a `BadRequest` on the photo
+  step that is not "chat not found" (for example a photo Telegram rejects) skips the photos and
+  still sends the text card, otherwise one bad file would block a contact forever.
+- **Callback handling.** `CardActions` does the work; the handler always answers the callback query
+  (an exception becomes a generic alert), edits the card on `applied` and `already_applied`,
+  otherwise removes the keyboard when the contact is no longer `pending`, and treats a card it cannot
+  edit as answered only. Details: [contact-lifecycle.md](contact-lifecycle.md#card-announcement-cyr-12).
+- **Polling and signals.** Polling runs as a task with `handle_signals=False`: our own SIGTERM and
+  SIGINT handling in `main` stays in charge. An unexpected end of polling, a rejected token and any
+  exception from `start_polling` stop the app with a readable error and a non-zero exit (the restart
+  policy restarts it). Known limit: aiogram retries failing `getUpdates` calls itself with backoff and
+  never gives up, so a token revoked while running is retried forever; only a start-time rejection is
+  fatal. The owner not having pressed Start is not fatal: the sends fail softly.
+- **Shutdown order.** Cancel the card announcer, stop polling and close the bot session, cancel the
+  polling task, then the existing steps: collector, handler removal, userbot disconnect, heartbeat,
+  engine. The announcer goes first so no card is being sent while polling stops.
+- **Logger.** `cyrano.bot` (INFO: stopped), `cyrano.bot.handlers` (INFO: contact id, action and outcome
+  of a button press; WARNING: error class; DEBUG: a card that could not be edited),
+  `cyrano.bot.sender` (WARNING: error class and counters), `cyrano.bot.middleware` (DEBUG),
+  `cyrano.services.card_announcer` (INFO: contact id of an announced card; WARNING: counters and
+  error class, at most one per sweep).
 
 ## Persistence
 
@@ -328,7 +378,8 @@ the raw input. `load_settings(env_file=None)` ignores any `.env`.
   included) are rendered by the same formatter.
 - The userbot loggers are `cyrano.userbot`, `cyrano.userbot.handler` and
   `cyrano.userbot.leomatch_source`, intake is `cyrano.services.intake`, events
-  `cyrano.services.contact_events`, the collector `cyrano.services.profile_collector`.
+  `cyrano.services.contact_events`, the collector `cyrano.services.profile_collector`, the announcer
+  `cyrano.services.card_announcer` and the control bot `cyrano.bot` with its submodules.
 - Library loggers (`telethon`, `aiogram`, `httpx`, `httpcore`) have their own levels
   (`*_LOG_LEVEL`, default `WARNING`), independent of `LOG_LEVEL`. `httpcore` follows
   `HTTPX_LOG_LEVEL` because it is httpx's transport.
@@ -397,7 +448,16 @@ the raw input. `load_settings(env_file=None)` ignores any `.env`.
   `WITH (FORCE)`, also after a failure. One database per test keeps tests isolated without
   truncation. Unreachable Postgres or a missing variable fails the test with a message naming
   `make db-up`; it never skips. CI runs a Postgres service container on the same tag as compose.
-- Planned: scripted fakes for aiogram and the LLM (CYR-12, CYR-13); `respx` for the HTTP client
+  CYR-12 added: card rendering (escaping, truncation, keyboard, callback size), the card sender
+  with a recording `BaseSession` that returns real aiogram objects (photos, retry, forbidden,
+  chat not found, every call addressed to the owner), the handlers driven through
+  `Dispatcher.feed_raw_update` (owner-only, `/start`, every callback outcome), `ControlBot` polling
+  against the same recording session, the card builder, the announcer with in-memory and with real
+  repositories, `CardActions` on real PostgreSQL (including two simultaneous presses), the import
+  direction for aiogram, and in `tests/test_main.py` the start order, the shutdown order, a failing
+  poll and a crashing announcer. `tests/test_main.py` and `tests/fake_app.py` replace `ControlBot`
+  with `FakeControlBot`, so no test builds a real bot.
+- Planned: scripted fakes for the LLM (CYR-13); `respx` for the HTTP client
   (CYR-13). Failure cases to cover for new behaviour:
   empty input, malformed Telegram event, invalid LLM JSON, status changed between scheduling and
   sending, FloodWait.

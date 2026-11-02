@@ -3,8 +3,9 @@
 The storage and the transition rules exist (CYR-9), and so does the registration of unknown senders
 (CYR-10): the userbot creates contacts with status `new` and stores their incoming messages. The
 collection of the profile for the owner's card exists too (CYR-11): it fills `profile` and changes
-no status. The other flows that drive the lifecycle are **planned**, each marked with its ticket;
-nothing changes a status yet.
+no status. The owner's card exists since CYR-12: delivering it moves `new` to `pending`, and its two
+buttons move `pending` to `active` or `ignored`. The other flows that drive the lifecycle are
+**planned**, each marked with its ticket; nothing replies to an `active` contact yet.
 
 ## Statuses
 
@@ -13,10 +14,10 @@ nothing changes a status yet.
 | Status | Meaning | Automatic replies | Set by |
 | --- | --- | --- | --- |
 | `new` | Registered by the userbot from an unknown sender | Never | userbot (CYR-10, exists) |
-| `pending` | A card was sent to the owner, waiting for a decision | No | control bot flow (CYR-12) |
-| `active` | The owner pressed Reply and chose a mode | Yes, via the sender only | owner (CYR-12, CYR-15) |
+| `pending` | A card was delivered to the owner, waiting for a decision | No | card announcer (CYR-12, exists) |
+| `active` | The owner pressed Reply and chose a mode | Yes, via the sender only (the sender is CYR-19; nothing replies yet) | owner (CYR-12 exists, modes CYR-15) |
 | `paused` | Stopped by a stop-trigger, by a manual message of the owner, by two unanswered proactive messages, or by the owner | No | system (CYR-20, CYR-21, CYR-23) or owner |
-| `ignored` | The owner pressed Ignore | Never; silence forever | owner (CYR-12) |
+| `ignored` | The owner pressed Ignore | Never; silence forever | owner (CYR-12, exists) |
 
 Only `active` is allowed to receive an automatic reply. See [S1](safety-rules.md).
 
@@ -24,15 +25,15 @@ Only `active` is allowed to receive an automatic reply. See [S1](safety-rules.md
 
 **Decided in CYR-9.** The rules exist as data plus one function in
 `src/cyrano/domain/transitions.py`; `ContactRepository.set_status` enforces them under a row lock.
-The triggers and their tickets below are planned. Changing the matrix is a large change (see
+The triggers marked "exists" are implemented; the others are planned. Changing the matrix is a large change (see
 [CLAUDE.md](../../CLAUDE.md)).
 
 | From | To | Trigger | Who or what | Trigger ticket |
 | --- | --- | --- | --- | --- |
 | (none) | `new` | An unknown sender writes to the second account | userbot | CYR-10 (exists) |
-| `new` | `pending` | The profile is collected and the card is sent to the owner | userbot and control bot | CYR-11, CYR-12 |
-| `pending` | `active` | Owner presses Reply and chooses a mode | owner | CYR-12, CYR-15 |
-| `pending` | `ignored` | Owner presses Ignore | owner | CYR-12 |
+| `new` | `pending` | The card is delivered to the owner (the sender returned success) | card announcer | CYR-12 (exists) |
+| `pending` | `active` | Owner presses Reply and chooses a mode | owner, through the card | CYR-12 (exists), modes CYR-15 |
+| `pending` | `ignored` | Owner presses Ignore | owner, through the card | CYR-12 (exists) |
 | `active` | `paused` | A stop-trigger fires | system | CYR-20 |
 | `active` | `paused` | The owner writes a manual message in the chat | system | CYR-21 |
 | `active` | `paused` | Two proactive messages in a row stay unanswered | system | CYR-23 |
@@ -65,8 +66,8 @@ otherwise the `default` mode. If `default` itself is missing or disabled they ra
 | --- | --- | --- |
 | 1 | An unknown sender writes to the second account; the userbot registers a contact (`new`) and stores the message. No reply is sent. Exists, see [Registration](#registration-cyr-10) | CYR-10, CYR-9 |
 | 2 | The profile collector gathers nick, name, bio, photo and the matching-bot profile text if present, stores them in `profile` and publishes a `ContactReadyEvent`. Exists, see [Profile collection](#profile-collection-cyr-11) | CYR-11 |
-| 3 | The control bot sends the owner a card with a Reply button per mode and an Ignore button; the contact becomes `pending`. It starts from the `ContactReadyEvent` | CYR-12, CYR-15 |
-| 4 | On Reply the contact becomes `active` with the chosen mode; on Ignore it becomes `ignored` | CYR-12 |
+| 3 | The card announcer sends the owner a card with a Reply button per enabled mode and an Ignore button through the control bot; after the card is delivered the contact becomes `pending`. It starts from the `ContactReadyEvent` or from the sweep. Exists, see [Card announcement](#card-announcement-cyr-12) | CYR-12 |
+| 4 | On Reply the contact becomes `active` with the chosen mode; on Ignore it becomes `ignored`. Exists | CYR-12 |
 | 5 | Each incoming message from an `active` contact schedules one delayed Arq job; a burst of messages is debounced into one job | CYR-17, CYR-19 |
 | 6 | When the job runs it re-checks the status; anything but `active` ends the job with no reply | CYR-19 |
 | 7 | Stop-triggers: on a hit the contact becomes `paused`, the owner is notified and no reply is sent | CYR-20 |
@@ -95,7 +96,7 @@ Steps of `IntakeService.handle`:
 | Step | What happens |
 | --- | --- |
 | 1 | NUL bytes are removed from the text, the username and the display name. PostgreSQL rejects them in text and JSONB, so this happens before any repository call |
-| 2 | The contact is read by `tg_id`. If it is missing, it is created with status `new`; there is no transition to `pending` (CYR-12) |
+| 2 | The contact is read by `tg_id`. If it is missing, it is created with status `new`; there is no transition to `pending` here (the card announcer makes it, CYR-12) |
 | 3 | The message is appended as `incoming`; the unique `(contact_id, tg_message_id)` makes a redelivery a no-op |
 | 4 | `last_message_at` is touched; it only moves forward |
 | 5 | Only if this call created the contact: a `NewContactEvent` (contact id, message id) is published |
@@ -134,7 +135,7 @@ Steps of `IntakeService.handle`:
   stays in the database with status `new`; the startup sweep of the
   [profile collection](#profile-collection-cyr-11) finds it.
 - **Who consumes the event.** The profile collector consumes `NewContactEvent` first; the card
-  (CYR-12) waits for the `ContactReadyEvent` that the collector publishes afterwards.
+  announcer (CYR-12) waits for the `ContactReadyEvent` that the collector publishes afterwards.
 
 ## Profile collection (CYR-11)
 
@@ -176,8 +177,8 @@ disconnects. It never sends and never changes a status.
   that was attempted, also when every part failed or the budget ran out, so the card never waits
   forever. It means "profile collection finished, successfully or not, the card may be shown"; the
   consumer reads the profile and shows what is there. A contact that does not exist, or that is
-  already collected, publishes nothing. Both queues are in memory and lost on restart; CYR-12 finds
-  cards to show after a restart in the database.
+  already collected, publishes nothing. Both queues are in memory and lost on restart; the card
+  announcer finds cards to show after a restart in the database (its sweep).
 - **Photo.** Saved as `profiles/<internal contact id>.jpg` under `MEDIA_DIR`, never named by the
   Telegram id or a name. It is downloaded to a `<id>.part.jpg` file first and renamed when the
   download is complete, so a failed download leaves no half file. The path stored in the profile is
@@ -193,15 +194,62 @@ disconnects. It never sends and never changes a status.
 `contacts.profile` is a JSONB object with this structure (`ContactProfile` in `domain/models.py`).
 An empty object `{}` means nothing was collected.
 
-| Field | Holds |
-| --- | --- |
-| `username`, `display_name`, `bio` | As fetched, sanitized and truncated; `null` when missing |
-| `photo` | Path relative to `MEDIA_DIR`, for example `profiles/17.jpg`, or `null` |
-| `leomatch` | `null` or an object: `raw_text` (the card text if a card was found, otherwise the match text), `related_texts` (the other one, at most 2), `photo` (path of the card photo relative to `MEDIA_DIR`, for example `profiles/17-card.jpg`, or `null`), and, only when the text matches the observed card format, `name`, `age` (18 to 99), `city` and `about` (`about` stays `null` when the card has no description) |
-| `collected_at` | ISO 8601 UTC time, or `null` while the Telegram part has not succeeded |
+| Field | Holds                                                                                                                                                                                                                                                                                                                                                                                                              |
+| --- |--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
+| `username`, `display_name`, `bio` | As fetched, sanitized and truncated; `null` when missing                                                                                                                                                                                                                                                                                                                                                           |
+| `photo` | Path relative to `MEDIA_DIR`, for example `profiles/17.jpg`, or `null`                                                                                                                                                                                                                                                                                                                                             |
+| `leomatch` | `null` or an object: `raw_text` (the card text if a card was found, otherwise the match text), `related_texts` (the other one, at most 2), `photo` (path of the card photo relative to `MEDIA_DIR`, for example `profiles/17-card.jpg`, or `null`), and, only when the text matches the observed card format, `name`, `age` (14 to 99), `city` and `about` (`about` stays `null` when the card has no description) |
+| `collected_at` | ISO 8601 UTC time, or `null` while the Telegram part has not succeeded                                                                                                                                                                                                                                                                                                                                             |
 
 The card and match formats were observed on one real match; what is still unobserved is listed in
 [decisions.md](decisions.md).
+
+## Card announcement (CYR-12)
+
+Exists. `CardAnnouncer` in `services/card_announcer.py` runs as a background task of the app
+process next to the control bot, started after the userbot has connected and caught up and
+cancelled first on shutdown. It talks to the owner only through the `CardSender` Protocol.
+
+- **Inputs.** The `ContactReadyEvent` from the in-memory queue, and a sweep that runs once at start
+  and then every `CARD_SWEEP_INTERVAL` (120 s). Both only enqueue the contact id; one consumer
+  handles the ids strictly one at a time, so the owner gets cards in order and Telegram sees no
+  bursts. An id that is already waiting is not queued twice.
+- **Sweep rule.** A contact in status `new` is announced when its profile has `collected_at`, or when
+  it is older than `CARD_WITHOUT_PROFILE_DELAY` (600 s) by `created_at`, so a collector that keeps
+  failing never keeps the owner waiting. A contact that is `new`, not collected and younger than
+  that waits for its ready event. The event itself needs no such rule: it means the collection
+  finished, successfully or not.
+- **Per contact.** Re-read the contact and skip it unless its status is still `new`. Build the
+  `ContactCard`: identity, bio, the matching-bot card, the last up to three incoming messages in
+  chronological order, the photo paths, whether the profile was collected, and the enabled modes.
+  Call the sender. **Only after it returned `True`** set `new -> pending`. A `False` result or an
+  exception leaves the contact in `new`; the next sweep retries it. Failures are counted, and the
+  announcer logs at most one warning per sweep interval, with counters and the error class only.
+- **Duplicates.** Sending first and setting the status afterwards means a crash between the two (or
+  a failed status write) shows the owner the same card twice. That is tolerated: the buttons are
+  idempotent (below). The opposite order would lose cards, which is worse.
+- **What the owner sees.** Up to two photos first (the profile photo, then the matching-bot card
+  photo; two go as a media group), each with a short caption, then one text message with the name,
+  nick, messages, bio and the matching-bot card, and a line when the profile was not collected. The
+  buttons live on the text message: one "Отвечать: <mode>" per enabled mode and "Игнорировать". All
+  texts from the contact are HTML-escaped. The owner must have pressed Start in the control bot once;
+  until then Telegram refuses the send and the contact stays `new`.
+- **Buttons.** `CardActions` (`services/card_actions.py`) is the only code that changes a status
+  from a card. Reply: the contact must be `pending` (then it becomes `active` with the mode), or
+  already `active` with the same mode (nothing changes, outcome `already_applied`); a mode that is
+  missing or disabled gives `mode_unavailable` and no status change. Ignore: `pending` becomes
+  `ignored`; an `ignored` contact gives `already_applied`. Anything else (a card pressed after the
+  contact moved on, a `new` or `paused` contact, an `active` contact through Ignore or through
+  another mode) gives `refused` and changes nothing; an unknown contact gives `not_found`. The
+  actions run one at a time under a lock, because the repository has no compare-and-set.
+- **After a press.** The bot always answers the callback query. On `applied` and `already_applied`
+  it edits the card text and appends the decision, taken from the CURRENT state of the contact (so a
+  stale card shows the truth), and removes the buttons. On `refused`, `not_found` and
+  `mode_unavailable` it shows a short alert; if the contact is no longer `pending`, the buttons are
+  removed. A card that can no longer be edited is only answered.
+- **Not yet.** Nothing replies to an `active` contact. The autopilot (CYR-17) must also answer
+  messages that arrived while the contact was `pending`. Pausing and resuming from the card, and the
+  stop-trigger notification, are CYR-26 and CYR-20.
 
 ## What is stored per contact
 

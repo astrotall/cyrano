@@ -4,6 +4,7 @@ from tests.db.conftest import (
     database_url,
     messages,
     migrated_url,
+    modes,
     session_factory,
 )
 
@@ -13,5 +14,6 @@ __all__ = [
     "database_url",
     "messages",
     "migrated_url",
+    "modes",
     "session_factory",
 ]

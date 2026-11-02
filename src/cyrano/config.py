@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from pathlib import Path
 from typing import Literal
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
@@ -14,6 +15,9 @@ from cyrano.health import default_heartbeat_path
 LogLevel = Literal["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"]
 
 DEFAULT_ENV_FILE = ".env"
+DEFAULT_LEOMATCH_BOT_USERNAME = "leomatchbot"
+BOT_USERNAME_PATTERN = re.compile(r"[A-Za-z0-9_]{1,32}")
+BOT_USERNAME_PREFIX = "@"
 
 LOGGED_SETTINGS = frozenset(
     {
@@ -53,6 +57,7 @@ class Settings(BaseSettings):
     aiogram_log_level: LogLevel = "WARNING"
     httpx_log_level: LogLevel = "WARNING"
     heartbeat_path: Path = Field(default_factory=default_heartbeat_path)
+    leomatch_bot_username: str = DEFAULT_LEOMATCH_BOT_USERNAME
 
     @field_validator(
         "log_level",
@@ -64,6 +69,15 @@ class Settings(BaseSettings):
     @classmethod
     def _normalize_log_level(cls, value: object) -> object:
         return value.upper() if isinstance(value, str) else value
+
+    @field_validator("leomatch_bot_username")
+    @classmethod
+    def _check_leomatch_bot_username(cls, value: str) -> str:
+        name = value.strip().removeprefix(BOT_USERNAME_PREFIX)
+        if BOT_USERNAME_PATTERN.fullmatch(name) is None:
+            msg = "must be a Telegram username of 1 to 32 letters, digits or underscores"
+            raise ValueError(msg)
+        return name
 
     @field_validator("timezone")
     @classmethod

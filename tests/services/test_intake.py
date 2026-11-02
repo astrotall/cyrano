@@ -38,18 +38,22 @@ def _incoming(
 
 
 @pytest.fixture
-def events() -> InMemoryContactEvents:
-    return InMemoryContactEvents()
+def events() -> InMemoryContactEvents[NewContactEvent]:
+    return InMemoryContactEvents[NewContactEvent]()
 
 
 @pytest.fixture
 def intake(
-    contacts: SqlContactRepository, messages: SqlMessageRepository, events: InMemoryContactEvents
+    contacts: SqlContactRepository,
+    messages: SqlMessageRepository,
+    events: InMemoryContactEvents[NewContactEvent],
 ) -> IntakeService:
     return IntakeService(contacts, messages, events)
 
 
-async def _drain(events: InMemoryContactEvents, count: int) -> list[NewContactEvent]:
+async def _drain(
+    events: InMemoryContactEvents[NewContactEvent], count: int
+) -> list[NewContactEvent]:
     subscription = events.subscribe()
     return [await asyncio.wait_for(anext(subscription), timeout=1) for _ in range(count)]
 
@@ -58,7 +62,7 @@ async def test_new_sender_creates_a_new_contact_stores_the_message_and_publishes
     intake: IntakeService,
     contacts: SqlContactRepository,
     messages: SqlMessageRepository,
-    events: InMemoryContactEvents,
+    events: InMemoryContactEvents[NewContactEvent],
 ) -> None:
     result = await intake.handle(_incoming())
 
@@ -86,7 +90,7 @@ async def test_second_message_from_the_same_sender_creates_no_contact_and_no_eve
     intake: IntakeService,
     contacts: SqlContactRepository,
     messages: SqlMessageRepository,
-    events: InMemoryContactEvents,
+    events: InMemoryContactEvents[NewContactEvent],
 ) -> None:
     first = await intake.handle(_incoming(tg_message_id=1))
     second = await intake.handle(
@@ -101,7 +105,9 @@ async def test_second_message_from_the_same_sender_creates_no_contact_and_no_eve
 
 
 async def test_redelivered_message_is_stored_once_and_publishes_nothing(
-    intake: IntakeService, messages: SqlMessageRepository, events: InMemoryContactEvents
+    intake: IntakeService,
+    messages: SqlMessageRepository,
+    events: InMemoryContactEvents[NewContactEvent],
 ) -> None:
     first = await intake.handle(_incoming())
     again = await intake.handle(_incoming(text="redelivered with other text"))
@@ -117,7 +123,7 @@ async def test_two_concurrent_first_messages_give_one_contact_and_one_event(
     intake: IntakeService,
     contacts: SqlContactRepository,
     messages: SqlMessageRepository,
-    events: InMemoryContactEvents,
+    events: InMemoryContactEvents[NewContactEvent],
 ) -> None:
     results = await asyncio.gather(
         intake.handle(_incoming(tg_message_id=1)),
@@ -165,7 +171,7 @@ async def test_losing_the_creation_race_continues_as_for_a_known_sender(
     session_factory: SessionFactory,
     contacts: SqlContactRepository,
     messages: SqlMessageRepository,
-    events: InMemoryContactEvents,
+    events: InMemoryContactEvents[NewContactEvent],
 ) -> None:
     racing = _RacingContacts(session_factory)
     service = IntakeService(racing, messages, events)
@@ -184,7 +190,9 @@ async def test_losing_the_creation_race_continues_as_for_a_known_sender(
 
 
 async def test_conflict_without_a_readable_contact_is_not_swallowed(
-    session_factory: SessionFactory, messages: SqlMessageRepository, events: InMemoryContactEvents
+    session_factory: SessionFactory,
+    messages: SqlMessageRepository,
+    events: InMemoryContactEvents[NewContactEvent],
 ) -> None:
     service = IntakeService(_VanishingContacts(session_factory), messages, events)
 
@@ -198,7 +206,7 @@ async def test_media_only_message_is_registered_with_empty_text(
     intake: IntakeService,
     contacts: SqlContactRepository,
     messages: SqlMessageRepository,
-    events: InMemoryContactEvents,
+    events: InMemoryContactEvents[NewContactEvent],
 ) -> None:
     result = await intake.handle(_incoming(text=""))
 
@@ -249,7 +257,7 @@ async def test_nul_bytes_are_removed_before_anything_is_stored(
 async def test_a_full_event_queue_does_not_break_intake(
     contacts: SqlContactRepository, messages: SqlMessageRepository
 ) -> None:
-    full = InMemoryContactEvents(max_size=1)
+    full = InMemoryContactEvents[NewContactEvent](max_size=1)
     service = IntakeService(contacts, messages, full)
 
     first = await service.handle(_incoming(tg_id=7001))

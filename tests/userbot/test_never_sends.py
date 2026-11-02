@@ -5,7 +5,16 @@ import re
 import typing
 from pathlib import Path
 
-from cyrano.userbot.protocols import IncomingEvent, LoginClient, SenderLike, UserbotClient
+from cyrano.userbot.protocols import (
+    FullUserInfo,
+    FullUserRequestLike,
+    FullUserResponse,
+    HistoryMessage,
+    IncomingEvent,
+    LoginClient,
+    SenderLike,
+    UserbotClient,
+)
 
 USERBOT_ROOT = Path(__file__).resolve().parents[2] / "src" / "cyrano" / "userbot"
 ALLOWED_CLIENT_MEMBERS = frozenset(
@@ -17,8 +26,15 @@ ALLOWED_CLIENT_MEMBERS = frozenset(
         "catch_up",
         "add_event_handler",
         "remove_event_handler",
+        "__call__",
+        "get_entity",
+        "download_profile_photo",
+        "iter_messages",
     }
 )
+ALLOWED_HISTORY_MEMBERS = frozenset({"id", "out", "raw_text", "entities"})
+ALLOWED_TELETHON_REQUESTS = frozenset({("telethon.tl.functions.users", "GetFullUserRequest")})
+REQUEST_CLASS_SUFFIX = "Request"
 ALLOWED_EVENT_MEMBERS = frozenset(
     {
         "id",
@@ -64,6 +80,13 @@ def test_the_event_and_sender_protocols_expose_only_read_access() -> None:
     assert _members(SenderLike) == ALLOWED_SENDER_MEMBERS
 
 
+def test_the_profile_protocols_expose_only_read_access() -> None:
+    assert _members(HistoryMessage) == ALLOWED_HISTORY_MEMBERS
+    assert _members(FullUserResponse) == {"full_user"}
+    assert _members(FullUserInfo) == {"about"}
+    assert _members(FullUserRequestLike) == {"id"}
+
+
 def test_the_login_protocol_is_the_only_one_that_can_ask_for_a_code() -> None:
     assert _members(LoginClient) == {
         "connect",
@@ -95,6 +118,41 @@ def test_no_userbot_module_uses_a_write_looking_name() -> None:
             name for name in _used_names(module) if WRITE_NAME.match(name) and name not in allowed
         }
         assert offending == set(), module.name
+
+
+def _telethon_requests(path: Path) -> set[tuple[str, str]]:
+    found: set[tuple[str, str]] = set()
+    for node in ast.walk(ast.parse(path.read_text())):
+        if isinstance(node, ast.ImportFrom) and (node.module or "").startswith("telethon.tl."):
+            found |= {(node.module or "", alias.name) for alias in node.names}
+        elif isinstance(node, ast.Name | ast.Attribute):
+            name = node.id if isinstance(node, ast.Name) else node.attr
+            if name.endswith(REQUEST_CLASS_SUFFIX) and name[0].isupper():
+                found.add(("", name))
+    return found
+
+
+def test_the_only_telegram_request_the_userbot_builds_is_the_full_user_read() -> None:
+    requested: set[tuple[str, str]] = set()
+    for module in USERBOT_ROOT.glob("*.py"):
+        requested |= {
+            (source, name)
+            for source, name in _telethon_requests(module)
+            if name.endswith(REQUEST_CLASS_SUFFIX)
+        }
+
+    assert {pair for pair in requested if pair[0]} == ALLOWED_TELETHON_REQUESTS
+    assert {name for source, name in requested if not source} <= {"GetFullUserRequest"}
+
+
+def test_the_request_scan_catches_a_send_request(tmp_path: Path) -> None:
+    module = tmp_path / "bad.py"
+    module.write_text(
+        "from telethon.tl.functions.messages import SendMessageRequest\n"
+        "async def go(client):\n    await client(SendMessageRequest())\n"
+    )
+
+    assert ("telethon.tl.functions.messages", "SendMessageRequest") in _telethon_requests(module)
 
 
 def test_the_scan_catches_a_send_call(tmp_path: Path) -> None:

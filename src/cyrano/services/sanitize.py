@@ -15,6 +15,12 @@ def strip_nul_optional(value: str | None) -> str | None:
     return None if value is None else strip_nul(value)
 
 
+def clean_text(value: str | None, limit: int) -> str | None:
+    if value is None:
+        return None
+    return strip_nul(value).strip()[:limit] or None
+
+
 def sanitize_incoming(incoming: IncomingMessage) -> IncomingMessage:
     return incoming.model_copy(
         update={

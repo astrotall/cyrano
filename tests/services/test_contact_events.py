@@ -5,7 +5,7 @@ import logging
 
 import pytest
 
-from cyrano.domain.models import NewContactEvent
+from cyrano.domain.models import ContactReadyEvent, NewContactEvent
 from cyrano.services.contact_events import (
     EVENT_QUEUE_SIZE,
     ContactEventPublisher,
@@ -17,7 +17,7 @@ def _event(number: int) -> NewContactEvent:
     return NewContactEvent(contact_id=number, message_id=number * 10)
 
 
-async def _next(events: InMemoryContactEvents) -> NewContactEvent:
+async def _next(events: InMemoryContactEvents[NewContactEvent]) -> NewContactEvent:
     return await anext(events.subscribe())
 
 
@@ -26,8 +26,8 @@ def test_queue_size_is_one_thousand() -> None:
 
 
 async def test_events_reach_the_subscriber_in_order() -> None:
-    events = InMemoryContactEvents()
-    publisher: ContactEventPublisher = events
+    events = InMemoryContactEvents[NewContactEvent]()
+    publisher: ContactEventPublisher[NewContactEvent] = events
     for number in (1, 2, 3):
         await publisher.publish(_event(number))
 
@@ -40,7 +40,7 @@ async def test_events_reach_the_subscriber_in_order() -> None:
 
 
 async def test_subscriber_waits_for_the_next_event() -> None:
-    events = InMemoryContactEvents()
+    events = InMemoryContactEvents[NewContactEvent]()
     waiting = asyncio.create_task(_next(events))
     await asyncio.sleep(0)
     assert not waiting.done()
@@ -53,7 +53,7 @@ async def test_subscriber_waits_for_the_next_event() -> None:
 async def test_full_queue_drops_the_new_event_and_never_raises(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
-    events = InMemoryContactEvents(max_size=2)
+    events = InMemoryContactEvents[NewContactEvent](max_size=2)
     await events.publish(_event(1))
     await events.publish(_event(2))
 
@@ -72,7 +72,7 @@ async def test_full_queue_drops_the_new_event_and_never_raises(
 
 
 async def test_drop_warning_carries_counters_only(caplog: pytest.LogCaptureFixture) -> None:
-    events = InMemoryContactEvents(max_size=1)
+    events = InMemoryContactEvents[NewContactEvent](max_size=1)
     await events.publish(NewContactEvent(contact_id=424242, message_id=737373))
 
     with caplog.at_level(logging.WARNING):
@@ -81,3 +81,30 @@ async def test_drop_warning_carries_counters_only(caplog: pytest.LogCaptureFixtu
     text = " ".join(f"{r.getMessage()} {r.__dict__}" for r in caplog.records)
     assert "909090" not in text
     assert "818181" not in text
+
+
+async def test_two_queues_of_different_event_types_are_independent() -> None:
+    new_contacts = InMemoryContactEvents[NewContactEvent]()
+    ready = InMemoryContactEvents[ContactReadyEvent]()
+
+    await new_contacts.publish(_event(1))
+    await ready.publish(ContactReadyEvent(contact_id=9))
+
+    assert await _next(new_contacts) == _event(1)
+    assert await anext(ready.subscribe()) == ContactReadyEvent(contact_id=9)
+    assert new_contacts.published == 1
+    assert ready.published == 1
+
+
+async def test_a_full_ready_queue_drops_the_new_event_with_counters_only(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    ready = InMemoryContactEvents[ContactReadyEvent](max_size=1)
+    await ready.publish(ContactReadyEvent(contact_id=1))
+
+    with caplog.at_level(logging.WARNING):
+        await ready.publish(ContactReadyEvent(contact_id=424242))
+
+    assert ready.dropped == 1
+    text = " ".join(f"{r.getMessage()} {r.__dict__}" for r in caplog.records)
+    assert "424242" not in text

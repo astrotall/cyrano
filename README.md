@@ -36,8 +36,8 @@ Key principles:
 - **Personal data stays local.** Persona, examples, sessions, media and messages never go to git.
   Message text, names and other personal data are never logged at INFO or above.
 
-> The project skeleton (CYR-8), the storage layer (CYR-9) and the userbot intake (CYR-10) exist.
-> The flow below is the plan.
+> The project skeleton (CYR-8), the storage layer (CYR-9), the userbot intake (CYR-10) and the
+> profile collection (CYR-11) exist. The flow below is the plan.
 
 ## Architecture diagram
 
@@ -82,7 +82,9 @@ What exists: configuration, JSON logging, the app process with a heartbeat, the 
 placeholder job, the contact status rules, the database schema with its migrations and
 repositories, Docker and CI, and the userbot: it logs the second account in, listens for private
 messages, registers unknown senders as contacts with status `new`, stores their messages and
-publishes an in-memory event for each new contact. It never sends anything. The bot and LLM
+publishes an in-memory event for each new contact; a collector then reads their profile for the
+owner's card (see [What is collected](#what-is-collected-about-a-new-contact)). It never sends
+anything. The bot and LLM
 packages are empty; `services` holds the repository interfaces, the intake and the event queue.
 Details: [.claude/docs/contact-lifecycle.md](.claude/docs/contact-lifecycle.md).
 
@@ -95,6 +97,8 @@ Does:
   sticker counts too: the text is the caption or empty, the media is not downloaded);
 - processes messages that arrived while the app was down (catch-up on start); a redelivered message
   is stored once.
+- reads the profile of a new contact (username, name, bio, photo, the matching-bot text) for the
+  owner's card, read-only and one contact at a time.
 
 Does not:
 
@@ -103,6 +107,28 @@ Does not:
 - react to groups, channels, bots, deleted accounts, Telegram's service account or its own
   messages;
 - change a status. The step from `new` to `pending` belongs to the control bot (CYR-12).
+
+### What is collected about a new contact
+
+After a contact is registered, the profile collector gathers what the owner needs to decide from
+one card (the card itself is CYR-12): the username, the display name, the bio, the current
+profile photo and, if there is one, the contact's profile text from the matching bot. It reads
+only; it never sends anything to the contact or to the matching bot, and nothing is marked as
+read. A failed part never blocks the others or the registration.
+
+- **Where it is stored.** Texts go to the `profile` column of the contact (a JSON object, see
+  [contact-lifecycle.md](.claude/docs/contact-lifecycle.md#the-stored-profile)). The photo is a file
+  `profiles/<internal contact id>.jpg` under `MEDIA_DIR` (inside the container `/data/media`, on
+  the `media` volume); the profile keeps its path relative to `MEDIA_DIR`. Both are personal data:
+  they are never logged and `media/` and `data/` are git-ignored.
+- **The matching-bot lookup.** The collector looks in the owner's chat with the matching bot
+  (`LEOMATCH_BOT_USERNAME`) for the message that announces the match with this person: it links to
+  the person by Telegram id, or by `t.me/<username>` or `@username`, compared exactly (`ann` never
+  matches `joanna` or `ann_k`). It tries Telegram's search for the username first and falls back
+  to the last 100 messages. The profile card sits at most two messages before the match message.
+  Both texts are stored as they are; name, age and city are extracted only when the card looks like
+  `Name, age[, city] - description`. This format and the chat order are assumptions to verify on
+  the first real match.
 
 ### Code layers
 
@@ -182,7 +208,7 @@ What exists now:
 │   ├── config.py                 # Settings, load_settings, ConfigError
 │   ├── logging.py                # JSON-lines logging
 │   ├── health.py                 # heartbeat file and the app healthcheck
-│   ├── userbot/                  # Telethon: protocols, filters, handler, client, login, runner
+│   ├── userbot/                  # Telethon: protocols, filters, handler, client, login, runner, profile and Leomatch readers
 │   ├── bot/                      # empty skeleton
 │   ├── llm/                      # empty skeleton
 │   ├── domain/                   # enums, status transition rules, errors, Pydantic models
@@ -190,8 +216,11 @@ What exists now:
 │   ├── services/
 │   │   ├── repositories.py       # repository Protocols
 │   │   ├── intake.py             # IntakeService: register contact and message
-│   │   ├── sanitize.py           # NUL-byte removal
-│   │   └── contact_events.py     # ContactEventPublisher, bounded in-memory queue
+│   │   ├── sanitize.py           # NUL-byte removal, text cleaning
+│   │   ├── contact_events.py     # generic ContactEventPublisher, bounded in-memory queue
+│   │   ├── profile_source.py     # ProfileSource, LeomatchSource Protocols, ProfileSourceError
+│   │   ├── leomatch.py           # parser of the Leomatch card text
+│   │   └── profile_collector.py  # ProfileCollector: profile, photo, Leomatch text per new contact
 │   └── worker/
 │       └── settings.py           # Arq WorkerSettings, placeholder job
 └── tests/                        # mirrors src/cyrano; database tests need a real PostgreSQL
@@ -384,18 +413,19 @@ the default applies.
 | `DEEPSEEK_MODEL` | no | `deepseek-chat` | DeepSeek model name |
 | `DATABASE_URL` | yes | | PostgreSQL URL, must start with `postgresql+asyncpg://` |
 | `REDIS_URL` | yes | | Redis URL, must start with `redis://` or `rediss://` |
-| `MEDIA_DIR` | no | `media` | Where downloaded media goes |
+| `MEDIA_DIR` | no | `media` | Where downloaded media goes: today the profile photos, in `profiles/<internal contact id>.jpg` |
 | `LOG_LEVEL` | no | `INFO` | Level of the application log. One of `DEBUG`, `INFO`, `WARNING`, `ERROR`, `CRITICAL`, case-insensitive |
 | `TELETHON_LOG_LEVEL`, `AIOGRAM_LOG_LEVEL` | no | `WARNING` | Level of the `telethon` and `aiogram` loggers; same allowed values as `LOG_LEVEL` |
 | `HTTPX_LOG_LEVEL` | no | `WARNING` | Level of the `httpx` logger, also applied to `httpcore`; same allowed values as `LOG_LEVEL` |
 | `TIMEZONE` | no | `Europe/Moscow` | IANA zone name, validated at startup |
 | `HEARTBEAT_PATH` | no | `<tmpdir>/cyrano-heartbeat` | Liveness file touched by the app and read by the app healthcheck |
+| `LEOMATCH_BOT_USERNAME` | no | `leomatchbot` | Username of the matching bot whose chat is searched for a new contact's profile text; a leading `@` is allowed. The default is an assumption: check the bot's real username in Telegram |
 | `POSTGRES_USER`, `POSTGRES_PASSWORD`, `POSTGRES_DB` | for Docker | | Credentials and database name of the compose Postgres; see [Variables](#variables) |
 | `POSTGRES_HOST_PORT`, `REDIS_HOST_PORT` | no, Docker only | `5432`, `6379` | Host ports that the override file publishes on `127.0.0.1` |
 | `TEST_DATABASE_URL` | for `make test` | | Not an application setting; see [Testing](#testing) |
 
 A relative `USERBOT_SESSION_PATH` or `MEDIA_DIR` is kept as written; when something opens it
-(the userbot opens the session path; nothing opens the media directory yet), it is relative to the
+(the userbot opens the session path; the profile collector writes photos under the media directory), it is relative to the
 current working directory of the process. Inside the
 containers compose sets both to absolute paths.
 
@@ -413,8 +443,9 @@ pytest with `asyncio_mode = auto`; tests live in `tests/` and mirror `src/cyrano
 cover configuration, logging (including secret masking), the heartbeat and healthcheck, the app
 loop, a real-process SIGTERM check, the Arq worker settings, the status transition rules, the
 migration and the repositories, and for the userbot: the filters, the handler, the client and
-startup logic, the login flow, the intake on real PostgreSQL and the check that the userbot never
-sends. Telegram is always faked: no test connects to it. All tests use fake values only.
+startup logic, the login flow, the intake on real PostgreSQL, the profile collection (parser, match
+check, matching-bot lookup, collector, `update_identity` on real PostgreSQL) and the check that the
+userbot never sends. Telegram is always faked: no test connects to it. All tests use fake values only.
 
 Database tests run against real PostgreSQL, never SQLite, because JSONB and native enums must be
 tested for real. `TEST_DATABASE_URL` (from the environment or `.env`; the template value targets

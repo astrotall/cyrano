@@ -1,7 +1,7 @@
 # Architecture
 
-State as of CYR-10: the skeleton, the storage layer and the userbot intake exist. Anything else is marked **planned**
-with its ticket.
+State as of CYR-11: the skeleton, the storage layer, the userbot intake and the profile collection exist. Anything
+else is marked **planned** with its ticket.
 Product and decisions: [CLAUDE.md](../../CLAUDE.md). Reasons: [decisions.md](decisions.md).
 
 ## Layers
@@ -10,11 +10,11 @@ Source lives in `src/cyrano/`.
 
 | Package or module | Role | State |
 | --- | --- | --- |
-| `userbot/` | The only package that imports Telethon: client, session and login, event filters, the incoming-message handler, the listener lifecycle. Receives private messages on the second account and converts events into plain objects. Planned: profile collection (CYR-11) and the actual Telegram send behind the sender (CYR-19) | exists for listening and registration (CYR-10); it sends nothing |
+| `userbot/` | The only package that imports Telethon: client, session and login, event filters, the incoming-message handler, the listener lifecycle. Receives private messages on the second account and converts events into plain objects. Also holds the read-only adapters of the profile collection: `profile_source.py` (bio, names, photo) and `leomatch_source.py` with `leomatch_match.py` (the matching-bot chat). Planned: the actual Telegram send behind the sender (CYR-19) | exists for listening and registration (CYR-10) and for reading profiles (CYR-11); it sends nothing |
 | `bot/` | aiogram control bot: owner-only, contact card, Reply/Ignore buttons, notifications | empty skeleton; planned CYR-12 |
 | `llm/` | LLM client: DeepSeek over plain httpx, response parsing | empty skeleton; planned CYR-13 |
 | `db/` | SQLAlchemy models (`models.py`), engine and session factory (`session.py`), repositories (`repositories.py`) | exists; called by the intake (CYR-10) |
-| `services/` | Business logic shared by userbot, bot and worker: contact lifecycle, sender, reply pipeline. `repositories.py` holds the repository Protocols, `intake.py` the `IntakeService`, `sanitize.py` the NUL-byte removal, `contact_events.py` the `ContactEventPublisher` Protocol and its in-memory queue | Protocols, intake, sanitization and events exist (CYR-10); the rest is planned from CYR-12 on |
+| `services/` | Business logic shared by userbot, bot and worker: contact lifecycle, sender, reply pipeline. `repositories.py` holds the repository Protocols, `intake.py` the `IntakeService`, `sanitize.py` the NUL-byte removal, `contact_events.py` the generic `ContactEventPublisher[T]` and `ContactEventSubscriber[T]` Protocols and the in-memory queue; CYR-11 added `profile_source.py` (the `ProfileSource` and `LeomatchSource` Protocols and `ProfileSourceError`), `leomatch.py` (the card parser) and `profile_collector.py` (`ProfileCollector`) | Protocols, intake, sanitization, events (CYR-10) and the profile collector (CYR-11) exist; the rest is planned from CYR-12 on |
 | `worker/` | Arq worker: `settings.py` holds `WorkerSettings`, `startup`, `shutdown`, a placeholder `noop` job (Arq refuses to start a worker with no registered functions) | skeleton works; real jobs planned CYR-17 |
 | `config.py` | `Settings` (pydantic-settings), `load_settings`, `ConfigError` | exists |
 | `logging.py` | JSON-lines formatter, `build_log_config`, `configure_logging` | exists |
@@ -87,12 +87,13 @@ Two Python processes, two stores, one external API each for Telegram and the LLM
 
 - **app**: `python -m cyrano`. It loads config, starts JSON logging and requires the session file
   (see [Userbot](#userbot-cyr-10)). Then it builds the database engine (which opens no connection
-  until something uses it), the repositories, the `IntakeService` and the in-memory event queue,
-  touches the heartbeat file, connects the userbot, registers the handler, catches up and waits
-  for SIGTERM or SIGINT; a signal during connect or catch-up ends the start at once (see
+  until something uses it), the repositories, the `IntakeService` and the two in-memory event queues,
+  touches the heartbeat file, connects the userbot, registers the handler, catches up, starts the
+  profile collector as a background task (only once the userbot is connected, because it reads
+  through the same client) and waits for SIGTERM or SIGINT; a signal during connect or catch-up ends the start at once (see
   [Userbot](#userbot-cyr-10)). A lost connection that Telethon cannot restore ends the process with an
   error, and the restart policy starts it again. Planned: the control bot runs on the same event
-  loop (CYR-12). On shutdown it removes the handler, disconnects the userbot, stops the heartbeat,
+  loop (CYR-12). On shutdown it cancels the collector, removes the handler, disconnects the userbot, stops the heartbeat,
   removes the file and disposes the engine; planned: stop the control bot and close the Redis
   connections there. It has the `userbot_session` volume.
 - **login**: `python -m cyrano login`, run on demand (`make login`, `make login-docker`). It is the
@@ -114,12 +115,13 @@ Two Python processes, two stores, one external API each for Telegram and the LLM
 - `depends_on` waits for healthy postgres and redis and for `migrate` to exit with 0
   (`service_completed_successfully`) before app and worker start.
 
-### Profile parsing (planned, CYR-11)
+### Profile collection (CYR-11)
 
-People arrive from a matching bot. The first messages from a contact may carry the text of their
-profile in that bot (for Leomatch); the userbot collects it together with nick, name, bio and
-photo for the card. The format and how it is parsed are specified in CYR-11. The system never
-sends anything to the matching bot.
+People arrive from a matching bot. The owner's chat with that bot (Leomatch) holds the person's
+card and the match message; the collector reads them together with nick, name, bio and photo for
+the owner's card. The system never sends anything to the matching bot. The steps, the stored
+structure and the semantics of `collected_at` are in
+[contact-lifecycle.md](contact-lifecycle.md#profile-collection-cyr-11).
 
 ## Userbot (CYR-10)
 
@@ -128,13 +130,16 @@ module calls `send_*`, `mark_read`, `send_read_acknowledge` or any other write m
 
 | Module | Role |
 | --- | --- |
-| `protocols.py` | The small surface of Telethon that the code uses, as Protocols: `SenderLike`, `IncomingEvent`, `UserbotClient`, `LoginClient`. `UserbotClient` has `connect`, `disconnect`, `is_user_authorized`, `catch_up`, `add_event_handler`, `remove_event_handler`, `disconnected` and no write method; a test enforces that list |
+| `protocols.py` | The small surface of Telethon that the code uses, as Protocols: `SenderLike`, `IncomingEvent`, `UserbotClient`, `LoginClient`. `UserbotClient` has `connect`, `disconnect`, `is_user_authorized`, `catch_up`, `add_event_handler`, `remove_event_handler`, `disconnected` and, since CYR-11, only the read members `get_entity`, `download_profile_photo`, `iter_messages` and `__call__` (typed to accept only the full-user request); no write method; a test enforces that list |
 | `filters.py` | Pure functions: `event_rejection(event)` and `sender_rejection(sender)` return a `Rejection` or `None` |
 | `handler.py` | `IncomingHandler`: registers one `events.NewMessage(incoming=True)` handler, converts an event into `IncomingMessage`, calls the intake, catches and counts failures |
 | `client.py` | Builds the `TelegramClient` from `Settings`, session file naming and mode, `connect_authorized` with the timeout, `disconnect_client` |
 | `runner.py` | `Userbot`: start, run until stopped or disconnected, stop |
 | `login.py` | The interactive login flow with injected prompts |
 | `errors.py` | `UserbotError` and subclasses; their messages are meant to be read by the owner |
+| `profile_source.py` | `TelethonProfileSource`, the `ProfileSource` adapter: the user from the session cache (`get_entity`), the bio from `GetFullUserRequest`, the big current profile photo. Every Telethon failure becomes `ProfileSourceError` carrying the class name; it never sleeps on a flood wait |
+| `leomatch_source.py` | `TelethonLeomatchSource`, the `LeomatchSource` adapter: resolves the chat with `LEOMATCH_BOT_USERNAME` (an unresolvable chat gives an empty list and a DEBUG line), searches, scans, walks back for the card; `to_chat_message` turns Telethon messages and entities into the plain `ChatMessage` |
+| `leomatch_match.py` | Pure: `ChatMessage`, `match_evidence` (the strict match check), `looks_like_match_message`, `normalize_username` |
 
 - **Why Protocols.** Telethon ships no type information. The Protocols keep mypy strict on our code
   without `Any`, let tests use plain fakes, and make "the userbot never sends" structural: the
@@ -186,6 +191,7 @@ module calls `send_*`, `mark_read`, `send_read_acknowledge` or any other write m
   or put in `Settings`; on success it prints only that the session was saved. A failed login
   removes a session file that it created. Prompts and the client factory are parameters, so tests
   run it without a terminal or a network.
+- **Read-only profile access (CYR-11).** `tests/userbot/test_never_sends.py` also pins the client members above, scans the userbot modules for imported Telethon request classes (only `GetFullUserRequest` is allowed) and runs the adapters against fakes whose write methods record and raise.
 - **Logging.** No message text, names, usernames, phone numbers or Telegram ids at INFO or above.
   Rejections are DEBUG with a reason and a counter. Handler failures are ERROR with the class name and
   counters. `telethon` follows `TELETHON_LOG_LEVEL`.
@@ -199,11 +205,39 @@ idempotency are in [contact-lifecycle.md](contact-lifecycle.md#registration-cyr-
 
 `services/sanitize.py`: `strip_nul` and `sanitize_incoming`, pure.
 
-`services/contact_events.py`: the `ContactEventPublisher` Protocol (`async publish`) and
-`InMemoryContactEvents` on a bounded `asyncio.Queue` (`EVENT_QUEUE_SIZE`, 1000) with an async
-`subscribe()` iterator for the future consumer (CYR-12). A full queue drops the new event and logs
+`services/contact_events.py`: the generic `ContactEventPublisher[T]` Protocol (`async publish`),
+`ContactEventSubscriber[T]` (`subscribe()`) and `InMemoryContactEvents[T]` on a bounded
+`asyncio.Queue` (`EVENT_QUEUE_SIZE`, 1000) with an async `subscribe()` iterator. `main.run` builds
+two instances: `NewContactEvent` (published by the intake, consumed by the profile collector) and
+`ContactReadyEvent` (published by the collector, consumed by the card in CYR-12; nothing consumes
+it yet). A full queue drops the new event and logs
 a warning with counters; `publish` never raises. The queue lives in one process and is lost on
 restart, which is fine because events are best-effort and the database is the source of truth.
+
+## Profile collection (CYR-11)
+
+`services/profile_collector.py`: `ProfileCollector(contacts, profiles, leomatch, new_contacts,
+ready, media_dir)`. It depends on the `ContactRepository` Protocol, on the two source Protocols in
+`services/profile_source.py` and on the event Protocols, never on Telethon or SQLAlchemy.
+
+- **Protocols.** `ProfileSource.fetch_profile(tg_id)` returns a `TelegramProfile` (username,
+  display name, bio); `ProfileSource.download_photo(tg_id, destination)` returns whether a photo was
+  saved; `LeomatchSource.find_texts(tg_id, username)` returns a list of `LeomatchSourceText` labelled
+  `match` or `card` (empty when nothing is found). Every adapter failure (flood wait, privacy
+  restriction, not found, timeout) is one `ProfileSourceError`.
+- **Parser.** `services/leomatch.py`: `parse_leomatch_text` never raises and fills name, age, city
+  and about only for the assumed card format; `build_leomatch_profile` assembles the stored
+  `LeomatchProfile` from the labelled texts. Linear time: it splits strings and uses one simple
+  pattern, no nested quantifiers.
+- **Process.** Started by `main.run` after the userbot connected and caught up, cancelled first on
+  shutdown, before the client disconnects. A collector that crashes is logged once (class name) and
+  does not stop the intake.
+- **Media directory.** `MEDIA_DIR/profiles/<internal contact id>.jpg`, created on demand;
+  `<id>.part.jpg` exists only during a download. The `media` compose volume is mounted into `app`
+  and `worker`.
+- **Logger.** `cyrano.services.profile_collector` (INFO: contact id and which parts produced data;
+  WARNING: contact id, part name and error class of a failed part; ERROR: error class and counter
+  of a failed event), `cyrano.userbot.leomatch_source` (DEBUG only).
 
 ## Persistence
 
@@ -258,6 +292,7 @@ the raw input. `load_settings(env_file=None)` ignores any `.env`.
 | `TELETHON_LOG_LEVEL` | no | `WARNING` | |
 | `AIOGRAM_LOG_LEVEL` | no | `WARNING` | |
 | `HTTPX_LOG_LEVEL` | no | `WARNING` | also applied to `httpcore` |
+| `LEOMATCH_BOT_USERNAME` | no | `leomatchbot` | username of the matching bot whose chat is searched for a contact's texts; a leading `@` is removed; the default is an assumption to check in Telegram; not in the startup log line |
 | `HEARTBEAT_PATH` | no | `<tmpdir>/cyrano-heartbeat` | liveness file; also read straight from `os.environ` by `cyrano.health`, the one exception to hard rule 3 ([decisions.md](decisions.md)) |
 
 `TEST_DATABASE_URL` is not in this table: tests read it themselves
@@ -287,8 +322,9 @@ the raw input. `load_settings(env_file=None)` ignores any `.env`.
 - Context goes through `extra=`: every `LogRecord` attribute outside the stdlib set becomes a field.
   Everything propagates to the root handler, so libraries that log through the stdlib (Arq
   included) are rendered by the same formatter.
-- The userbot loggers are `cyrano.userbot` and `cyrano.userbot.handler`, intake is
-  `cyrano.services.intake`, events `cyrano.services.contact_events`.
+- The userbot loggers are `cyrano.userbot`, `cyrano.userbot.handler` and
+  `cyrano.userbot.leomatch_source`, intake is `cyrano.services.intake`, events
+  `cyrano.services.contact_events`, the collector `cyrano.services.profile_collector`.
 - Library loggers (`telethon`, `aiogram`, `httpx`, `httpcore`) have their own levels
   (`*_LOG_LEVEL`, default `WARNING`), independent of `LOG_LEVEL`. `httpcore` follows
   `HTTPX_LOG_LEVEL` because it is httpx's transport.
@@ -339,6 +375,14 @@ the raw input. `load_settings(env_file=None)` ignores any `.env`.
   logic with a fake client (including a connect or catch-up that never finishes plus a stop
   signal, and a real subprocess that must exit within 2 s of SIGTERM while connecting), the login flow with injected prompts, and the structural test that
   the userbot never sends (`tests/userbot/test_never_sends.py`).
+  CYR-11 added: the card parser (formats, boundaries, text that would break a naive regex), the
+  strict match check, the lookup in the matching-bot chat against a fake client with real Telethon
+  entity objects (search hit and miss, both chain shapes, the walk-back rules), the profile adapter
+  with Telethon errors, the collector with fake sources (every part failing alone and together, the
+  total timeout, the sweep, order, logs without personal data), `update_identity` and the profile
+  JSONB round trip on real PostgreSQL, and in `tests/test_main.py` the collector task being
+  started, cancelled before the disconnect and unable to stop the intake. Those tests replace the
+  repositories in `main` with in-memory ones, so none of them needs a database.
 - **No real Telegram in tests.** Nothing in the test suite connects to Telegram. The fakes in
   `tests/userbot/fakes.py` implement the Protocols; their write methods record the attempt and
   raise, so a test can prove that none was made.
@@ -358,4 +402,4 @@ the raw input. `load_settings(env_file=None)` ignores any `.env`.
 
 Listed in [decisions.md](decisions.md) under "Open questions": how the worker sends through the
 userbot session, worker reconnect to Redis, where the layered prompt builder lives, whether `bot`,
-`userbot` and `worker` may import each other, the order of the consumers of `NewContactEvent`.
+`userbot` and `worker` may import each other, and the first real Leomatch match (card format, chat order, search).

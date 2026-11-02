@@ -21,7 +21,8 @@ owner, and pacing and limits are enforced centrally.
 Contact statuses: `new -> pending -> active -> paused / ignored`. Meaning and transitions:
 [contact-lifecycle.md](.claude/docs/contact-lifecycle.md).
 
-The skeleton (CYR-8), the storage layer (CYR-9) and the userbot intake (CYR-10) exist. Everything
+The skeleton (CYR-8), the storage layer (CYR-9), the userbot intake (CYR-10) and the profile
+collection (CYR-11) exist. Everything
 else is planned and marked with its ticket key.
 Never describe planned behaviour as existing.
 
@@ -54,7 +55,7 @@ Changing any of these is a large change (see Workflow expectations). Reasons:
 | SQLAlchemy 2.x async, asyncpg, Alembic | in the project (schema, repositories, used by the intake) |
 | Ruff, mypy strict, pytest, pytest-asyncio | in the project |
 | Docker, Docker Compose, GitHub Actions, Dependabot | in the project |
-| Telethon | in the project (userbot listens and registers contacts; imported only in `userbot/`) |
+| Telethon | in the project (userbot listens, registers contacts and reads profiles; imported only in `userbot/`) |
 | aiogram | planned, CYR-12 |
 | DeepSeek client over plain httpx | planned, CYR-13 |
 | respx | planned, with CYR-13 |
@@ -79,8 +80,10 @@ Changing any of these is a large change (see Workflow expectations). Reasons:
 │   ├── health.py                 heartbeat file and the app healthcheck
 │   ├── domain/                   enums, status transition rules, errors, Pydantic models
 │   ├── db/                       SQLAlchemy models, engine and sessions, repositories
-│   ├── services/                 repositories (Protocols), intake, sanitize, contact_events; the rest is planned
-│   ├── userbot/                  Telethon: protocols, filters, handler, client, login, runner, errors
+│   ├── services/                 repositories (Protocols), intake, sanitize, contact_events, profile_source,
+│   │                             leomatch, profile_collector; the rest is planned
+│   ├── userbot/                  Telethon: protocols, filters, handler, client, login, runner, errors,
+│   │                             profile_source, leomatch_source, leomatch_match
 │   ├── bot/ llm/                 empty skeleton packages
 │   └── worker/settings.py        Arq WorkerSettings, placeholder job
 └── tests/                        mirrors src/cyrano
@@ -93,7 +96,14 @@ service and the database tests. CYR-10 added `userbot/` (the only package that i
 it listens and registers, it never sends), `services/intake.py`, `services/sanitize.py`,
 `services/contact_events.py`, the `IncomingMessage` and `NewContactEvent` models, the
 `python -m cyrano login` command with the `make login` and `make login-docker` targets, and the
-userbot tests with their fakes.
+userbot tests with their fakes. CYR-11 added the profile collection: `services/profile_collector.py`
+(`ProfileCollector`, started by `main.run` next to the userbot), `services/profile_source.py` (the
+`ProfileSource` and `LeomatchSource` Protocols, `ProfileSourceError`), `services/leomatch.py` (the
+card parser), the read-only Telethon adapters `userbot/profile_source.py`,
+`userbot/leomatch_source.py` and `userbot/leomatch_match.py`, the `ContactProfile`,
+`LeomatchProfile`, `TelegramProfile`, `LeomatchSourceText` and `ContactReadyEvent` models,
+`ContactRepository.update_identity`, the generic in-memory event queue (two instances), the
+`LEOMATCH_BOT_USERNAME` setting, and the tests with their fakes.
 
 ## Detailed guides
 

@@ -2,12 +2,14 @@ from __future__ import annotations
 
 import asyncio
 import sys
+from unittest.mock import patch
 
+from cyrano import main as main_module
 from cyrano.config import load_settings
 from cyrano.logging import configure_logging
 from cyrano.main import run
 from cyrano.userbot.protocols import UserbotClient
-from tests.userbot.fakes import FakeClient
+from tests.userbot.fakes import FakeClient, InMemoryContacts, InMemoryMessages
 
 HANGING_CONNECT_SCENARIO = "hanging-connect"
 CONNECTING_MARKER = "fake-client-connecting"
@@ -30,11 +32,23 @@ def _hanging_client(_: object) -> UserbotClient:
     return _AnnouncingHangingClient()
 
 
+def _in_memory_contacts(_: object) -> InMemoryContacts:
+    return InMemoryContacts()
+
+
+def _in_memory_messages(_: object) -> InMemoryMessages:
+    return InMemoryMessages()
+
+
 def main(argv: list[str]) -> int:
     settings = load_settings(env_file=None)
     configure_logging(settings.log_level, settings.library_log_levels)
     factory = _hanging_client if HANGING_CONNECT_SCENARIO in argv else _fake_client
-    asyncio.run(run(settings, client_factory=factory))
+    with (
+        patch.object(main_module, "SqlContactRepository", _in_memory_contacts),
+        patch.object(main_module, "SqlMessageRepository", _in_memory_messages),
+    ):
+        asyncio.run(run(settings, client_factory=factory))
     return 0
 
 

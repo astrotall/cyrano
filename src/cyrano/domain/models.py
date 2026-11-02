@@ -7,11 +7,22 @@ from typing import Annotated
 
 from pydantic import AfterValidator, AwareDatetime, BaseModel, ConfigDict, Field
 
-from cyrano.domain.enums import ContactStatus, MessageDirection
+from cyrano.domain.enums import ContactStatus, LeomatchTextKind, MessageDirection
 
 DEFAULT_MODE_NAME = "default"
 
 MAX_BIGINT = 2**63 - 1
+
+MAX_USERNAME_LENGTH = 64
+MAX_DISPLAY_NAME_LENGTH = 256
+MAX_BIO_LENGTH = 1000
+MAX_PHOTO_PATH_LENGTH = 256
+MAX_LEOMATCH_TEXT_LENGTH = 4000
+MAX_LEOMATCH_RELATED_TEXTS = 2
+MAX_LEOMATCH_NAME_LENGTH = 100
+MAX_LEOMATCH_CITY_LENGTH = 100
+MIN_LEOMATCH_AGE = 18
+MAX_LEOMATCH_AGE = 99
 
 
 def _to_utc(value: datetime) -> datetime:
@@ -101,3 +112,38 @@ class IncomingMessage(_Input):
 class NewContactEvent(_Input):
     contact_id: int
     message_id: int
+
+
+class ContactReadyEvent(_Input):
+    contact_id: int
+
+
+class TelegramProfile(_Input):
+    username: str | None = None
+    display_name: str | None = None
+    bio: str | None = None
+
+
+class LeomatchSourceText(_Input):
+    kind: LeomatchTextKind
+    text: str
+
+
+class LeomatchProfile(_Input):
+    raw_text: str = Field(max_length=MAX_LEOMATCH_TEXT_LENGTH)
+    related_texts: list[Annotated[str, Field(max_length=MAX_LEOMATCH_TEXT_LENGTH)]] = Field(
+        default_factory=list, max_length=MAX_LEOMATCH_RELATED_TEXTS
+    )
+    name: str | None = Field(default=None, max_length=MAX_LEOMATCH_NAME_LENGTH)
+    age: int | None = Field(default=None, ge=MIN_LEOMATCH_AGE, le=MAX_LEOMATCH_AGE)
+    city: str | None = Field(default=None, max_length=MAX_LEOMATCH_CITY_LENGTH)
+    about: str | None = Field(default=None, max_length=MAX_LEOMATCH_TEXT_LENGTH)
+
+
+class ContactProfile(_Input):
+    username: str | None = Field(default=None, max_length=MAX_USERNAME_LENGTH)
+    display_name: str | None = Field(default=None, max_length=MAX_DISPLAY_NAME_LENGTH)
+    bio: str | None = Field(default=None, max_length=MAX_BIO_LENGTH)
+    photo: str | None = Field(default=None, max_length=MAX_PHOTO_PATH_LENGTH)
+    leomatch: LeomatchProfile | None = None
+    collected_at: UtcDatetime | None = None

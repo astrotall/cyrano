@@ -2,8 +2,16 @@ from __future__ import annotations
 
 from datetime import UTC, datetime
 
+import pytest
+
 from cyrano.domain.models import IncomingMessage
-from cyrano.services.sanitize import NUL, sanitize_incoming, strip_nul, strip_nul_optional
+from cyrano.services.sanitize import (
+    NUL,
+    clean_text,
+    sanitize_incoming,
+    strip_nul,
+    strip_nul_optional,
+)
 
 
 def _incoming(**overrides: object) -> IncomingMessage:
@@ -49,3 +57,13 @@ def test_sanitize_incoming_keeps_the_rest_and_missing_values() -> None:
     original = _incoming(username=None, display_name=None, text="")
 
     assert sanitize_incoming(original) == original
+
+
+def test_clean_text_removes_nul_trims_and_truncates() -> None:
+    assert clean_text("  a\x00b  ", 10) == "ab"
+    assert clean_text("abcdef", 3) == "abc"
+
+
+@pytest.mark.parametrize("value", [None, "", "   ", "\x00", " \x00 "])
+def test_clean_text_turns_nothing_into_none(value: str | None) -> None:
+    assert clean_text(value, 10) is None

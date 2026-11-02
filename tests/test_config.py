@@ -213,6 +213,7 @@ def test_every_setting_is_either_logged_or_deliberately_withheld() -> None:
         "deepseek_api_key",
         "database_url",
         "redis_url",
+        "leomatch_bot_username",
     }
 
     assert set(Settings.model_fields) == set(LOGGED_SETTINGS) | withheld
@@ -223,3 +224,39 @@ def test_settings_are_immutable(full_env: dict[str, str]) -> None:
 
     with pytest.raises(ValueError, match="frozen"):
         settings.log_level = "DEBUG"  # type: ignore[misc]
+
+
+def test_the_leomatch_bot_username_defaults_to_leomatchbot(full_env: dict[str, str]) -> None:
+    assert load_settings(env_file=None).leomatch_bot_username == "leomatchbot"
+
+
+@pytest.mark.parametrize(
+    ("raw", "expected"), [("MyMatchBot", "MyMatchBot"), (" @other_bot ", "other_bot")]
+)
+def test_the_leomatch_bot_username_can_be_overridden(
+    full_env: dict[str, str], monkeypatch: pytest.MonkeyPatch, raw: str, expected: str
+) -> None:
+    monkeypatch.setenv("LEOMATCH_BOT_USERNAME", raw)
+
+    assert load_settings(env_file=None).leomatch_bot_username == expected
+
+
+def test_an_empty_leomatch_bot_username_counts_as_unset(
+    full_env: dict[str, str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("LEOMATCH_BOT_USERNAME", "")
+
+    assert load_settings(env_file=None).leomatch_bot_username == "leomatchbot"
+
+
+@pytest.mark.parametrize("raw", ["has space", "bad-name!", "@", "x" * 33, "t.me/leomatchbot"])
+def test_an_invalid_leomatch_bot_username_is_rejected_without_echoing_it(
+    full_env: dict[str, str], monkeypatch: pytest.MonkeyPatch, raw: str
+) -> None:
+    monkeypatch.setenv("LEOMATCH_BOT_USERNAME", raw)
+
+    with pytest.raises(ConfigError) as raised:
+        load_settings(env_file=None)
+
+    assert "LEOMATCH_BOT_USERNAME" in str(raised.value)
+    assert raw not in str(raised.value)

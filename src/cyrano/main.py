@@ -13,13 +13,17 @@ from collections.abc import Callable, Sequence
 from cyrano.config import ConfigError, Settings, load_settings
 from cyrano.db.repositories import SqlContactRepository, SqlMessageRepository
 from cyrano.db.session import build_engine, build_session_factory
+from cyrano.domain.models import ContactReadyEvent, NewContactEvent
 from cyrano.health import HEARTBEAT_INTERVAL, heartbeat_loop
 from cyrano.logging import configure_logging
 from cyrano.services.contact_events import InMemoryContactEvents
 from cyrano.services.intake import IntakeService
+from cyrano.services.profile_collector import ProfileCollector
 from cyrano.userbot.client import build_client, ensure_session_exists
 from cyrano.userbot.errors import UserbotError
+from cyrano.userbot.leomatch_source import TelethonLeomatchSource
 from cyrano.userbot.login import run_login
+from cyrano.userbot.profile_source import TelethonProfileSource
 from cyrano.userbot.protocols import UserbotClient
 from cyrano.userbot.runner import Userbot
 
@@ -29,6 +33,14 @@ LOGIN_COMMAND = "login"
 EXIT_USERBOT_ERROR = 1
 EXIT_CONFIG_ERROR = 2
 LOGIN_CANCELLED_MESSAGE = "Login cancelled. Nothing was saved."
+
+
+def _report_collector_exit(task: asyncio.Task[None]) -> None:
+    if task.cancelled():
+        return
+    error = task.exception()
+    if error is not None:
+        logger.error("profile collector stopped", extra={"error": type(error).__name__})
 
 
 async def run(
@@ -46,18 +58,33 @@ async def run(
     logger.info("cyrano started", extra={"service": "app", **settings.safe_summary()})
     engine = build_engine(settings)
     session_factory = build_session_factory(engine)
-    intake = IntakeService(
-        SqlContactRepository(session_factory),
-        SqlMessageRepository(session_factory),
-        InMemoryContactEvents(),
+    contacts = SqlContactRepository(session_factory)
+    new_contacts = InMemoryContactEvents[NewContactEvent]()
+    ready_contacts = InMemoryContactEvents[ContactReadyEvent]()
+    intake = IntakeService(contacts, SqlMessageRepository(session_factory), new_contacts)
+    client = client_factory(settings)
+    userbot = Userbot(client, intake)
+    collector = ProfileCollector(
+        contacts,
+        TelethonProfileSource(client),
+        TelethonLeomatchSource(client, settings.leomatch_bot_username),
+        new_contacts,
+        ready_contacts,
+        settings.media_dir,
     )
-    userbot = Userbot(client_factory(settings), intake)
     heartbeat = asyncio.create_task(heartbeat_loop(settings.heartbeat_path, heartbeat_interval))
+    collector_task: asyncio.Task[None] | None = None
     try:
         await userbot.start(stop)
+        if not stop.is_set():
+            collector_task = asyncio.create_task(collector.run())
+            collector_task.add_done_callback(_report_collector_exit)
         await userbot.run_until(stop)
     finally:
         logger.info("cyrano shutting down", extra={"service": "app"})
+        if collector_task is not None:
+            collector_task.cancel()
+            await asyncio.gather(collector_task, return_exceptions=True)
         await userbot.stop()
         heartbeat.cancel()
         with contextlib.suppress(asyncio.CancelledError):

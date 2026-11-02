@@ -104,15 +104,21 @@ Tests named here are planned. They use scripted fakes and fake data only.
 
 - **Rule:** message text, names and other personal data are never logged at INFO or above. Persona
   text, style examples, sessions, media and messages never go to git; fixtures use fake data.
+  Collected profile data is personal data too: username, display name, bio, the profile photo
+  and its path, and the matching-bot texts are never logged at INFO or above and never go to git.
+  The collector logs internal contact ids, part names, error class names and counters only.
 - **Why:** the data belongs to real people.
 - **Enforced where:** exists today: `.gitignore` and `.dockerignore` exclude `.env`, `*.session`,
-  `media/` and `data/`; secrets are `SecretStr` and masked in logs; `Settings.safe_summary()`, the
+  `media/` and `data/` (profile photos live under `MEDIA_DIR`, `.env.example` and compose put it
+  in `data/media` and `/data/media`, `media` is the default); secrets are `SecretStr` and masked in logs; `Settings.safe_summary()`, the
   only settings in the startup log lines, returns an allowlist (`LOGGED_SETTINGS`) with no secrets,
   no `OWNER_TELEGRAM_ID` and no `TELEGRAM_API_ID`. Planned: scrubbing of free-text
   logs and observability (CYR-28); until then, review enforces it (hard rules 8 and 9).
 - **How it is tested:** exists today: tests assert that neither secret values nor the owner id and
   API id appear in the app and worker startup output or in `safe_summary()`, and that every
-  setting is either allowlisted or deliberately withheld. Planned: tests that run the reply pipeline with a fake message and assert that its text
+  setting is either allowlisted or deliberately withheld; the collector tests assert that no
+  username, name, bio, Leomatch text, Telegram id or photo path appears in captured log output,
+  failures included. Planned: tests that run the reply pipeline with a fake message and assert that its text
   does not appear in captured log output at INFO and above.
 
 ## S10. The assistant never answers a direct bot question

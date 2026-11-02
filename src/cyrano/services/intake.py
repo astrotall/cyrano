@@ -33,7 +33,7 @@ class IntakeService:
         self,
         contacts: ContactRepository,
         messages: MessageRepository,
-        events: ContactEventPublisher,
+        events: ContactEventPublisher[NewContactEvent],
     ) -> None:
         self._contacts = contacts
         self._messages = messages

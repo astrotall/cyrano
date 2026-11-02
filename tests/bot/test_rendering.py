@@ -10,7 +10,7 @@ from cyrano.bot.rendering import (
     decision_text,
     render_card,
 )
-from cyrano.domain.enums import CardOutcome, ContactStatus
+from cyrano.domain.enums import CardOutcome, ContactStatus, LeomatchNameSource
 from cyrano.domain.models import (
     CARD_BIO_LENGTH,
     CARD_LEOMATCH_ABOUT_LENGTH,
@@ -77,7 +77,14 @@ def test_a_card_with_everything_shows_every_part() -> None:
     card = fake_card(
         bio="fake bio",
         messages=["first", "second"],
-        leomatch=CardLeomatch(name="Anya", age=27, city="Town", about="fake about", raw_text="r"),
+        leomatch=CardLeomatch(
+            name="Anya",
+            name_source=LeomatchNameSource.CARD,
+            age=27,
+            city="Town",
+            about="fake about",
+            raw_text="r",
+        ),
     )
 
     text = render_card(card)
@@ -97,9 +104,44 @@ def test_an_unparsed_leomatch_text_is_shown_raw() -> None:
 
 
 def test_a_leomatch_card_without_age_and_city_shows_the_name_only() -> None:
-    text = render_card(fake_card(leomatch=CardLeomatch(name="Anya", raw_text="r")))
+    text = render_card(
+        fake_card(
+            leomatch=CardLeomatch(name="Anya", name_source=LeomatchNameSource.CARD, raw_text="r")
+        )
+    )
 
     assert f"<b>{messages.LABEL_ANKETA}</b>\nAnya" in text
+
+
+def test_a_card_that_was_not_found_says_so_and_never_shows_the_match_text() -> None:
+    text = render_card(fake_card(leomatch=CardLeomatch()))
+
+    assert f"<b>{messages.LABEL_ANKETA}</b>\n{messages.CARD_NOT_FOUND}" in text
+    assert messages.LABEL_ANKETA_RAW not in text
+    assert messages.LABEL_NAME + ": None" not in text
+
+
+def test_a_card_that_was_not_found_shows_the_fallback_name_as_the_name() -> None:
+    leomatch = CardLeomatch(name=f"Link {MARKUP}", name_source=LeomatchNameSource.MATCH)
+
+    text = render_card(fake_card(leomatch=leomatch))
+
+    assert f"{messages.CARD_NOT_FOUND}\n{messages.LABEL_NAME}: Link {ESCAPED_MARKUP}" in text
+    assert MARKUP not in text
+
+
+def test_an_unparsed_card_text_comes_with_the_fallback_name_first() -> None:
+    leomatch = CardLeomatch(
+        name="Linkname", name_source=LeomatchNameSource.MATCH, raw_text="free card text"
+    )
+
+    text = render_card(fake_card(leomatch=leomatch))
+
+    assert (
+        f"<b>{messages.LABEL_ANKETA_RAW}</b>\n{messages.LABEL_NAME}: Linkname\nfree card text"
+        in text
+    )
+    assert messages.CARD_NOT_FOUND not in text
 
 
 def test_a_profile_that_was_not_collected_says_so() -> None:
@@ -120,6 +162,7 @@ def test_the_largest_card_stays_below_the_telegram_limit() -> None:
         messages=["m" * CARD_MESSAGE_LENGTH] * CARD_MESSAGES_LIMIT,
         leomatch=CardLeomatch(
             name="a" * 100,
+            name_source=LeomatchNameSource.CARD,
             age=99,
             city="c" * 100,
             about="o" * CARD_LEOMATCH_ABOUT_LENGTH,
@@ -140,6 +183,7 @@ def test_a_card_made_only_of_characters_that_grow_when_escaped_stays_below_the_l
         messages=[growing] * CARD_MESSAGES_LIMIT,
         leomatch=CardLeomatch(
             name="&" * 100,
+            name_source=LeomatchNameSource.CARD,
             age=99,
             city="&" * 100,
             about="&" * CARD_LEOMATCH_ABOUT_LENGTH,

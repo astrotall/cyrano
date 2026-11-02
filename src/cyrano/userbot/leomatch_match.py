@@ -19,12 +19,19 @@ class MatchEvidence(StrEnum):
 
 
 @dataclass(frozen=True, slots=True)
+class UserLinkText:
+    user_id: int
+    text: str
+
+
+@dataclass(frozen=True, slots=True)
 class ChatMessage:
     id: int
     out: bool
     text: str
     mentioned_user_ids: tuple[int, ...] = ()
     links: tuple[str, ...] = ()
+    user_link_texts: tuple[UserLinkText, ...] = ()
 
     @property
     def searchable(self) -> str:
@@ -65,6 +72,13 @@ def match_evidence(message: ChatMessage, tg_id: int, username: str | None) -> Ma
         return None
     if _mentions_username(message, name) or _links_to_username(message, name):
         return MatchEvidence.USERNAME
+    return None
+
+
+def linked_name(message: ChatMessage, tg_id: int) -> str | None:
+    for link in message.user_link_texts:
+        if link.user_id == tg_id and link.text.strip():
+            return link.text
     return None
 
 

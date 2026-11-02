@@ -9,7 +9,7 @@ from aiogram.utils.keyboard import InlineKeyboardBuilder
 
 from cyrano.bot import messages
 from cyrano.bot.callbacks import CardAction, CardCallback
-from cyrano.domain.enums import CardOutcome, ContactStatus
+from cyrano.domain.enums import CardOutcome, ContactStatus, LeomatchNameSource
 from cyrano.domain.models import CardActionResult, CardLeomatch, ContactCard
 
 TELEGRAM_TEXT_LIMIT = 4096
@@ -51,11 +51,24 @@ def _bio_section(card: ContactCard) -> str | None:
     return _titled(messages.LABEL_BIO, [_escaped(card.bio)])
 
 
+def _leomatch_name_line(leomatch: CardLeomatch) -> list[str]:
+    if leomatch.name is None:
+        return []
+    return [f"{messages.LABEL_NAME}: {_escaped(leomatch.name)}"]
+
+
 def _leomatch_section(leomatch: CardLeomatch | None) -> str | None:
     if leomatch is None:
         return None
-    if leomatch.name is None:
-        return _titled(messages.LABEL_ANKETA_RAW, [_escaped(leomatch.raw_text)])
+    if leomatch.raw_text is None:
+        return _titled(
+            messages.LABEL_ANKETA, [messages.CARD_NOT_FOUND, *_leomatch_name_line(leomatch)]
+        )
+    if leomatch.name is None or leomatch.name_source is not LeomatchNameSource.CARD:
+        return _titled(
+            messages.LABEL_ANKETA_RAW,
+            [*_leomatch_name_line(leomatch), _escaped(leomatch.raw_text)],
+        )
     head = [leomatch.name, *(str(v) for v in (leomatch.age, leomatch.city) if v is not None)]
     lines = [_escaped(FIELD_SEPARATOR.join(head))]
     if leomatch.about:

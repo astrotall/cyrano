@@ -159,18 +159,19 @@ disconnects. It never sends and never changes a status.
   | --- | --- | --- |
   | Telegram profile | username, display name, bio | `ProfileSource.fetch_profile` |
   | Photo | the current big profile photo | `ProfileSource.download_photo` |
-  | Leomatch | the card text and the match text from the chat with the matching bot | `LeomatchSource.find_texts` |
-  | Card photo | the photo of the card message, when it has one; runs only after a Leomatch lookup that found texts | `CardPhoto.download`, from the same lookup |
+  | Leomatch | the card text, the match text and the name under the link to the contact, from the chat with the matching bot | `LeomatchSource.find_texts` |
+  | Card photos | the photos of the card position (up to `MAX_CARD_PHOTOS`, 5), when it has any; runs only after a Leomatch lookup that found a match | `CardPhotos.download(index, destination)`, from the same lookup |
 
   The Leomatch lookup uses the username that the Telegram part just fetched (the stored one if that
-  part failed). The whole contact has a time budget of 30 s (`COLLECTION_TIMEOUT_SECONDS`,
+  part failed); how it finds the card is described in [The card position](#the-card-position). The
+  whole contact has a time budget of 30 s (`COLLECTION_TIMEOUT_SECONDS`,
   `asyncio.wait_for`). When it runs out, what was gathered so far is still stored.
 - **Stored.** The profile JSON is written through `ContactRepository.update`; when the Telegram
   part succeeded, `ContactRepository.update_identity` first refreshes `username` and
   `display_name`, which CYR-10 wrote once from the first message. NUL bytes are removed and every
   text is truncated to a named limit (`domain/models.py`) before anything is stored.
 - **`collected_at`** is set (UTC) only if the Telegram profile part succeeded. Otherwise it stays
-  empty, so the next start retries the contact. A failed photo, card photo or Leomatch part does not prevent
+  empty, so the next start retries the contact. A failed photo, card photos or Leomatch part does not prevent
   it and is not retried; values gathered by an earlier run are kept when a later run fails that
   part.
 - **Always ready.** `ContactReadyEvent(contact_id)` is published in a `finally` for every contact
@@ -183,11 +184,39 @@ disconnects. It never sends and never changes a status.
   Telegram id or a name. It is downloaded to a `<id>.part.jpg` file first and renamed when the
   download is complete, so a failed download leaves no half file. The path stored in the profile is
   relative to `MEDIA_DIR`.
-- **Card photo.** The same way, as `profiles/<internal contact id>-card.jpg` through
-  `<id>-card.part.jpg`, downloaded read-only from the card message. Its relative path is stored in
-  `leomatch.photo`; the Telegram profile photo stays in `photo`. A failed download is its own part
-  (`card_photo`): it leaves no half file, never blocks or changes another part and keeps
-  `leomatch.photo` as an earlier run stored it. A new successful download replaces the path.
+- **Card photos.** The same way, as `profiles/<internal contact id>-card-<n>.jpg` (n from 1, in the
+  order of the message ids of the album) through `<id>-card-<n>.part.jpg`, each downloaded read-only
+  from one message of the card position. The relative paths are stored in the list
+  `leomatch.photos`; the Telegram profile photo stays in `photo`. A failed download is part
+  `card_photos`: it leaves no half file and never blocks another photo, another part or the ready
+  event. A photo whose download fails keeps the old path at its index when an earlier run stored
+  one, and the stored list never shrinks because of a failed attempt, a card with fewer photos or a
+  card without photos. A successful download replaces the path at its index.
+
+### The card position
+
+The matching bot sends a profile card as one message group: up to 3 photos with the caption on one
+of them, or a single video with a caption. Telegram gives every message of such a group the same
+`grouped_id`. The lookup reads the last `CARD_HISTORY_LIMIT` (15) messages before the match message,
+newest first, and builds positions:
+
+- consecutive messages with the same non-null `grouped_id` form ONE position; any other message is a
+  position of its own;
+- at most `CARD_WALK_BACK_POSITIONS` (2) positions are looked at, so the chains stay as before:
+  (A) card, the owner's own like (outgoing), match message; (B) card, match message. An album is one
+  position in both;
+- outgoing positions (the like) and positions with no text or caption in any message are skipped;
+- the first incoming position with text is the card, and the walk stops there: never two cards. Its
+  card text is the first non-empty caption among its messages, ordered by message id;
+- if any message of that position has a user-mention entity, a `tg://user` link or a `t.me/` link,
+  it looks like another person's match message: the walk stops and no card is taken;
+- the card photos are the messages of the chosen position that have a photo, ordered by message id,
+  at most `MAX_CARD_PHOTOS` (5). A video message has no photo and is never downloaded; a card that
+  is a single video gives its caption text and no photos.
+
+Which message of an album carries the caption, and in which order Telegram returns the messages of
+an album, are not observed yet (see [decisions.md](decisions.md)); the rules above do not depend on
+either.
 
 ### The stored profile
 
@@ -197,12 +226,17 @@ An empty object `{}` means nothing was collected.
 | Field | Holds                                                                                                                                                                                                                                                                                                                                                                                                              |
 | --- |--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
 | `username`, `display_name`, `bio` | As fetched, sanitized and truncated; `null` when missing                                                                                                                                                                                                                                                                                                                                                           |
-| `photo` | Path relative to `MEDIA_DIR`, for example `profiles/17.jpg`, or `null`                                                                                                                                                                                                                                                                                                                                             |
-| `leomatch` | `null` or an object: `raw_text` (the card text if a card was found, otherwise the match text), `related_texts` (the other one, at most 2), `photo` (path of the card photo relative to `MEDIA_DIR`, for example `profiles/17-card.jpg`, or `null`), and, only when the text matches the observed card format, `name`, `age` (14 to 99), `city` and `about` (`about` stays `null` when the card has no description) |
+| `photo` | The Telegram profile photo: path relative to `MEDIA_DIR`, for example `profiles/17.jpg`, or `null`                                                                                                                                                                                                                                                                                                                                             |
+| `leomatch` | `null` or an object: `raw_text` (the card text only, `null` when no card was found; the match text never goes here), `match_text` (the text of the match message), `photos` (list of card photo paths relative to `MEDIA_DIR`, for example `profiles/17-card-1.jpg`, at most 5, empty when there are none), `name`, `name_source` (`card` for a name parsed from the card text, `match` for the name under the link to the contact in the match message, `null` without a name) and, only when the card text matches the observed card format, `age` (14 to 99), `city` and `about` (`about` stays `null` when the card has no description) |
 | `collected_at` | ISO 8601 UTC time, or `null` while the Telegram part has not succeeded                                                                                                                                                                                                                                                                                                                                             |
 
 The card and match formats were observed on one real match; what is still unobserved is listed in
 [decisions.md](decisions.md).
+
+Old contacts keep their old shape and only newly collected ones get the new one; no migration. The
+model reads the legacy single `leomatch.photo` key as a one-item `photos` list, ignores the legacy
+`related_texts`, and treats a legacy `name` without `name_source` as a card name. A legacy
+`raw_text` that was a match text (the old fallback) stays as written.
 
 ## Card announcement (CYR-12)
 
@@ -221,16 +255,21 @@ cancelled first on shutdown. It talks to the owner only through the `CardSender`
   finished, successfully or not.
 - **Per contact.** Re-read the contact and skip it unless its status is still `new`. Build the
   `ContactCard`: identity, bio, the matching-bot card, the last up to three incoming messages in
-  chronological order, the photo paths, whether the profile was collected, and the enabled modes.
+  chronological order, the profile photo path and the card photo paths, whether the profile was
+  collected, and the enabled modes.
   Call the sender. **Only after it returned `True`** set `new -> pending`. A `False` result or an
   exception leaves the contact in `new`; the next sweep retries it. Failures are counted, and the
   announcer logs at most one warning per sweep interval, with counters and the error class only.
 - **Duplicates.** Sending first and setting the status afterwards means a crash between the two (or
   a failed status write) shows the owner the same card twice. That is tolerated: the buttons are
   idempotent (below). The opposite order would lose cards, which is worse.
-- **What the owner sees.** Up to two photos first (the profile photo, then the matching-bot card
-  photo; two go as a media group), each with a short caption, then one text message with the name,
-  nick, messages, bio and the matching-bot card, and a line when the profile was not collected. The
+- **What the owner sees.** The photos first: the profile photo, then all card photos, as ONE media
+  group (a single photo uses `send_photo`), with a caption on the first item only: «Фото профиля и
+  анкеты» when both kinds exist, «Фото профиля» or «Фото анкеты» otherwise. Then one text message
+  with the name, nick, messages, bio and the matching-bot card, and a line when the profile was not
+  collected. The card section shows the card text and the parsed fields only from `raw_text`; when
+  no card text was found it is one short line saying so, and a fallback name from the match message
+  is shown as the name. The match text is never shown. The
   buttons live on the text message: one "Отвечать: <mode>" per enabled mode and "Игнорировать". All
   texts from the contact are HTML-escaped. The owner must have pressed Start in the control bot once;
   until then Telegram refuses the send and the contact stays `new`.
@@ -262,7 +301,7 @@ Fixed in CYR-9. Table `contacts`:
 | `username`, `display_name` | Nick and name; both may be missing |
 | `status` | One of the statuses above, starts as `new` |
 | `mode_id` | Chosen mode, nullable, foreign key to `modes` |
-| `profile` | JSONB object: bio, photo path, matching-bot profile text, `collected_at`. Structure: [The stored profile](#the-stored-profile) (CYR-11) |
+| `profile` | JSONB object: bio, photo path, matching-bot card text and card photo paths, `collected_at`. Structure: [The stored profile](#the-stored-profile) (CYR-11) |
 | `summary` | JSONB object: contact summary. Its schema arrives with CYR-25 |
 | `last_message_at` | Time of the latest message; only moves forward, a late event does not take it back |
 | `created_at`, `updated_at` | `updated_at` moves only when a row really changes |

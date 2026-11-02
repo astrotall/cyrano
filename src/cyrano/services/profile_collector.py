@@ -9,13 +9,13 @@ from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from enum import StrEnum
+from functools import partial
 from pathlib import Path
-
-from pydantic import ValidationError
 
 from cyrano.domain.enums import ContactStatus
 from cyrano.domain.models import (
     MAX_BIO_LENGTH,
+    MAX_CARD_PHOTOS,
     MAX_DISPLAY_NAME_LENGTH,
     MAX_USERNAME_LENGTH,
     Contact,
@@ -25,9 +25,10 @@ from cyrano.domain.models import (
     LeomatchProfile,
     NewContactEvent,
 )
+from cyrano.services.card_builder import profile_of
 from cyrano.services.contact_events import ContactEventPublisher, ContactEventSubscriber
 from cyrano.services.leomatch import build_leomatch_profile
-from cyrano.services.profile_source import CardPhoto, LeomatchSource, ProfileSource
+from cyrano.services.profile_source import CardPhotos, LeomatchSource, ProfileSource
 from cyrano.services.repositories import ContactRepository
 from cyrano.services.sanitize import clean_text
 
@@ -37,13 +38,13 @@ COLLECTION_TIMEOUT_SECONDS = 30.0
 PROFILE_PHOTO_DIRECTORY = "profiles"
 PROFILE_PHOTO_SUFFIX = ".jpg"
 PARTIAL_PHOTO_MARKER = ".part"
-CARD_PHOTO_MARKER = "-card"
+CARD_PHOTO_MARKER = "-card-"
 
 
 class CollectionPart(StrEnum):
     TELEGRAM = "telegram"
     PHOTO = "photo"
-    CARD_PHOTO = "card_photo"
+    CARD_PHOTOS = "card_photos"
     LEOMATCH = "leomatch"
 
 
@@ -59,13 +60,6 @@ class _Gathered:
 
 def _utc_now() -> datetime:
     return datetime.now(UTC)
-
-
-def _profile_of(contact: Contact) -> ContactProfile:
-    try:
-        return ContactProfile.model_validate(contact.profile)
-    except ValidationError:
-        return ContactProfile()
 
 
 class ProfileCollector:
@@ -114,7 +108,7 @@ class ProfileCollector:
                 "profile sweep failed", extra={"error": type(exc).__name__, "failed": self._failed}
             )
             return
-        uncollected = [c.id for c in waiting if _profile_of(c).collected_at is None]
+        uncollected = [c.id for c in waiting if profile_of(c).collected_at is None]
         if uncollected:
             logger.info("profile sweep started", extra={"contacts": len(uncollected)})
         for contact_id in uncollected:
@@ -142,7 +136,7 @@ class ProfileCollector:
         contact = await self._contacts.get_by_id(contact_id)
         if contact is None:
             return False
-        profile = _profile_of(contact)
+        profile = profile_of(contact)
         if profile.collected_at is not None:
             return False
         gathered = _Gathered(
@@ -164,7 +158,7 @@ class ProfileCollector:
                 "contact_id": contact.id,
                 "telegram": gathered.telegram_collected,
                 "photo": gathered.photo is not None,
-                "card_photo": gathered.leomatch is not None and gathered.leomatch.photo is not None,
+                "card_photos": len(gathered.leomatch.photos) if gathered.leomatch else 0,
                 "leomatch": gathered.leomatch is not None,
             },
         )
@@ -227,26 +221,36 @@ class ProfileCollector:
     async def _gather_leomatch(self, contact: Contact, gathered: _Gathered) -> None:
         try:
             lookup = await self._leomatch.find_texts(contact.tg_id, gathered.username)
-            found = build_leomatch_profile(lookup.texts)
+            found = build_leomatch_profile(lookup.card_text, lookup.match_text, lookup.match_name)
         except Exception as exc:
             self._part_failed(contact, CollectionPart.LEOMATCH, exc)
             return
         if found is None:
             return
-        earlier = gathered.leomatch.photo if gathered.leomatch is not None else None
-        gathered.leomatch = found.model_copy(update={"photo": earlier})
-        if lookup.card_photo is not None:
-            saved = await self._gather_card_photo(contact, lookup.card_photo)
-            if saved is not None:
-                gathered.leomatch = found.model_copy(update={"photo": saved})
+        earlier = gathered.leomatch.photos if gathered.leomatch is not None else []
+        gathered.leomatch = found.model_copy(update={"photos": earlier})
+        if lookup.card_photos is not None:
+            photos = await self._gather_card_photos(contact, lookup.card_photos, earlier)
+            gathered.leomatch = found.model_copy(update={"photos": photos})
 
-    async def _gather_card_photo(self, contact: Contact, card_photo: CardPhoto) -> str | None:
-        return await self._save_photo(
-            contact,
-            CollectionPart.CARD_PHOTO,
-            f"{contact.id}{CARD_PHOTO_MARKER}",
-            card_photo.download,
-        )
+    async def _gather_card_photos(
+        self, contact: Contact, card_photos: CardPhotos, earlier: list[str]
+    ) -> list[str]:
+        stored = list(earlier)
+        for index in range(min(card_photos.count, MAX_CARD_PHOTOS)):
+            saved = await self._save_photo(
+                contact,
+                CollectionPart.CARD_PHOTOS,
+                f"{contact.id}{CARD_PHOTO_MARKER}{index + 1}",
+                partial(card_photos.download, index),
+            )
+            if saved is None:
+                continue
+            if index < len(stored):
+                stored[index] = saved
+            else:
+                stored.append(saved)
+        return stored
 
     async def _store(self, contact: Contact, gathered: _Gathered) -> None:
         profile = ContactProfile(

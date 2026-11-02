@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from datetime import UTC, datetime
 
-from cyrano.domain.enums import ContactStatus, MessageDirection
+from cyrano.domain.enums import ContactStatus, LeomatchNameSource, MessageDirection
 from cyrano.domain.models import (
     CARD_BIO_LENGTH,
     CARD_LEOMATCH_RAW_LENGTH,
@@ -77,11 +77,11 @@ def test_a_contact_without_a_profile_gives_a_card_that_says_nothing_was_collecte
     assert card.contact_id == 17
     assert (card.display_name, card.username) == ("Fakefirst Fakelast", "fake_user")
     assert card.profile_collected is False
-    assert (card.bio, card.leomatch, card.profile_photo, card.card_photo) == (
+    assert (card.bio, card.leomatch, card.profile_photo, card.card_photos) == (
         None,
         None,
         None,
-        None,
+        [],
     )
     assert (card.messages, card.modes) == ([], [])
 
@@ -96,7 +96,8 @@ def test_a_collected_profile_fills_the_card() -> None:
             age=27,
             city="Town",
             about="about",
-            photo="profiles/17-card.jpg",
+            name_source=LeomatchNameSource.CARD,
+            photos=["profiles/17-card-1.jpg", "profiles/17-card-2.jpg"],
         ),
         collected_at=NOW,
     )
@@ -105,10 +106,12 @@ def test_a_collected_profile_fills_the_card() -> None:
 
     assert card.profile_collected is True
     assert card.bio == "fake bio"
-    assert (card.profile_photo, card.card_photo) == ("profiles/17.jpg", "profiles/17-card.jpg")
+    assert card.profile_photo == "profiles/17.jpg"
+    assert card.card_photos == ["profiles/17-card-1.jpg", "profiles/17-card-2.jpg"]
     assert card.leomatch is not None
     assert (card.leomatch.name, card.leomatch.age, card.leomatch.city) == ("Anya", 27, "Town")
     assert (card.leomatch.about, card.leomatch.raw_text) == ("about", "raw")
+    assert card.leomatch.name_source is LeomatchNameSource.CARD
 
 
 def test_identity_falls_back_to_the_profile_when_the_contact_has_none() -> None:
@@ -141,7 +144,7 @@ def test_every_text_is_truncated_to_its_named_limit_and_stripped_of_nul_bytes() 
     assert len(card.username or "") == MAX_USERNAME_LENGTH
     assert len(card.bio or "") == CARD_BIO_LENGTH
     assert card.leomatch is not None
-    assert len(card.leomatch.raw_text) == CARD_LEOMATCH_RAW_LENGTH
+    assert len(card.leomatch.raw_text or "") == CARD_LEOMATCH_RAW_LENGTH
     assert [len(t) for t in card.messages] == [CARD_MESSAGE_LENGTH]
     assert [len(m.name) for m in card.modes] == [CARD_MODE_NAME_LENGTH]
     assert NUL not in card.model_dump_json()
@@ -168,15 +171,57 @@ def test_only_enabled_modes_become_choices_in_the_given_order() -> None:
     assert card.modes == [ModeChoice(id=1, name="default"), ModeChoice(id=3, name="flirt")]
 
 
-def test_a_leomatch_text_that_is_blank_gives_no_leomatch_part() -> None:
-    profile = _profile(leomatch=LeomatchProfile(raw_text="   "), collected_at=NOW)
+def test_a_blank_card_text_gives_a_leomatch_part_without_card_text() -> None:
+    profile = _profile(leomatch=LeomatchProfile(raw_text="   ", match_text="m"), collected_at=NOW)
 
-    assert build_card(_contact(profile), [], []).leomatch is None
+    card = build_card(_contact(profile), [], [])
+
+    assert card.leomatch is not None
+    assert card.leomatch.raw_text is None
 
 
-def test_a_leomatch_card_photo_is_reported_even_without_a_leomatch_text() -> None:
+def test_the_match_text_never_reaches_the_card() -> None:
     profile = _profile(
-        leomatch=LeomatchProfile(raw_text="text", photo="profiles/17-card.jpg"), collected_at=NOW
+        leomatch=LeomatchProfile(match_text="match-text-secret", name="Linkname"),
+        collected_at=NOW,
     )
 
-    assert build_card(_contact(profile), [], []).card_photo == "profiles/17-card.jpg"
+    card = build_card(_contact(profile), [], [])
+
+    assert card.leomatch is not None
+    assert card.leomatch.raw_text is None
+    assert "match-text-secret" not in card.model_dump_json()
+
+
+def test_a_fallback_name_comes_with_its_source() -> None:
+    profile = _profile(
+        leomatch=LeomatchProfile(
+            match_text="m", name="Linkname", name_source=LeomatchNameSource.MATCH
+        ),
+        collected_at=NOW,
+    )
+
+    card = build_card(_contact(profile), [], [])
+
+    assert card.leomatch is not None
+    assert (card.leomatch.name, card.leomatch.name_source) == (
+        "Linkname",
+        LeomatchNameSource.MATCH,
+    )
+
+
+def test_the_card_photos_are_reported_even_without_a_card_text() -> None:
+    profile = _profile(
+        leomatch=LeomatchProfile(match_text="m", photos=["profiles/17-card-1.jpg"]),
+        collected_at=NOW,
+    )
+
+    assert build_card(_contact(profile), [], []).card_photos == ["profiles/17-card-1.jpg"]
+
+
+def test_a_legacy_single_card_photo_reaches_the_card() -> None:
+    legacy: dict[str, object] = {"leomatch": {"raw_text": "text", "photo": "profiles/17-card.jpg"}}
+
+    card = build_card(_contact(legacy), [], [])
+
+    assert card.card_photos == ["profiles/17-card.jpg"]

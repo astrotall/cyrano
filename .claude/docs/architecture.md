@@ -1,6 +1,6 @@
 # Architecture
 
-State as of CYR-12: the skeleton, the storage layer, the userbot intake, the profile collection and the
+State as of CYR-33: the skeleton, the storage layer, the userbot intake, the profile collection and the
 control bot with the contact card exist. Anything else is marked **planned** with its ticket.
 Product and decisions: [CLAUDE.md](../../CLAUDE.md). Reasons: [decisions.md](decisions.md).
 
@@ -145,8 +145,8 @@ module calls `send_*`, `mark_read`, `send_read_acknowledge` or any other write m
 | `login.py` | The interactive login flow with injected prompts |
 | `errors.py` | `UserbotError` and subclasses; their messages are meant to be read by the owner |
 | `profile_source.py` | `TelethonProfileSource`, the `ProfileSource` adapter: the user from the session cache (`get_entity`), the bio from `GetFullUserRequest`, the big current profile photo. Every Telethon failure becomes `ProfileSourceError` carrying the class name; it never sleeps on a flood wait |
-| `leomatch_source.py` | `TelethonLeomatchSource`, the `LeomatchSource` adapter: resolves the chat with `LEOMATCH_BOT_USERNAME` (an unresolvable chat gives an empty lookup and a DEBUG line), searches, scans, walks back for the card and hands out access to the card photo (`TelethonCardPhoto`, a read-only `download_media` of the card message); `to_chat_message` turns Telethon messages and entities into the plain `ChatMessage` |
-| `leomatch_match.py` | Pure: `ChatMessage`, `match_evidence` (the strict match check), `looks_like_match_message`, `normalize_username` |
+| `leomatch_source.py` | `TelethonLeomatchSource`, the `LeomatchSource` adapter: resolves the chat with `LEOMATCH_BOT_USERNAME` (an unresolvable chat gives an empty lookup and a DEBUG line), searches, scans, groups the messages before the match into positions (an album is one position), walks back for the card and hands out access to the card photos (`TelethonCardPhotos`, a read-only `download_media` of one message of the card position); `to_chat_message` turns Telethon messages and entities into the plain `ChatMessage`, including the text under each user-link entity |
+| `leomatch_match.py` | Pure: `ChatMessage`, `UserLinkText`, `match_evidence` (the strict match check), `linked_name` (the text under the link to the contact), `looks_like_match_message`, `normalize_username` |
 
 - **Why Protocols.** Telethon ships no type information. The Protocols keep mypy strict on our code
   without `Any`, let tests use plain fakes, and make "the userbot never sends" structural: the
@@ -228,22 +228,24 @@ ready, media_dir)`. It depends on the `ContactRepository` Protocol, on the two s
 
 - **Protocols.** `ProfileSource.fetch_profile(tg_id)` returns a `TelegramProfile` (username,
   display name, bio); `ProfileSource.download_photo(tg_id, destination)` returns whether a photo was
-  saved; `LeomatchSource.find_texts(tg_id, username)` returns a `LeomatchLookup`: `texts`, a list of
-  `LeomatchSourceText` labelled `match` or `card` (empty when nothing is found), and `card_photo`, a
-  `CardPhoto` with one method `download(destination)` when the card message has a photo, otherwise
-  `None`. Every adapter failure (flood wait, privacy
+  saved; `LeomatchSource.find_texts(tg_id, username)` returns a `LeomatchLookup`: `card_text`,
+  `match_text` and `match_name` (the text under the link to the contact in the match message), each
+  `None` when not found, and `card_photos`, a `CardPhotos` with the `count` and a read-only
+  `download(index, destination)` when the card position has photos, otherwise `None`. The lookup
+  works on positions: consecutive messages with the same `grouped_id` (an album) are one position;
+  the rules are in [contact-lifecycle.md](contact-lifecycle.md#the-card-position). Every adapter failure (flood wait, privacy
   restriction, not found, timeout) is one `ProfileSourceError`.
 - **Parser.** `services/leomatch.py`: `parse_leomatch_text` never raises and fills name, age, city
   and about only for the observed card format (a header paragraph ending with a colon is skipped;
   the description is optional); `build_leomatch_profile` assembles the stored
-  `LeomatchProfile` from the labelled texts. Linear time: it splits strings and uses one simple
+  `LeomatchProfile` from the card text, the match text and the link name; the match text is stored apart and never parsed. Linear time: it splits strings and uses one simple
   pattern, no nested quantifiers.
 - **Process.** Started by `main.run` after the userbot connected and caught up, cancelled first on
   shutdown, before the client disconnects. A collector that crashes is logged once (class name) and
   does not stop the intake.
 - **Media directory.** `MEDIA_DIR/profiles/<internal contact id>.jpg` for the Telegram profile photo and
-  `<internal contact id>-card.jpg` for the Leomatch card photo, created on demand; `<id>.part.jpg`
-  and `<id>-card.part.jpg` exist only during a download. The `media` compose volume is mounted into `app`
+  `<internal contact id>-card-<n>.jpg` (n from 1, up to 5) for the Leomatch card photos, created on
+  demand; `<id>.part.jpg` and `<id>-card-<n>.part.jpg` exist only during a download. The `media` compose volume is mounted into `app`
   and `worker`; the dev override replaces it with a bind mount of `./data/media`.
 - **Logger.** `cyrano.services.profile_collector` (INFO: contact id and which parts produced data;
   WARNING: contact id, part name and error class of a failed part; ERROR: error class and counter
@@ -260,14 +262,17 @@ the userbot, by long polling.
 | `app.py` | `build_dispatcher(owner_id, actions)` and `ControlBot`: builds the `Bot` from `BOT_TOKEN` (HTML parse mode, link previews off), the dispatcher, and the `TelegramCardSender`; `poll()` runs `start_polling(handle_signals=False, close_bot_session=False)`; `stop()` stops polling (bounded) and closes the session |
 | `middleware.py` | `OwnerOnlyMiddleware`, an outer middleware on every update: a user other than `OWNER_TELEGRAM_ID`, or no user at all, is dropped silently. No reply, no database access, only a counter (DEBUG, no ids) |
 | `handlers.py` | `build_router(actions)`: `/start` (private chat only) and the card button handler |
-| `rendering.py` | Pure functions: `render_card`, `card_keyboard`, `append_decision`, `alert_text`. Text is HTML-escaped; the card is assembled from sections within `CARD_TEXT_BUDGET` (3500) so it stays below Telegram's 4096 whatever the input |
+| `rendering.py` | Pure functions: `render_card`, `card_keyboard`, `append_decision`, `alert_text`. The matching-bot section comes only from the card text (a short line when it was not found; a fallback name from the match message is shown as the name). Text is HTML-escaped; the card is assembled from sections within `CARD_TEXT_BUDGET` (3500) so it stays below Telegram's 4096 whatever the input |
 | `callbacks.py` | `CardCallback` (`card:<action>:<contact id>:<mode id>`, a few bytes against Telegram's 64) |
 | `sender.py` | `TelegramCardSender`, the `CardSender` implementation. The owner id is a constructor argument taken from `Settings` and the only public method is `send_card`, so no caller can address another chat |
 | `messages.py` | Every Russian text the owner sees. Texts and constants live here, not in the handlers |
 | `errors.py` | `ControlBotError`, `BotTokenRejected`, `PollingFailed`; their messages are meant to be read by the owner |
 
-- **Sending.** Order: up to two photos (one with `send_photo`, two as a media group), then the card
-  text with the keyboard. A photo file that is missing, empty, unreadable or outside `MEDIA_DIR` is
+- **Sending.** Order: the photos, then the card text with the keyboard. The profile photo comes
+  first, then all card photos, as ONE media group (a single photo uses `send_photo`; with at most
+  1 + 5 photos the group stays below Telegram's 10 items). The caption is on the first item only,
+  because Telegram shows only that one: «Фото профиля и анкеты» when both kinds are sent, «Фото
+  профиля» or «Фото анкеты» otherwise. A photo file that is missing, empty, unreadable or outside `MEDIA_DIR` is
   skipped and counted. `TelegramRetryAfter` is waited for (at most `MAX_RETRY_AFTER_SECONDS`, 60) and
   retried once; a second one, or a longer wait, gives up. `Forbidden` (the owner never pressed
   Start), "chat not found", network errors and any other Telegram API error return `False`: the
@@ -457,6 +462,12 @@ the raw input. `load_settings(env_file=None)` ignores any `.env`.
   direction for aiogram, and in `tests/test_main.py` the start order, the shutdown order, a failing
   poll and a crashing announcer. `tests/test_main.py` and `tests/fake_app.py` replace `ControlBot`
   with `FakeControlBot`, so no test builds a real bot.
+  CYR-33 added: the lookup over albums (caption on the first, a middle and the last message, an
+  album of one, a plain card, a video-only card, an album as one position in both chain shapes, a
+  captionless album, the guard inside a position, the limits of 2 positions and 5 photos), the
+  numbered card photo downloads with failures that never shrink the stored list, the legacy profile
+  shape, the fallback name, and the media group of the control bot. The unreadable-file test fakes
+  the access check and the open error instead of `chmod`, so it behaves the same as root.
 - Planned: scripted fakes for the LLM (CYR-13); `respx` for the HTTP client
   (CYR-13). Failure cases to cover for new behaviour:
   empty input, malformed Telegram event, invalid LLM JSON, status changed between scheduling and
@@ -466,4 +477,4 @@ the raw input. `load_settings(env_file=None)` ignores any `.env`.
 
 Listed in [decisions.md](decisions.md) under "Open questions": how the worker sends through the
 userbot session, worker reconnect to Redis, where the layered prompt builder lives, whether `bot`,
-`userbot` and `worker` may import each other, and the Leomatch cases not yet observed (a card with a description, the other chain shape, search).
+`userbot` and `worker` may import each other, and the Leomatch cases not yet observed (a card with a description, search, the caption position and message order inside an album, a video card).

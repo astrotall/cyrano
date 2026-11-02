@@ -5,10 +5,11 @@ from datetime import UTC, datetime, timedelta, timezone
 import pytest
 from pydantic import ValidationError
 
+from cyrano.domain.enums import LeomatchNameSource
 from cyrano.domain.models import (
     MAX_BIO_LENGTH,
+    MAX_CARD_PHOTOS,
     MAX_LEOMATCH_AGE,
-    MAX_LEOMATCH_RELATED_TEXTS,
     MAX_LEOMATCH_TEXT_LENGTH,
     MAX_PHOTO_PATH_LENGTH,
     MIN_LEOMATCH_AGE,
@@ -36,10 +37,11 @@ def test_the_profile_round_trips_through_json() -> None:
         photo="profiles/7.jpg",
         leomatch=LeomatchProfile(
             raw_text="Fake, 25, Town - about",
-            related_texts=["match"],
+            match_text="match",
             name="Fake",
+            name_source=LeomatchNameSource.CARD,
             age=25,
-            photo="profiles/7-card.jpg",
+            photos=["profiles/7-card-1.jpg", "profiles/7-card-2.jpg"],
         ),
         collected_at=COLLECTED_AT,
     )
@@ -73,14 +75,93 @@ def test_text_limits_are_enforced() -> None:
     with pytest.raises(ValidationError):
         LeomatchProfile(raw_text="x" * (MAX_LEOMATCH_TEXT_LENGTH + 1))
     with pytest.raises(ValidationError):
-        LeomatchProfile(raw_text="x", related_texts=["y"] * (MAX_LEOMATCH_RELATED_TEXTS + 1))
+        LeomatchProfile(match_text="x" * (MAX_LEOMATCH_TEXT_LENGTH + 1))
 
 
-def test_a_leomatch_profile_without_a_photo_is_valid_and_the_path_is_limited() -> None:
-    assert LeomatchProfile(raw_text="x").photo is None
-    assert LeomatchProfile.model_validate({"raw_text": "x"}).photo is None
+def test_a_leomatch_profile_needs_no_text_and_no_photos() -> None:
+    profile = LeomatchProfile.model_validate({})
+
+    assert (profile.raw_text, profile.match_text, profile.name, profile.name_source) == (
+        None,
+        None,
+        None,
+        None,
+    )
+    assert profile.photos == []
+
+
+def test_the_match_text_is_kept_apart_from_the_card_text() -> None:
+    profile = LeomatchProfile(raw_text=None, match_text="match only")
+
+    assert profile.raw_text is None
+    assert profile.match_text == "match only"
+
+
+def test_the_photo_list_and_its_paths_are_limited() -> None:
+    assert len(LeomatchProfile(photos=["p"] * MAX_CARD_PHOTOS).photos) == MAX_CARD_PHOTOS
     with pytest.raises(ValidationError):
-        LeomatchProfile(raw_text="x", photo="p" * (MAX_PHOTO_PATH_LENGTH + 1))
+        LeomatchProfile(photos=["p"] * (MAX_CARD_PHOTOS + 1))
+    with pytest.raises(ValidationError):
+        LeomatchProfile(photos=["p" * (MAX_PHOTO_PATH_LENGTH + 1)])
+
+
+def test_the_legacy_single_photo_key_becomes_a_one_item_list() -> None:
+    profile = LeomatchProfile.model_validate({"raw_text": "x", "photo": "profiles/7-card.jpg"})
+
+    assert profile.photos == ["profiles/7-card.jpg"]
+    assert "photo" not in profile.model_dump()
+
+
+def test_a_legacy_photo_key_without_a_path_gives_no_photos() -> None:
+    assert LeomatchProfile.model_validate({"raw_text": "x", "photo": None}).photos == []
+    assert LeomatchProfile.model_validate({"raw_text": "x", "photo": 5}).photos == []
+
+
+def test_the_new_photos_key_wins_over_the_legacy_one() -> None:
+    profile = LeomatchProfile.model_validate({"photo": "old.jpg", "photos": ["new.jpg"]})
+
+    assert profile.photos == ["new.jpg"]
+
+
+def test_a_legacy_row_with_related_texts_still_validates() -> None:
+    legacy = {
+        "raw_text": "Fake, 25, Town - about",
+        "related_texts": ["match"],
+        "name": "Fake",
+        "age": 25,
+        "city": "Town",
+        "about": "about",
+        "photo": "profiles/7-card.jpg",
+    }
+
+    profile = ContactProfile.model_validate({"photo": "profiles/7.jpg", "leomatch": legacy})
+
+    assert profile.leomatch is not None
+    assert profile.leomatch.raw_text == "Fake, 25, Town - about"
+    assert profile.leomatch.match_text is None
+    assert profile.leomatch.photos == ["profiles/7-card.jpg"]
+    assert profile.photo == "profiles/7.jpg"
+
+
+def test_a_legacy_parsed_name_counts_as_a_card_name() -> None:
+    profile = LeomatchProfile.model_validate({"raw_text": "x", "name": "Fake"})
+
+    assert profile.name_source is LeomatchNameSource.CARD
+
+
+def test_a_legacy_row_without_a_name_has_no_name_source() -> None:
+    assert LeomatchProfile.model_validate({"raw_text": "x"}).name_source is None
+
+
+def test_an_explicit_name_source_is_kept() -> None:
+    profile = LeomatchProfile.model_validate({"name": "Fake", "name_source": "match"})
+
+    assert profile.name_source is LeomatchNameSource.MATCH
+
+
+def test_unknown_leomatch_keys_are_still_rejected() -> None:
+    with pytest.raises(ValidationError):
+        LeomatchProfile.model_validate({"unexpected": 1})
 
 
 @pytest.mark.parametrize("age", [MIN_LEOMATCH_AGE - 1, MAX_LEOMATCH_AGE + 1, 0, -5])

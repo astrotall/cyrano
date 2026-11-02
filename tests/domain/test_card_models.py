@@ -10,6 +10,7 @@ from cyrano.domain.models import (
     CARD_MESSAGES_LIMIT,
     CARD_MODE_NAME_LENGTH,
     CARD_NAME_LENGTH,
+    MAX_CARD_PHOTOS,
     CardActionResult,
     CardLeomatch,
     ContactCard,
@@ -44,11 +45,19 @@ def test_a_card_rejects_texts_beyond_the_named_limits_and_unknown_fields(
         ContactCard.model_validate({"contact_id": 1, **fields})
 
 
-def test_a_leomatch_part_needs_its_raw_text_and_a_sane_age() -> None:
-    with pytest.raises(ValidationError):
-        CardLeomatch.model_validate({})
+def test_a_leomatch_part_may_have_no_card_text_and_needs_a_sane_age() -> None:
+    assert CardLeomatch.model_validate({}).raw_text is None
     with pytest.raises(ValidationError):
         CardLeomatch(raw_text="r", age=100)
+
+
+def test_a_card_holds_at_most_the_photo_limit_of_card_photos() -> None:
+    assert ContactCard(contact_id=1).card_photos == []
+    assert len(ContactCard(contact_id=1, card_photos=["p"] * MAX_CARD_PHOTOS).card_photos) == (
+        MAX_CARD_PHOTOS
+    )
+    with pytest.raises(ValidationError):
+        ContactCard(contact_id=1, card_photos=["p"] * (MAX_CARD_PHOTOS + 1))
 
 
 def test_the_card_models_are_frozen() -> None:

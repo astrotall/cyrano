@@ -4,13 +4,8 @@ import time
 
 import pytest
 
-from cyrano.domain.enums import LeomatchTextKind
-from cyrano.domain.models import (
-    MAX_LEOMATCH_NAME_LENGTH,
-    MAX_LEOMATCH_RELATED_TEXTS,
-    MAX_LEOMATCH_TEXT_LENGTH,
-    LeomatchSourceText,
-)
+from cyrano.domain.enums import LeomatchNameSource
+from cyrano.domain.models import MAX_LEOMATCH_NAME_LENGTH, MAX_LEOMATCH_TEXT_LENGTH
 from cyrano.services.leomatch import (
     NO_FIELDS,
     LeomatchFields,
@@ -256,70 +251,77 @@ def test_text_that_would_break_a_naive_regex_is_handled_in_linear_time(text: str
     assert fields == NO_FIELDS
 
 
-def _texts(card: str | None, match: str | None) -> list[LeomatchSourceText]:
-    texts: list[LeomatchSourceText] = []
-    if match is not None:
-        texts.append(LeomatchSourceText(kind=LeomatchTextKind.MATCH, text=match))
-    if card is not None:
-        texts.append(LeomatchSourceText(kind=LeomatchTextKind.CARD, text=card))
-    return texts
-
-
 def test_no_texts_build_no_profile() -> None:
-    assert build_leomatch_profile([]) is None
-    assert build_leomatch_profile(_texts("  ", "\x00")) is None
+    assert build_leomatch_profile(None, None, None) is None
+    assert build_leomatch_profile("  ", "\x00", "Linkname") is None
 
 
-def test_the_observed_chain_stores_the_card_as_raw_text_and_the_match_as_related() -> None:
-    profile = build_leomatch_profile(_texts(OBSERVED_CARD, OBSERVED_MATCH))
+def test_the_observed_chain_stores_the_card_as_raw_text_and_the_match_apart() -> None:
+    profile = build_leomatch_profile(OBSERVED_CARD, OBSERVED_MATCH, "Аня")
 
     assert profile is not None
     assert profile.raw_text == OBSERVED_CARD
-    assert profile.related_texts == [OBSERVED_MATCH]
+    assert profile.match_text == OBSERVED_MATCH
     assert (profile.name, profile.age, profile.city, profile.about) == ("Аня", 18, "Москва", None)
-    assert profile.photo is None
+    assert profile.name_source is LeomatchNameSource.CARD
+    assert profile.photos == []
 
 
-def test_the_card_is_the_raw_text_and_the_match_is_related() -> None:
-    profile = build_leomatch_profile(_texts(CARD, MATCH))
+def test_the_card_is_the_raw_text_and_the_match_is_the_match_text() -> None:
+    profile = build_leomatch_profile(CARD, MATCH, None)
 
     assert profile is not None
     assert profile.raw_text == CARD
-    assert profile.related_texts == [MATCH]
+    assert profile.match_text == MATCH
     assert (profile.name, profile.age, profile.city) == ("Fakename", 25, "Faketown")
     assert profile.about == "fake description"
 
 
-def test_without_a_card_the_match_is_the_raw_text() -> None:
-    profile = build_leomatch_profile(_texts(None, MATCH))
+def test_without_a_card_the_match_text_is_never_the_raw_text() -> None:
+    profile = build_leomatch_profile(None, MATCH, None)
 
     assert profile is not None
-    assert profile.raw_text == MATCH
-    assert profile.related_texts == []
-    assert profile.name is None
+    assert profile.raw_text is None
+    assert profile.match_text == MATCH
+    assert (profile.name, profile.name_source) == (None, None)
 
 
-def test_fields_come_from_the_match_text_when_the_card_does_not_parse() -> None:
-    parseable_match = "Matchname, 40, Matchtown - from the match"
+def test_a_match_text_that_looks_like_a_card_is_never_parsed() -> None:
+    profile = build_leomatch_profile(None, "Matchname, 40, Matchtown - from the match", None)
 
-    profile = build_leomatch_profile(_texts("a card that is no card", parseable_match))
+    assert profile is not None
+    assert (profile.name, profile.age, profile.city, profile.about) == (None, None, None, None)
+
+
+def test_without_a_card_the_name_comes_from_the_link_text() -> None:
+    profile = build_leomatch_profile(None, OBSERVED_MATCH, "Аня")
+
+    assert profile is not None
+    assert (profile.name, profile.name_source) == ("Аня", LeomatchNameSource.MATCH)
+    assert (profile.age, profile.city, profile.about) == (None, None, None)
+
+
+def test_a_card_that_does_not_parse_falls_back_to_the_link_text() -> None:
+    profile = build_leomatch_profile("a card that is no card", MATCH, "Linkname")
 
     assert profile is not None
     assert profile.raw_text == "a card that is no card"
-    assert profile.related_texts == [parseable_match]
-    assert (profile.name, profile.age, profile.city) == ("Matchname", 40, "Matchtown")
+    assert (profile.name, profile.name_source) == ("Linkname", LeomatchNameSource.MATCH)
 
 
-def test_fields_come_from_the_first_text_that_parses() -> None:
-    profile = build_leomatch_profile(_texts("Cardname, 22 - card", "Matchname, 40 - match"))
+def test_a_parsed_card_name_wins_over_the_link_text() -> None:
+    profile = build_leomatch_profile("Cardname, 22 - card", MATCH, "Linkname")
 
     assert profile is not None
-    assert profile.name == "Cardname"
-    assert profile.age == 22
+    assert (profile.name, profile.age, profile.name_source) == (
+        "Cardname",
+        22,
+        LeomatchNameSource.CARD,
+    )
 
 
 def test_the_raw_text_is_kept_when_nothing_parses() -> None:
-    profile = build_leomatch_profile(_texts("free text card", "free text match"))
+    profile = build_leomatch_profile("free text card", "free text match", None)
 
     assert profile is not None
     assert profile.raw_text == "free text card"
@@ -329,15 +331,24 @@ def test_the_raw_text_is_kept_when_nothing_parses() -> None:
 def test_stored_texts_are_cleaned_and_truncated() -> None:
     long_match = "m" * (MAX_LEOMATCH_TEXT_LENGTH * 2)
 
-    profile = build_leomatch_profile(_texts("  ca\x00rd  ", long_match))
+    profile = build_leomatch_profile("  ca\x00rd  ", long_match, None)
 
     assert profile is not None
     assert profile.raw_text == "card"
-    assert profile.related_texts == ["m" * MAX_LEOMATCH_TEXT_LENGTH]
+    assert profile.match_text == "m" * MAX_LEOMATCH_TEXT_LENGTH
 
 
-def test_the_related_texts_never_exceed_the_limit() -> None:
-    profile = build_leomatch_profile(_texts(CARD, MATCH))
+def test_the_link_name_is_cleaned_and_truncated() -> None:
+    profile = build_leomatch_profile(None, MATCH, " Li\x00nk" + "k" * 500)
 
     assert profile is not None
-    assert len(profile.related_texts) <= MAX_LEOMATCH_RELATED_TEXTS
+    assert profile.name is not None
+    assert profile.name.startswith("Link")
+    assert len(profile.name) == MAX_LEOMATCH_NAME_LENGTH
+
+
+def test_a_blank_link_name_gives_no_name() -> None:
+    profile = build_leomatch_profile(None, MATCH, "  \x00 ")
+
+    assert profile is not None
+    assert (profile.name, profile.name_source) == (None, None)

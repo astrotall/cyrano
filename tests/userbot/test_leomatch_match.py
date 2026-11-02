@@ -5,6 +5,8 @@ import pytest
 from cyrano.userbot.leomatch_match import (
     ChatMessage,
     MatchEvidence,
+    UserLinkText,
+    linked_name,
     looks_like_match_message,
     match_evidence,
     normalize_username,
@@ -204,3 +206,24 @@ def test_messages_with_a_user_mention_or_a_t_me_link_look_like_match_messages(
 )
 def test_ordinary_text_does_not_look_like_a_match_message(message: ChatMessage) -> None:
     assert not looks_like_match_message(message)
+
+
+def _linked(*links: UserLinkText) -> ChatMessage:
+    return ChatMessage(id=1, out=False, text="text", user_link_texts=links)
+
+
+def test_the_linked_name_is_the_text_under_the_link_to_the_contact() -> None:
+    message = _linked(UserLinkText(OTHER_ID, "Other"), UserLinkText(TG_ID, "Ann"))
+
+    assert linked_name(message, TG_ID) == "Ann"
+
+
+def test_there_is_no_linked_name_without_a_link_to_the_contact() -> None:
+    assert linked_name(_linked(UserLinkText(OTHER_ID, "Other")), TG_ID) is None
+    assert linked_name(_message("text"), TG_ID) is None
+
+
+def test_a_blank_link_text_is_skipped_for_the_next_link() -> None:
+    message = _linked(UserLinkText(TG_ID, "  "), UserLinkText(TG_ID, "Ann"))
+
+    assert linked_name(message, TG_ID) == "Ann"

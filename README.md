@@ -116,7 +116,7 @@ Does not:
 
 After a contact is registered, the profile collector gathers what the owner needs to decide from
 one card: the username, the display name, the bio, the current
-profile photo and, if there is one, the contact's profile text from the matching bot. It reads
+profile photo and, if there is one, the contact's profile card from the matching bot (its text and photos). It reads
 only; it never sends anything to the contact or to the matching bot, and nothing is marked as
 read. A failed part never blocks the others or the registration.
 
@@ -129,12 +129,16 @@ read. A failed part never blocks the others or the registration.
   (`LEOMATCH_BOT_USERNAME`) for the message that announces the match with this person: it links to
   the person by Telegram id, or by `t.me/<username>` or `@username`, compared exactly (`ann` never
   matches `joanna` or `ann_k`). It tries Telegram's search for the username first and falls back
-  to the last 100 messages. The profile card sits at most two messages before the match message.
-  Both texts are stored as they are; name, age and city are extracted only when the card looks like
-  `Name, age[, city]`, optionally followed by ` - description`, after an optional header line that
-  ends with a colon. If the card message has a photo, it is saved as
-  `profiles/<internal contact id>-card.jpg` under `MEDIA_DIR`, with its relative path stored next to
-  the card text, and a failed download never blocks the rest.
+  to the last 100 messages. The matching bot sends a card as one message group (up to 3 photos with
+  the caption on one of them, or one video with a caption), and that group counts as one position:
+  the card sits at most two positions before the match message. The card text and the match text
+  are stored apart, and the match text is never shown as the profile; name, age and city are
+  extracted only from a card that looks like `Name, age[, city]`, optionally followed by
+  ` - description`, after an optional header line that ends with a colon. When the card has no
+  usable name, the name is taken from the link in the match message. All photos of the card (at
+  most five; a video is never downloaded) are saved as
+  `profiles/<internal contact id>-card-<n>.jpg` under `MEDIA_DIR`, with their relative paths stored
+  next to the card text, and a failed download never blocks the rest.
 
 ### The control bot and the card
 
@@ -150,10 +154,11 @@ with the app, after the userbot is connected. A rejected token ends the app with
 **What the owner sees.** For every new contact, after its profile was collected (or after ten
 minutes at most, so a failing collection never keeps the owner waiting):
 
-- up to two photos first: the profile photo and the matching-bot card photo, each with a short
-  caption; a missing photo file is skipped;
+- the photos first, as one media group: the profile photo and then all card photos, with a caption
+  on the first one; a missing photo file is skipped;
 - then one message with the name, the nick, the first messages the contact wrote (up to three), the
-  bio and the matching-bot card, plus a line when the profile could not be collected. Names, bio
+  bio and the matching-bot card (a short line when the card was not found), plus a line when the
+  profile could not be collected. Names, bio
   and message texts come from strangers and are shown as plain text, never as markup;
 - under that message the buttons: one **Отвечать: <mode>** per enabled mode and **Игнорировать**.
 

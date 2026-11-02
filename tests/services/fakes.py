@@ -8,13 +8,12 @@ from pathlib import Path
 
 from cyrano.domain.models import (
     ContactCard,
-    LeomatchSourceText,
     Mode,
     ModeChoice,
     ModeCreate,
     TelegramProfile,
 )
-from cyrano.services.profile_source import CardPhoto, LeomatchLookup
+from cyrano.services.profile_source import LeomatchLookup
 
 FAKE_MODE_TIME = datetime(2025, 1, 2, 3, 4, 5, tzinfo=UTC)
 FAKE_PHOTO = b"fake-jpeg-bytes"
@@ -88,42 +87,43 @@ class FakeProfileSource:
             return True
 
 
-class FakeCardPhoto:
+class FakeCardPhotos:
     def __init__(
         self,
-        content: bytes | None = FAKE_CARD_PHOTO,
+        count: int = 1,
         *,
-        error: Exception | None = None,
+        contents: dict[int, bytes | None] | None = None,
+        errors: dict[int, Exception] | None = None,
         delay: float = 0.0,
     ) -> None:
-        self.destinations: list[Path] = []
-        self._content = content
-        self._error = error
+        self.count = count
+        self.downloads: list[tuple[int, Path]] = []
+        self._contents = contents if contents is not None else {}
+        self._errors = errors if errors is not None else {}
         self._delay = delay
 
-    async def download(self, destination: Path) -> bool:
-        self.destinations.append(destination)
+    async def download(self, index: int, destination: Path) -> bool:
+        self.downloads.append((index, destination))
         await asyncio.sleep(self._delay)
-        if self._error is not None:
+        if index in self._errors:
             await asyncio.to_thread(destination.write_bytes, b"partial")
-            raise self._error
-        if self._content is None:
+            raise self._errors[index]
+        content = self._contents.get(index, FAKE_CARD_PHOTO)
+        if content is None:
             return False
-        await asyncio.to_thread(destination.write_bytes, self._content)
+        await asyncio.to_thread(destination.write_bytes, content)
         return True
 
 
 class FakeLeomatchSource:
     def __init__(
         self,
-        texts: list[LeomatchSourceText] | None = None,
+        lookup: LeomatchLookup | None = None,
         *,
-        card_photo: CardPhoto | None = None,
         error: Exception | None = None,
         delay: float = 0.0,
     ) -> None:
-        self.texts = texts if texts is not None else []
-        self.card_photo = card_photo
+        self.lookup = lookup if lookup is not None else LeomatchLookup()
         self.queries: list[tuple[int, str | None]] = []
         self._error = error
         self._delay = delay
@@ -133,7 +133,7 @@ class FakeLeomatchSource:
         await asyncio.sleep(self._delay)
         if self._error is not None:
             raise self._error
-        return LeomatchLookup(self.texts, self.card_photo)
+        return self.lookup
 
 
 class InMemoryModes:

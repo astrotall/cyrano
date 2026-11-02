@@ -26,7 +26,15 @@ CHAT_NOT_FOUND_MARKER = "chat not found"
 @dataclass(frozen=True, slots=True)
 class _Photo:
     path: Path
-    caption: str
+    from_profile: bool
+
+
+def _caption_of(photos: list[_Photo]) -> str:
+    has_profile = any(photo.from_profile for photo in photos)
+    has_card = any(not photo.from_profile for photo in photos)
+    if has_profile and has_card:
+        return messages.PROFILE_AND_CARD_PHOTOS_CAPTION
+    return messages.PROFILE_PHOTO_CAPTION if has_profile else messages.CARD_PHOTO_CAPTION
 
 
 def _is_chat_not_found(error: TelegramBadRequest) -> bool:
@@ -81,19 +89,16 @@ class TelegramCardSender:
         return True
 
     def _photos_of(self, card: ContactCard) -> list[_Photo]:
-        candidates = (
-            (card.profile_photo, messages.PROFILE_PHOTO_CAPTION),
-            (card.card_photo, messages.CARD_PHOTO_CAPTION),
-        )
+        candidates = [(relative, False) for relative in card.card_photos]
+        if card.profile_photo is not None:
+            candidates.insert(0, (card.profile_photo, True))
         photos: list[_Photo] = []
-        for relative, caption in candidates:
-            if relative is None:
-                continue
+        for relative, from_profile in candidates:
             path = self._readable_photo(relative)
             if path is None:
                 self._photos_skipped += 1
             else:
-                photos.append(_Photo(path, caption))
+                photos.append(_Photo(path, from_profile))
         return photos
 
     def _readable_photo(self, relative: str) -> Path | None:
@@ -123,15 +128,20 @@ class TelegramCardSender:
             self._photos_skipped += len(photos)
 
     async def _send_photo_batch(self, photos: list[_Photo]) -> None:
+        caption = _caption_of(photos)
         if len(photos) == 1:
-            only = photos[0]
             await self._bot.send_photo(
-                chat_id=self._owner_id, photo=FSInputFile(only.path), caption=only.caption
+                chat_id=self._owner_id, photo=FSInputFile(photos[0].path), caption=caption
             )
             return
         await self._bot.send_media_group(
             chat_id=self._owner_id,
-            media=[InputMediaPhoto(media=FSInputFile(p.path), caption=p.caption) for p in photos],
+            media=[
+                InputMediaPhoto(
+                    media=FSInputFile(photo.path), caption=caption if index == 0 else None
+                )
+                for index, photo in enumerate(photos)
+            ],
         )
 
     async def _with_retry[T](self, call: Callable[[], Awaitable[T]]) -> T:

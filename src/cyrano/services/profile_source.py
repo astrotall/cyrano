@@ -2,11 +2,11 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Protocol
 
-from cyrano.domain.models import LeomatchSourceText, TelegramProfile
+from cyrano.domain.models import TelegramProfile
 
 
 class ProfileSourceError(Exception):
@@ -19,14 +19,19 @@ class ProfileSource(Protocol):
     async def download_photo(self, tg_id: int, destination: Path) -> bool: ...
 
 
-class CardPhoto(Protocol):
-    async def download(self, destination: Path) -> bool: ...
+class CardPhotos(Protocol):
+    @property
+    def count(self) -> int: ...
+
+    async def download(self, index: int, destination: Path) -> bool: ...
 
 
 @dataclass(frozen=True, slots=True)
 class LeomatchLookup:
-    texts: list[LeomatchSourceText] = field(default_factory=list)
-    card_photo: CardPhoto | None = None
+    card_text: str | None = None
+    match_text: str | None = None
+    match_name: str | None = None
+    card_photos: CardPhotos | None = None
 
 
 class LeomatchSource(Protocol):

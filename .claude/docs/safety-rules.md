@@ -111,7 +111,7 @@ only.
 - **Rule:** message text, names and other personal data are never logged at INFO or above. Persona
   text, style examples, sessions, media and messages never go to git; fixtures use fake data.
   Collected profile data is personal data too: username, display name, bio, the profile photo,
-  the card photo, their paths, and the matching-bot texts are never logged at INFO or above and never go to git.
+  the card photos (a list), their paths, and the matching-bot texts are never logged at INFO or above and never go to git.
   The collector logs internal contact ids, part names, error class names and counters only.
 - **Why:** the data belongs to real people.
 - **Enforced where:** exists today: `.gitignore` and `.dockerignore` exclude `.env`, `*.session`,

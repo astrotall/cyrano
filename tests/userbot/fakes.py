@@ -66,6 +66,7 @@ class FakeHistoryMessage:
     out: bool | None = False
     entities: Sequence[object] | None = None
     photo: object | None = None
+    grouped_id: int | None = None
     media_bytes: bytes | None = None
 
 

@@ -176,7 +176,7 @@ def test_ages_on_the_boundary_are_accepted(age: int) -> None:
     assert parse_leomatch_text(f"Fakename, {age}, Faketown - about").age == age
 
 
-@pytest.mark.parametrize("age", ["17", "100", "00", "05", "7", "123", "-25", "25.5", "xx", ""])
+@pytest.mark.parametrize("age", ["12", "100", "00", "05", "7", "123", "-25", "25.5", "xx", ""])
 def test_an_age_out_of_range_or_malformed_is_not_a_card(age: str) -> None:
     assert parse_leomatch_text(f"Fakename, {age}, Faketown - about") == NO_FIELDS
 

@@ -38,7 +38,7 @@ def test_services_do_not_import_db() -> None:
         assert not module.startswith("cyrano.db")
 
 
-def test_only_the_userbot_package_imports_telethon() -> None:
+def _packages_importing(library: str) -> set[str]:
     importers: set[str] = set()
     for path in SOURCE_ROOT.rglob("*.py"):
         for node in ast.walk(ast.parse(path.read_text())):
@@ -49,10 +49,27 @@ def test_only_the_userbot_package_imports_telethon() -> None:
                 if isinstance(node, ast.ImportFrom) and node.module is not None
                 else []
             )
-            if any(name.split(".")[0] == "telethon" for name in names):
+            if any(name.split(".")[0] == library for name in names):
                 importers.add(path.relative_to(SOURCE_ROOT).parts[0])
+    return importers
 
-    assert importers == {"userbot"}
+
+def test_only_the_userbot_package_imports_telethon() -> None:
+    assert _packages_importing("telethon") == {"userbot"}
+
+
+def test_only_the_bot_package_imports_aiogram() -> None:
+    assert _packages_importing("aiogram") == {"bot"}
+
+
+def test_services_import_neither_telethon_nor_aiogram() -> None:
+    for module in _imported_modules("services"):
+        assert module.split(".")[0] not in {"telethon", "aiogram"}
+
+
+def test_bot_does_not_import_db_userbot_or_llm() -> None:
+    for module in _imported_modules("bot"):
+        assert not module.startswith(("cyrano.db", "cyrano.userbot", "cyrano.llm"))
 
 
 def test_services_do_not_import_the_userbot_or_the_bot() -> None:

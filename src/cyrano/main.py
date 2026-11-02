@@ -10,12 +10,20 @@ import signal
 import sys
 from collections.abc import Callable, Sequence
 
+from cyrano.bot.app import ControlBot
+from cyrano.bot.errors import ControlBotError, PollingFailed
 from cyrano.config import ConfigError, Settings, load_settings
-from cyrano.db.repositories import SqlContactRepository, SqlMessageRepository
+from cyrano.db.repositories import (
+    SqlContactRepository,
+    SqlMessageRepository,
+    SqlModeRepository,
+)
 from cyrano.db.session import build_engine, build_session_factory
 from cyrano.domain.models import ContactReadyEvent, NewContactEvent
 from cyrano.health import HEARTBEAT_INTERVAL, heartbeat_loop
 from cyrano.logging import configure_logging
+from cyrano.services.card_actions import CardActions
+from cyrano.services.card_announcer import CardAnnouncer
 from cyrano.services.contact_events import InMemoryContactEvents
 from cyrano.services.intake import IntakeService
 from cyrano.services.profile_collector import ProfileCollector
@@ -33,6 +41,7 @@ LOGIN_COMMAND = "login"
 EXIT_USERBOT_ERROR = 1
 EXIT_CONFIG_ERROR = 2
 LOGIN_CANCELLED_MESSAGE = "Login cancelled. Nothing was saved."
+POLLING_ENDED_REASON = "polling ended unexpectedly"
 
 
 def _report_collector_exit(task: asyncio.Task[None]) -> None:
@@ -41,6 +50,29 @@ def _report_collector_exit(task: asyncio.Task[None]) -> None:
     error = task.exception()
     if error is not None:
         logger.error("profile collector stopped", extra={"error": type(error).__name__})
+
+
+def _report_announcer_exit(task: asyncio.Task[None]) -> None:
+    if task.cancelled():
+        return
+    error = task.exception()
+    if error is not None:
+        logger.error("card announcer stopped", extra={"error": type(error).__name__})
+
+
+def _watch_polling(
+    task: asyncio.Task[None], stop: asyncio.Event, failures: list[ControlBotError]
+) -> None:
+    if task.cancelled() or stop.is_set():
+        return
+    error = task.exception()
+    if isinstance(error, ControlBotError):
+        failure = error
+    else:
+        failure = PollingFailed(type(error).__name__ if error is not None else POLLING_ENDED_REASON)
+    logger.error("control bot polling failed", extra={"error": type(failure).__name__})
+    failures.append(failure)
+    stop.set()
 
 
 async def run(
@@ -59,9 +91,11 @@ async def run(
     engine = build_engine(settings)
     session_factory = build_session_factory(engine)
     contacts = SqlContactRepository(session_factory)
+    messages = SqlMessageRepository(session_factory)
+    modes = SqlModeRepository(session_factory)
     new_contacts = InMemoryContactEvents[NewContactEvent]()
     ready_contacts = InMemoryContactEvents[ContactReadyEvent]()
-    intake = IntakeService(contacts, SqlMessageRepository(session_factory), new_contacts)
+    intake = IntakeService(contacts, messages, new_contacts)
     client = client_factory(settings)
     userbot = Userbot(client, intake)
     collector = ProfileCollector(
@@ -72,16 +106,36 @@ async def run(
         ready_contacts,
         settings.media_dir,
     )
+    control_bot = ControlBot(settings, CardActions(contacts, modes))
+    announcer = CardAnnouncer(contacts, messages, modes, control_bot.sender, ready_contacts)
     heartbeat = asyncio.create_task(heartbeat_loop(settings.heartbeat_path, heartbeat_interval))
     collector_task: asyncio.Task[None] | None = None
+    announcer_task: asyncio.Task[None] | None = None
+    polling_task: asyncio.Task[None] | None = None
+    polling_failures: list[ControlBotError] = []
     try:
         await userbot.start(stop)
         if not stop.is_set():
             collector_task = asyncio.create_task(collector.run())
             collector_task.add_done_callback(_report_collector_exit)
+            announcer_task = asyncio.create_task(announcer.run())
+            announcer_task.add_done_callback(_report_announcer_exit)
+            polling_task = asyncio.create_task(control_bot.poll())
+            polling_task.add_done_callback(
+                lambda task: _watch_polling(task, stop, polling_failures)
+            )
         await userbot.run_until(stop)
+        if polling_failures:
+            raise polling_failures[0]
     finally:
         logger.info("cyrano shutting down", extra={"service": "app"})
+        if announcer_task is not None:
+            announcer_task.cancel()
+            await asyncio.gather(announcer_task, return_exceptions=True)
+        await control_bot.stop()
+        if polling_task is not None:
+            polling_task.cancel()
+            await asyncio.gather(polling_task, return_exceptions=True)
         if collector_task is not None:
             collector_task.cancel()
             await asyncio.gather(collector_task, return_exceptions=True)
@@ -116,7 +170,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             asyncio.run(run_login(settings))
         else:
             asyncio.run(run(settings))
-    except UserbotError as exc:
+    except (UserbotError, ControlBotError) as exc:
         print(exc, file=sys.stderr)
         return EXIT_USERBOT_ERROR
     except EOFError, KeyboardInterrupt:

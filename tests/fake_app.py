@@ -9,6 +9,8 @@ from cyrano.config import load_settings
 from cyrano.logging import configure_logging
 from cyrano.main import run
 from cyrano.userbot.protocols import UserbotClient
+from tests.bot.fakes import fake_control_bot_class
+from tests.services.fakes import InMemoryModes
 from tests.userbot.fakes import FakeClient, InMemoryContacts, InMemoryMessages
 
 HANGING_CONNECT_SCENARIO = "hanging-connect"
@@ -40,6 +42,10 @@ def _in_memory_messages(_: object) -> InMemoryMessages:
     return InMemoryMessages()
 
 
+def _in_memory_modes(_: object) -> InMemoryModes:
+    return InMemoryModes()
+
+
 def main(argv: list[str]) -> int:
     settings = load_settings(env_file=None)
     configure_logging(settings.log_level, settings.library_log_levels)
@@ -47,6 +53,8 @@ def main(argv: list[str]) -> int:
     with (
         patch.object(main_module, "SqlContactRepository", _in_memory_contacts),
         patch.object(main_module, "SqlMessageRepository", _in_memory_messages),
+        patch.object(main_module, "SqlModeRepository", _in_memory_modes),
+        patch.object(main_module, "ControlBot", fake_control_bot_class()),
     ):
         asyncio.run(run(settings, client_factory=factory))
     return 0

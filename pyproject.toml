@@ -17,6 +17,8 @@ dependencies = [
     "alembic>=1.14",
     # MTProto client for the userbot on the second account; untyped, so mypy has an override.
     "telethon>=1.45",
+    # Control bot on the owner's main account; ships type information.
+    "aiogram>=3.31,<4",
 ]
 
 [dependency-groups]
@@ -51,6 +53,7 @@ select = [
 
 [tool.ruff.lint.per-file-ignores]
 "tests/**" = ["S101", "S105", "S106", "RUF001"]  # asserts, fake secrets and Cyrillic fixtures are fine in tests
+"src/cyrano/bot/messages.py" = ["RUF001"]  # the owner-facing texts are Russian
 
 [tool.mypy]
 python_version = "3.14"

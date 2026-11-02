@@ -10,6 +10,7 @@ from pathlib import Path
 from telethon.errors import SessionPasswordNeededError
 
 from cyrano.domain.enums import ContactStatus
+from cyrano.domain.errors import ContactNotFound
 from cyrano.domain.models import (
     Contact,
     ContactCreate,
@@ -18,6 +19,7 @@ from cyrano.domain.models import (
     Message,
     MessageCreate,
 )
+from cyrano.domain.transitions import transition_needed
 from cyrano.services.intake import IntakeResult
 from cyrano.userbot.protocols import (
     EventCallback,
@@ -266,6 +268,7 @@ class FakeClient:
 class InMemoryContacts:
     def __init__(self, lookup_failures: int = 0) -> None:
         self.stored: dict[int, Contact] = {}
+        self.status_changes: list[tuple[int, ContactStatus]] = []
         self._lookup_failures = lookup_failures
 
     async def get_by_id(self, contact_id: int) -> Contact | None:
@@ -297,7 +300,20 @@ class InMemoryContacts:
     async def set_status(
         self, contact_id: int, status: ContactStatus, *, mode_id: int | None = None
     ) -> Contact:
-        raise NotImplementedError
+        contact = await self.get_by_id(contact_id)
+        if contact is None:
+            raise ContactNotFound(contact_id)
+        mode_on_activation = mode_id if status is ContactStatus.ACTIVE else None
+        has_mode = mode_on_activation is not None or contact.mode_id is not None
+        if not transition_needed(contact.status, status, has_mode=has_mode):
+            return contact
+        changes: dict[str, object] = {"status": status}
+        if mode_on_activation is not None:
+            changes["mode_id"] = mode_on_activation
+        changed = contact.model_copy(update=changes)
+        self.stored[contact.tg_id] = changed
+        self.status_changes.append((contact_id, status))
+        return changed
 
     async def set_mode(self, contact_id: int, mode_id: int) -> Contact:
         raise NotImplementedError
@@ -331,13 +347,17 @@ class InMemoryContacts:
         username: str | None = None,
         display_name: str | None = None,
         profile: dict[str, object] | None = None,
+        created_at: datetime = FAKE_SENT_AT,
+        mode_id: int | None = None,
     ) -> Contact:
         created = await self.create(
             ContactCreate(
                 tg_id=tg_id, username=username, display_name=display_name, profile=profile or {}
             )
         )
-        seeded = created.model_copy(update={"status": status})
+        seeded = created.model_copy(
+            update={"status": status, "created_at": created_at, "mode_id": mode_id}
+        )
         self.stored[tg_id] = seeded
         return seeded
 

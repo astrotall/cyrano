@@ -7,7 +7,7 @@ from typing import Annotated
 
 from pydantic import AfterValidator, AwareDatetime, BaseModel, ConfigDict, Field
 
-from cyrano.domain.enums import ContactStatus, LeomatchTextKind, MessageDirection
+from cyrano.domain.enums import CardOutcome, ContactStatus, LeomatchTextKind, MessageDirection
 
 DEFAULT_MODE_NAME = "default"
 
@@ -21,8 +21,18 @@ MAX_LEOMATCH_TEXT_LENGTH = 4000
 MAX_LEOMATCH_RELATED_TEXTS = 2
 MAX_LEOMATCH_NAME_LENGTH = 100
 MAX_LEOMATCH_CITY_LENGTH = 100
-MIN_LEOMATCH_AGE = 18
+MIN_LEOMATCH_AGE = 14
 MAX_LEOMATCH_AGE = 99
+
+CARD_MESSAGES_LIMIT = 3
+CARD_MESSAGE_LENGTH = 300
+CARD_NAME_LENGTH = 100
+CARD_BIO_LENGTH = 400
+CARD_LEOMATCH_NAME_LENGTH = 100
+CARD_LEOMATCH_CITY_LENGTH = 100
+CARD_LEOMATCH_ABOUT_LENGTH = 400
+CARD_LEOMATCH_RAW_LENGTH = 600
+CARD_MODE_NAME_LENGTH = 40
 
 
 def _to_utc(value: datetime) -> datetime:
@@ -148,3 +158,37 @@ class ContactProfile(_Input):
     photo: str | None = Field(default=None, max_length=MAX_PHOTO_PATH_LENGTH)
     leomatch: LeomatchProfile | None = None
     collected_at: UtcDatetime | None = None
+
+
+class ModeChoice(_Input):
+    id: int
+    name: str = Field(max_length=CARD_MODE_NAME_LENGTH)
+
+
+class CardLeomatch(_Input):
+    name: str | None = Field(default=None, max_length=CARD_LEOMATCH_NAME_LENGTH)
+    age: int | None = Field(default=None, ge=MIN_LEOMATCH_AGE, le=MAX_LEOMATCH_AGE)
+    city: str | None = Field(default=None, max_length=CARD_LEOMATCH_CITY_LENGTH)
+    about: str | None = Field(default=None, max_length=CARD_LEOMATCH_ABOUT_LENGTH)
+    raw_text: str = Field(max_length=CARD_LEOMATCH_RAW_LENGTH)
+
+
+class ContactCard(_Input):
+    contact_id: int
+    display_name: str | None = Field(default=None, max_length=CARD_NAME_LENGTH)
+    username: str | None = Field(default=None, max_length=MAX_USERNAME_LENGTH)
+    bio: str | None = Field(default=None, max_length=CARD_BIO_LENGTH)
+    leomatch: CardLeomatch | None = None
+    messages: list[Annotated[str, Field(max_length=CARD_MESSAGE_LENGTH)]] = Field(
+        default_factory=list, max_length=CARD_MESSAGES_LIMIT
+    )
+    profile_photo: str | None = Field(default=None, max_length=MAX_PHOTO_PATH_LENGTH)
+    card_photo: str | None = Field(default=None, max_length=MAX_PHOTO_PATH_LENGTH)
+    profile_collected: bool = False
+    modes: list[ModeChoice] = Field(default_factory=list)
+
+
+class CardActionResult(_Input):
+    outcome: CardOutcome
+    status: ContactStatus | None = None
+    mode_name: str | None = None

@@ -111,7 +111,8 @@ def test_missing_variables_listed_in_readable_error(monkeypatch: pytest.MonkeyPa
     assert "Missing required environment variables" in message
     for name in REQUIRED_ENV:
         assert f"  - {name}" in message
-    assert ".env.example" in message
+    assert "Settings section of README.md" in message
+    assert ".env.example is the template to copy to .env" in message
     assert "Traceback" not in message
     assert "ValidationError" not in message
 

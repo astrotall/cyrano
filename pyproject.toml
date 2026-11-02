@@ -11,6 +11,10 @@ dependencies = [
     "arq>=0.26",
     # IANA tz database: python:slim has no system tzdata, and TIMEZONE is validated at startup.
     "tzdata>=2024.2",
+    # Async ORM, its PostgreSQL driver and schema migrations.
+    "sqlalchemy[asyncio]>=2.0,<3",
+    "asyncpg>=0.30",
+    "alembic>=1.14",
 ]
 
 [dependency-groups]
@@ -49,7 +53,7 @@ select = [
 [tool.mypy]
 python_version = "3.14"
 strict = true
-files = ["src", "tests"]
+files = ["src", "tests", "migrations"]
 plugins = ["pydantic.mypy"]
 
 [tool.pydantic-mypy]

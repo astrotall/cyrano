@@ -35,6 +35,8 @@ ENV PATH="/app/.venv/bin:$PATH" \
 
 WORKDIR /app
 COPY --from=builder --chown=cyrano:cyrano /app/.venv /app/.venv
+COPY --chown=cyrano:cyrano alembic.ini ./
+COPY --chown=cyrano:cyrano migrations ./migrations
 
 USER cyrano
 CMD ["python", "-m", "cyrano"]

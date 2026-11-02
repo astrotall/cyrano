@@ -1,10 +1,12 @@
 # Requires a .env next to this file: `cp .env.example .env` (compose refuses to start without it).
 #
 # Credentials have a single source of truth: POSTGRES_* in .env. The connection URLs and
-# container paths for app/worker are built here from those values and the service names, so the
-# DATABASE_URL / REDIS_URL / *_PATH / MEDIA_DIR in .env (which point at localhost for running
-# outside Docker) are overridden inside the containers. `environment:` beats `env_file:`.
+# container paths for app, worker and migrate are built here from those values and the service
+# names, so the DATABASE_URL / REDIS_URL / *_PATH / MEDIA_DIR in .env (which point at localhost
+# for running outside Docker) are overridden inside the containers. `environment:` beats
+# `env_file:`.
 x-app: &app
+  image: cyrano:local
   build: .
   env_file: .env
   restart: unless-stopped
@@ -18,8 +20,19 @@ x-app: &app
       condition: service_healthy
     redis:
       condition: service_healthy
+    migrate:
+      condition: service_completed_successfully
 
 services:
+  # One-shot: applies Alembic migrations and exits; app and worker start only after it succeeds.
+  migrate:
+    <<: *app
+    command: ["alembic", "upgrade", "head"]
+    restart: "no"
+    depends_on:
+      postgres:
+        condition: service_healthy
+
   app:
     <<: *app
     command: ["python", "-m", "cyrano"]

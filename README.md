@@ -36,7 +36,7 @@ Key principles:
 - **Personal data stays local.** Persona, examples, sessions, media and messages never go to git.
   Message text, names and other personal data are never logged at INFO or above.
 
-> Only the project skeleton exists (CYR-8). The flow below is the plan; see [Status](#status).
+> The project skeleton (CYR-8) and the storage layer (CYR-9) exist. The flow below is the plan.
 
 ## Architecture diagram
 
@@ -49,8 +49,8 @@ Planned flow. The boxes marked (planned) do not exist yet.
  +-----------------------+   registers contact (new),     +------------------+
  | userbot (Telethon)    |   collects profile             | PostgreSQL       |
  | second account        |------------------------------->| contacts,        |
- | (planned)             |                                | messages         |
- +-----------------------+                                | (planned)        |
+ | (planned)             |                                | messages,        |
+ +-----------------------+                                | modes            |
       |  card                                              +------------------+
       v                                                           ^
  +-----------------------+  Reply (mode) / Ignore                 |
@@ -76,13 +76,15 @@ Planned flow. The boxes marked (planned) do not exist yet.
  +-----------------------------------------------+
 ```
 
-Only the skeleton exists: configuration, JSON logging, the app process with a heartbeat, the Arq
-worker with a placeholder job, Docker and CI. The userbot, bot, LLM, database and services
-packages are empty. Details: [.claude/docs/contact-lifecycle.md](.claude/docs/contact-lifecycle.md).
+What exists: configuration, JSON logging, the app process with a heartbeat, the Arq worker with a
+placeholder job, the contact status rules, the database schema with its migrations and
+repositories, Docker and CI. Nothing calls the repositories yet. The userbot, bot and LLM packages
+are empty; `services` holds only the repository interfaces. Details:
+[.claude/docs/contact-lifecycle.md](.claude/docs/contact-lifecycle.md).
 
 ### Code layers
 
-Import direction (planned, enforced by review; full rules in
+Import direction (enforced by review, and by a test for `domain`, `db` and `services`; full rules in
 [.claude/docs/architecture.md](.claude/docs/architecture.md)):
 
 ```
@@ -108,10 +110,10 @@ Import direction (planned, enforced by review; full rules in
 | Time zones | tzdata (IANA database in the slim image) | now |
 | Delayed jobs | Arq on Redis | now (skeleton worker, placeholder job) |
 | Cache and queue | Redis 7.4 (AOF) | now (compose service) |
-| Database server | PostgreSQL 16.15 | now (compose service, nothing uses it yet) |
+| Database server | PostgreSQL 16.15 | now (compose service, migrations, tests) |
 | Userbot | Telethon | planned, CYR-10 |
 | Control bot | aiogram | planned, CYR-12 |
-| ORM and migrations | SQLAlchemy 2.0 (async), asyncpg, Alembic | planned, CYR-9 |
+| ORM and migrations | SQLAlchemy 2.x (async), asyncpg, Alembic | now (schema and repositories; nothing calls them yet) |
 | LLM client | DeepSeek over plain httpx, no SDK | planned, CYR-13 |
 | Lint, format | Ruff | now |
 | Types | mypy strict with the Pydantic plugin | now |
@@ -132,11 +134,15 @@ What exists now:
 ├── pyproject.toml                # dependencies, Ruff, mypy, pytest config
 ├── uv.lock
 ├── .python-version               # 3.14
-├── Makefile                      # install, check, test, fmt, up, down, logs
+├── Makefile                      # install, check, test, fmt, up, down, logs, migrate, revision, db-up
 ├── Dockerfile                    # multi-stage, non-root runtime
-├── docker-compose.yml            # app, worker, postgres, redis
+├── docker-compose.yml            # app, worker, one-shot migrate, postgres, redis
 ├── docker-compose.override.yml   # dev: Postgres and Redis on 127.0.0.1
-├── .env.example                  # every variable, two run modes
+├── .env.example                  # bare template, no comments
+├── alembic.ini                   # points at migrations/; no URL, it comes from Settings
+├── migrations/
+│   ├── env.py                    # async environment, URL from Settings
+│   └── versions/                 # 0001 creates the tables and seeds the default mode
 ├── .dockerignore
 ├── .gitignore
 ├── .claude/docs/
@@ -156,11 +162,13 @@ What exists now:
 │   ├── userbot/                  # empty skeleton
 │   ├── bot/                      # empty skeleton
 │   ├── llm/                      # empty skeleton
-│   ├── db/                       # empty skeleton
-│   ├── services/                 # empty skeleton
+│   ├── domain/                   # enums, status transition rules, errors, Pydantic models
+│   ├── db/                       # SQLAlchemy models, engine and sessions, repositories
+│   ├── services/
+│   │   └── repositories.py       # repository Protocols, the rest of the package is planned
 │   └── worker/
 │       └── settings.py           # Arq WorkerSettings, placeholder job
-└── tests/                        # mirrors src/cyrano; empty packages for the skeletons
+└── tests/                        # mirrors src/cyrano; database tests need a real PostgreSQL
 ```
 
 ## Running
@@ -174,9 +182,12 @@ full stack.
 cp .env.example .env   # REQUIRED before `docker compose up` / `make up`; then fill in the values
 ```
 
-`.env` is git-ignored; never commit it. `.env.example` documents every variable. Empty values
-count as unset. If a required variable is missing or invalid, the app exits with code 2 and lists
-every problem at once; the worker exits with the same message.
+`.env` is git-ignored; never commit it. `.env.example` is a bare template without comments: the
+required variables plus `MEDIA_DIR`, `POSTGRES_*` and `TEST_DATABASE_URL`. Every variable, required
+and optional, is described in this README ([Settings](#settings) and the table below). Optional
+variables are overrides: add them to `.env` yourself when you need a value other than the default.
+Empty values count as unset. If a required variable is missing or invalid, the app exits with code
+2 and lists every problem at once; the worker exits with the same message.
 
 | Variable | Required | Without it |
 | --- | --- | --- |
@@ -189,34 +200,39 @@ every problem at once; the worker exits with the same message.
 | `DATABASE_URL` | yes, must start with `postgresql+asyncpg://` | same |
 | `REDIS_URL` | yes, must start with `redis://` or `rediss://` | same |
 | `POSTGRES_USER`, `POSTGRES_PASSWORD`, `POSTGRES_DB` | for Docker only | compose refuses to start |
-| `POSTGRES_HOST_PORT`, `REDIS_HOST_PORT` | optional, Docker only | ports 5432 and 6379 |
+| `POSTGRES_HOST_PORT`, `REDIS_HOST_PORT` | optional override, Docker only; not in `.env.example` | ports 5432 and 6379 |
+| `TEST_DATABASE_URL` | for `make test` only, not an application setting | database tests fail with a message naming `make db-up` |
 
 The skeleton does not call Telegram or DeepSeek, so validation only checks types and formats.
 
-`.env.example` has two sections plus a shared part:
-
-| Section | Used when | What it holds |
-| --- | --- | --- |
-| Shared | always | Telegram, LLM and optional app settings |
-| 1. Local run | app and worker run on the host (`uv run ...`) | `DATABASE_URL` and `REDIS_URL` pointing at `localhost`, relative `USERBOT_SESSION_PATH` and `MEDIA_DIR` |
-| 2. Docker | `docker compose up` | `POSTGRES_USER`, `POSTGRES_PASSWORD`, `POSTGRES_DB`, host ports |
+The template holds the values for running on the host with Postgres and Redis from compose:
+`DATABASE_URL` and `REDIS_URL` point at `localhost`, `USERBOT_SESSION_PATH` and `MEDIA_DIR` are
+relative paths, and `POSTGRES_*` feed the compose Postgres. The two ways of running are described
+in [Run with Docker](#run-with-docker) and [Run locally](#run-locally); one `.env` serves both.
 
 In Docker, `POSTGRES_*` is the single source of truth for credentials. Compose builds
 `DATABASE_URL` (host `postgres`) and `REDIS_URL` (host `redis`) for `app` and `worker` from them
 and sets `USERBOT_SESSION_PATH` and `MEDIA_DIR` to the container paths. The localhost values in
-`.env` are ignored inside the containers, so one `.env` serves both ways of running. The password
-goes into a URL unescaped, so use URL-safe characters only (for example `openssl rand -hex 24`).
+`.env` are ignored inside the containers. When Postgres comes from compose, the user, password and
+database in the local `DATABASE_URL` must match `POSTGRES_USER`, `POSTGRES_PASSWORD` and
+`POSTGRES_DB`. `POSTGRES_PASSWORD` in the template is a placeholder: change it before any real
+deployment. The password goes into a URL unescaped, so use only the URL-safe characters letters,
+digits and `-` `.` `_` `~` (for example `openssl rand -hex 24`).
 
 ### Run with Docker
 
 ```sh
 cp .env.example .env   # once
-make up      # docker compose up -d --build: app, worker, postgres, redis
+make up      # docker compose up -d --build: migrate, app, worker, postgres, redis
 make logs    # follow logs; app and worker each print a "started" line
 make down    # stop everything (named volumes are kept)
 ```
 
-- **Healthchecks.** All four services report health (`docker compose ps`). `worker` uses Arq's
+- **Migrations.** The one-shot `migrate` service (same image, `alembic upgrade head`) runs after
+  Postgres is healthy and exits. `app` and `worker` start only if it exits with 0. It reads the same
+  `Settings`, so it refuses to start with the same message when a required variable is missing; if
+  it fails, `docker compose logs migrate` shows why.
+- **Healthchecks.** All four long-running services report health (`docker compose ps`). `worker` uses Arq's
   check (`arq --check`). `app` has no HTTP server: its event loop touches a heartbeat file every
   10 s and the check (`python -m cyrano.health`) fails if the file is older than 60 s.
 - **Redis persistence.** Redis runs with AOF (`--appendonly yes`) on the `redis_data` volume, so
@@ -233,38 +249,76 @@ Postgres and Redis **on `127.0.0.1` only**, so `psql` and a locally run app can 
 services:
 
 ```sh
+make db-up   # starts only Postgres, with the override, and waits until it is healthy
 psql "postgresql://cyrano:change-me@127.0.0.1:5432/cyrano"   # values from POSTGRES_* in .env
 redis-cli -h 127.0.0.1 ping
 ```
 
 If ports 5432 or 6379 are taken, set `POSTGRES_HOST_PORT` or `REDIS_HOST_PORT` in `.env` and use
-the same ports in the local `DATABASE_URL` and `REDIS_URL`. To run without the override, for
-example on a server: `docker compose -f docker-compose.yml up -d`.
+the same ports in the local `DATABASE_URL`, `TEST_DATABASE_URL` and `REDIS_URL`. To run without the
+override, for example on a server: `docker compose -f docker-compose.yml up -d`.
 
 ### Run locally
 
 ```sh
 make install   # uv sync --locked
+make db-up     # Postgres from compose; needed by the next line
+make migrate   # alembic upgrade head against DATABASE_URL
 uv run python -m cyrano                                                   # app
 uv run arq --custom-log-dict cyrano.worker.settings.LOG_CONFIG \
     cyrano.worker.settings.WorkerSettings                                 # worker
 ```
 
 `.env` in the current directory is loaded; real environment variables take precedence over it.
-The skeleton app does not connect to Postgres or Redis. The worker connects to Redis; the compose
-one works via `docker compose up -d redis`.
+The app builds a database engine but opens no connection until a later ticket uses it, and it does
+not connect to Redis. The worker connects to Redis; the compose one works via
+`docker compose up -d redis`.
+
+### Migrations
+
+Alembic lives in `alembic.ini` and `migrations/` at the repository root. The URL comes from
+`Settings.database_url`, so `make migrate` and `make revision` need a complete `.env`.
+
+```sh
+make migrate                       # alembic upgrade head
+make revision m="add some column"  # autogenerate a revision, then ruff fix and format it
+uv run alembic downgrade -1        # step back one revision
+```
+
+A generated revision is a draft: review it and remove the marker comments Alembic writes into it
+(no comments in source, hard rule 1). Autogenerate does not see changes to enum values, and it does
+not drop enum types on downgrade; write those by hand.
 
 ## Settings
 
-Defined in `src/cyrano/config.py`. Secrets are `SecretStr` and are masked in logs.
+Defined in `src/cyrano/config.py`. Secrets are `SecretStr` and are masked in logs. This section
+describes every application variable. `.env.example` holds the required ones and a few local
+values; the other optional variables are overrides you add to `.env` yourself, and without them
+the default applies.
 
-| Group | Variables (default for optional ones) |
-| --- | --- |
-| Telegram | `TELEGRAM_API_ID`, `TELEGRAM_API_HASH` (second account, from my.telegram.org), `USERBOT_SESSION_PATH`, `BOT_TOKEN` (from @BotFather), `OWNER_TELEGRAM_ID` (main account; the only user the control bot will answer, planned CYR-12) |
-| LLM | `DEEPSEEK_API_KEY`, `DEEPSEEK_MODEL` (`deepseek-chat`) |
-| Storage | `DATABASE_URL`, `REDIS_URL`, `MEDIA_DIR` (`media`) |
-| Logging | `LOG_LEVEL` (`INFO`), `TELETHON_LOG_LEVEL`, `AIOGRAM_LOG_LEVEL`, `HTTPX_LOG_LEVEL` (each `WARNING`; the last also covers `httpcore`) |
-| Runtime | `TIMEZONE` (`Europe/Moscow`, validated as an IANA name), `HEARTBEAT_PATH` (`<tmpdir>/cyrano-heartbeat`) |
+| Variable | Required | Default | Description |
+| --- | --- | --- | --- |
+| `TELEGRAM_API_ID`, `TELEGRAM_API_HASH` | yes | | Telegram API credentials of the second account (the userbot). Create them on my.telegram.org, menu "API development tools" |
+| `USERBOT_SESSION_PATH` | yes | | Where the Telethon session file is stored |
+| `BOT_TOKEN` | yes | | Control bot token from @BotFather |
+| `OWNER_TELEGRAM_ID` | yes | | Telegram id of the main account; the only user the control bot will answer (planned, CYR-12) |
+| `DEEPSEEK_API_KEY` | yes | | DeepSeek API key |
+| `DEEPSEEK_MODEL` | no | `deepseek-chat` | DeepSeek model name |
+| `DATABASE_URL` | yes | | PostgreSQL URL, must start with `postgresql+asyncpg://` |
+| `REDIS_URL` | yes | | Redis URL, must start with `redis://` or `rediss://` |
+| `MEDIA_DIR` | no | `media` | Where downloaded media goes |
+| `LOG_LEVEL` | no | `INFO` | Level of the application log. One of `DEBUG`, `INFO`, `WARNING`, `ERROR`, `CRITICAL`, case-insensitive |
+| `TELETHON_LOG_LEVEL`, `AIOGRAM_LOG_LEVEL` | no | `WARNING` | Level of the `telethon` and `aiogram` loggers; same allowed values as `LOG_LEVEL` |
+| `HTTPX_LOG_LEVEL` | no | `WARNING` | Level of the `httpx` logger, also applied to `httpcore`; same allowed values as `LOG_LEVEL` |
+| `TIMEZONE` | no | `Europe/Moscow` | IANA zone name, validated at startup |
+| `HEARTBEAT_PATH` | no | `<tmpdir>/cyrano-heartbeat` | Liveness file touched by the app and read by the app healthcheck |
+| `POSTGRES_USER`, `POSTGRES_PASSWORD`, `POSTGRES_DB` | for Docker | | Credentials and database name of the compose Postgres; see [Variables](#variables) |
+| `POSTGRES_HOST_PORT`, `REDIS_HOST_PORT` | no, Docker only | `5432`, `6379` | Host ports that the override file publishes on `127.0.0.1` |
+| `TEST_DATABASE_URL` | for `make test` | | Not an application setting; see [Testing](#testing) |
+
+A relative `USERBOT_SESSION_PATH` or `MEDIA_DIR` is kept as written; when something opens it
+(nothing does yet), it is relative to the current working directory of the process. Inside the
+containers compose sets both to absolute paths.
 
 Logs are JSON lines on stdout for the app, the worker and Arq's own lines. Timestamps in log lines
 are UTC.
@@ -272,12 +326,23 @@ are UTC.
 ## Testing
 
 ```sh
+make db-up     # once: start Postgres from compose
 make test      # uv run pytest
 ```
 
 pytest with `asyncio_mode = auto`; tests live in `tests/` and mirror `src/cyrano`. Current tests
 cover configuration, logging (including secret masking), the heartbeat and healthcheck, the app
-loop, a real-process SIGTERM check and the Arq worker settings. All tests use fake values only.
+loop, a real-process SIGTERM check, the Arq worker settings, the status transition rules, the
+migration and the repositories. All tests use fake values only.
+
+Database tests run against real PostgreSQL, never SQLite, because JSONB and native enums must be
+tested for real. `TEST_DATABASE_URL` (from the environment or `.env`; the template value targets
+the compose Postgres on `127.0.0.1:5432`) points at a server and a database to connect to for
+admin statements. It is not an application setting. Each
+test creates a database with a random name there, applies the Alembic migrations to it, and drops
+it afterwards, so the role needs `CREATEDB`; the compose `POSTGRES_USER` has it. If the host port is
+not 5432, use the same port as `POSTGRES_HOST_PORT`. If Postgres is unreachable or the variable is
+missing, the tests fail with a message that names `make db-up`; they never skip.
 
 ## Linters, types and git hooks
 
@@ -299,49 +364,8 @@ cancels the older one.
 
 | Job | What it does |
 | --- | --- |
-| `check` | installs uv and the Python from `.python-version`, `make install`, `make check`, `make test` |
-| `docker` | `cp .env.example .env`, `docker compose config --quiet` with and without the override file, `docker compose build`; nothing is pushed or started |
-
-## Status
-
-Done:
-
-- ✅ CYR-8 project skeleton: config, JSON logging, app process with heartbeat, Arq worker
-  skeleton, Docker Compose, CI, Dependabot.
-- ✅ CYR-7 documentation (this set).
-
-MVP, planned:
-
-- ⏳ CYR-9 DB models and Alembic
-- ⏳ CYR-10 Telethon userbot
-- ⏳ CYR-11 contact profile collection
-- ⏳ CYR-12 control bot and contact card
-- ⏳ CYR-13 LLM client (DeepSeek)
-- ⏳ CYR-14 persona and style examples import
-- ⏳ CYR-15 conversation modes
-- ⏳ CYR-16 layered prompt builder
-- ⏳ CYR-17 Arq worker, delayed reply with debounce
-- ⏳ CYR-18 humanization
-- ⏳ CYR-19 reply only to active contacts
-- ⏳ CYR-20 stop-triggers
-- ⏳ CYR-21 auto-pause on manual messages
-- ⏳ CYR-22 rate limits and FloodWait
-- ⏳ CYR-29 local git hooks
-
-Post-MVP, planned:
-
-- ⏳ CYR-23 proactive messages
-- ⏳ CYR-24 reminders for undecided cards
-- ⏳ CYR-25 contact summaries
-- ⏳ CYR-26 catalog command
-- ⏳ CYR-27 modes management
-- ⏳ CYR-28 observability
-
-Risks:
-
-- ⚠️ Account limits and bans. A userbot account can be limited or banned by Telegram; pacing and
-  rate limits reduce the risk and cannot remove it.
-- ⚠️ Reply quality depends on the model and on the quality of the persona and examples.
+| `check` | a `postgres:16.15-alpine` service container, installs uv and the Python from `.python-version`, `make install`, `make check`, `make test` with `TEST_DATABASE_URL` set |
+| `docker` | `cp .env.example .env`, `docker compose config --quiet` with and without the override file and for the `migrate` service, `docker compose build`, `alembic heads` in a throwaway `migrate` container to prove the image holds the migrations; nothing is pushed and no long-running service is started |
 
 ## More
 

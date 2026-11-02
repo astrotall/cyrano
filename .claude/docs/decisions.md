@@ -28,19 +28,31 @@ changing one is a large change.
 | Heartbeat file for the app healthcheck; `arq --check` for the worker | The app has no HTTP server; Arq already ships a check |
 | The healthcheck entry point (`cyrano.health`) reads `HEARTBEAT_PATH` from `os.environ` itself instead of `Settings`: the one exception to hard rule 3 | The module stays stdlib-only, so the check starts fast and imports nothing heavy (no pydantic, no application config); it reads that one variable and nothing else |
 | The startup log line carries an allowlist of settings (`LOGGED_SETTINGS`), not everything that is not a secret | A new setting is not logged until someone adds it on purpose; Telegram ids and the session path can identify a person |
-| Timestamps stored in UTC; `TIMEZONE` applied only at the edges | Avoids offset bugs in stored data |
+| Timestamps are `timestamptz` stored in UTC; `TIMEZONE` applied only at the edges | Avoids offset bugs in stored data |
+| Migrations run in a one-shot compose service `migrate`; `app` and `worker` wait for `service_completed_successfully` | A failed migration stops the start instead of running new code on an old schema; app and worker never race each other to migrate |
+| `alembic.ini` and `migrations/` live at the repository root; `env.py` is async and reads `Settings.database_url` | One driver, one source of truth for the URL, no credentials in a config file |
+| `MetaData` has a naming convention | Constraint and index names are stable, so later migrations can refer to them |
+| Revisions repeat table names and enum values as literals instead of importing them | A revision records the past and must not change when the code does; `alembic check` and a test catch disagreement |
+| Status transitions as in [contact-lifecycle.md](contact-lifecycle.md), data plus one function in `domain/transitions.py` | One place for the rule; every other layer calls it |
+| Requesting the current status is a no-op, not an error | A repeated button press or event is harmless and must not raise |
+| `ignored` is terminal | The owner said no; "silence forever" must not be undone by mistake |
+| A contact becomes `active` only with a mode | A reply cannot be built without a mode |
+| A disabled or missing mode falls back to `default`; a missing or disabled `default` raises | Disabling a mode must not silence its contacts; when no style is available the safe result is no reply |
+| Repositories are `Protocol`s in `services`, SQLAlchemy implementations in `db`, returning domain models | Services stay independent of the ORM; `db` never imports `services` |
+| Every repository method is one transaction | Simple and enough for today's callers; nothing needs a wider transaction yet |
+| Database tests run on real PostgreSQL, one fresh database per test, migrated by Alembic; unreachable Postgres fails the test | JSONB and native enums behave differently on anything else; a skipped test proves nothing |
+| `TEST_DATABASE_URL` stays out of `Settings`; tests read it themselves from the environment or `.env` | The application must not know about a test database or require the variable in production |
+| Dependencies added for storage: `sqlalchemy[asyncio]`, `asyncpg`, `alembic` | Agreed for CYR-9; together they are the stack already decided above |
 
 ## Open questions
 
 | Question | Ticket |
 | --- | --- |
 | How does the worker send through the userbot session? The session volume is mounted into `app` only | CYR-17 |
-| How do Alembic migrations run (on app start, a separate step, a compose service) and where do they live? | CYR-9 |
 | How does the worker reconnect to Redis after a Redis restart? | CYR-17 |
 | Scrubbing of free-text logs and coverage tooling | CYR-28 |
 | Explicit compose project name (today it defaults to the directory name) | open, no ticket |
 | `uv_build` is pinned `>=0.12.4,<0.13.0` in `pyproject.toml`; bump it when uv reaches 0.13 | open, no ticket |
-| The full status transition matrix (only the transitions in [contact-lifecycle.md](contact-lifecycle.md) are decided) | CYR-9 |
 | Debounce mechanism and window length | CYR-17 |
 | How many last messages go into the prompt | CYR-16 |
 | Where the layered prompt builder lives (`llm`, `services` or `prompts`) | CYR-16 |

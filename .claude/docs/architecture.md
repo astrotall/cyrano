@@ -238,7 +238,7 @@ ready, media_dir)`. It depends on the `ContactRepository` Protocol, on the two s
 - **Media directory.** `MEDIA_DIR/profiles/<internal contact id>.jpg` for the Telegram profile photo and
   `<internal contact id>-card.jpg` for the Leomatch card photo, created on demand; `<id>.part.jpg`
   and `<id>-card.part.jpg` exist only during a download. The `media` compose volume is mounted into `app`
-  and `worker`.
+  and `worker`; the dev override replaces it with a bind mount of `./data/media`.
 - **Logger.** `cyrano.services.profile_collector` (INFO: contact id and which parts produced data;
   WARNING: contact id, part name and error class of a failed part; ERROR: error class and counter
   of a failed event), `cyrano.userbot.leomatch_source` (DEBUG only).

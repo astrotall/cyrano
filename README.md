@@ -119,7 +119,7 @@ read. A failed part never blocks the others or the registration.
 - **Where it is stored.** Texts go to the `profile` column of the contact (a JSON object, see
   [contact-lifecycle.md](.claude/docs/contact-lifecycle.md#the-stored-profile)). The photo is a file
   `profiles/<internal contact id>.jpg` under `MEDIA_DIR` (inside the container `/data/media`, on
-  the `media` volume); the profile keeps its path relative to `MEDIA_DIR`. Both are personal data:
+  the `media` volume, or in `./data/media` with the dev override); the profile keeps its path relative to `MEDIA_DIR`. Both are personal data:
   they are never logged and `media/` and `data/` are git-ignored.
 - **The matching-bot lookup.** The collector looks in the owner's chat with the matching bot
   (`LEOMATCH_BOT_USERNAME`) for the message that announces the match with this person: it links to
@@ -188,7 +188,7 @@ What exists now:
 ├── Makefile                      # install, check, test, fmt, up, down, logs, migrate, revision, db-up, login, login-docker
 ├── Dockerfile                    # multi-stage, non-root runtime
 ├── docker-compose.yml            # app, worker, one-shot migrate, postgres, redis
-├── docker-compose.override.yml   # dev: Postgres and Redis on 127.0.0.1
+├── docker-compose.override.yml   # dev: Postgres and Redis on 127.0.0.1, media in ./data/media
 ├── .env.example                  # bare template, no comments
 ├── alembic.ini                   # points at migrations/; no URL, it comes from Settings
 ├── migrations/
@@ -335,7 +335,8 @@ make down    # stop everything (named volumes are kept)
 - **Pinned images.** `postgres:16.15-alpine` and `redis:7.4-alpine`. Dependabot proposes bumps
   weekly (`.github/dependabot.yml`).
 - **Volumes.** `postgres_data`, `redis_data`, `userbot_session` (app and the login command),
-  `media` (app and worker). `down` keeps them.
+  `media` (app and worker; the dev override replaces it with the `./data/media` bind mount, see
+  below). `down` keeps them.
 
 ### Postgres and Redis from the host
 
@@ -352,6 +353,17 @@ redis-cli -h 127.0.0.1 ping
 If ports 5432 or 6379 are taken, set `POSTGRES_HOST_PORT` or `REDIS_HOST_PORT` in `.env` and use
 the same ports in the local `DATABASE_URL`, `TEST_DATABASE_URL` and `REDIS_URL`. To run without the
 override, for example on a server: `docker compose -f docker-compose.yml up -d`.
+
+The override also bind-mounts `./data/media` over `/data/media` in `app` and `worker`, so collected
+photos appear in `./data/media` inside the project folder and can be opened from the host; the
+named `media` volume is not used with the override. Without it (production) nothing changes: the
+named volume stays.
+
+- Run `mkdir -p data/media` before the first start. Otherwise Docker may create the folder owned
+  by root on Linux.
+- On a Linux host the container user (uid 10001, `cyrano`) must be able to write to the folder,
+  for example `sudo chown 10001:10001 data/media` or `chmod 777 data/media`.
+- On Docker Desktop for Mac and Windows file ownership is mapped automatically; nothing to do.
 
 ### Run locally
 

@@ -29,13 +29,14 @@ from cyrano.userbot.protocols import (
     IncomingEvent,
     SenderLike,
 )
+from tests.privacy import FAKE_TELEGRAM_ID
 
 FAKE_SENT_AT = datetime(2025, 1, 2, 3, 4, 5, tzinfo=UTC)
 FAKE_TEXT = "fake-incoming-text-that-must-not-leak"
 FAKE_FIRST_NAME = "Fakefirst"
 FAKE_LAST_NAME = "Fakelast"
 FAKE_USERNAME = "fake_username_that_must_not_leak"
-FAKE_SENDER_ID = 5001
+FAKE_SENDER_ID = FAKE_TELEGRAM_ID
 
 
 @dataclass

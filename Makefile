@@ -1,4 +1,4 @@
-.PHONY: install check test fmt up down logs migrate revision db-up login login-docker llm-check persona-import examples-import examples-stats
+.PHONY: install check test fmt up down logs migrate revision db-up login login-docker llm-check persona-import examples-import examples-stats examples-convert
 
 install:
 	uv sync --locked
@@ -37,6 +37,12 @@ examples-import:
 
 examples-stats:
 	uv run python -m cyrano examples stats
+
+examples-convert:
+	@test -n "$$INPUT" || (echo 'usage: make examples-convert INPUT=data/result.json (ME=name | ME_ID=user123) [OUT=data/style-examples.json]' >&2; exit 2)
+	@if [ -n "$$ME" ] && [ -n "$$ME_ID" ]; then echo 'give exactly one of ME and ME_ID' >&2; exit 2; fi
+	@if [ -z "$$ME" ] && [ -z "$$ME_ID" ]; then echo 'give exactly one of ME and ME_ID' >&2; exit 2; fi
+	uv run python -m cyrano examples convert "$$INPUT" $${ME:+--me "$$ME"} $${ME_ID:+--me-id "$$ME_ID"} --out "$${OUT:-data/style-examples.json}"
 
 revision:
 	@test -n "$(m)" || (echo 'usage: make revision m="what changed"' >&2; exit 2)

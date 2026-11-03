@@ -225,7 +225,7 @@ What exists now:
 ├── pyproject.toml                # dependencies, Ruff, mypy, pytest config
 ├── uv.lock
 ├── .python-version               # 3.14
-├── Makefile                      # install, check, test, fmt, up, down, logs, migrate, revision, db-up, login, login-docker, llm-check, persona-import, examples-import, examples-stats
+├── Makefile                      # install, check, test, fmt, up, down, logs, migrate, revision, db-up, login, login-docker, llm-check, persona-import, examples-import, examples-stats, examples-convert
 ├── Dockerfile                    # multi-stage, non-root runtime
 ├── docker-compose.yml            # app, worker, one-shot migrate, postgres, redis
 ├── docker-compose.override.yml   # dev: Postgres and Redis on 127.0.0.1, media in ./data/media
@@ -250,6 +250,7 @@ What exists now:
 │   ├── __main__.py               # python -m cyrano [login | llm-check | persona ... | examples ...]
 │   ├── main.py                   # app entrypoint, login, llm-check, persona and examples subcommands, signals, heartbeat
 │   ├── style_cli.py              # the persona and examples commands
+│   ├── convert_cli.py            # examples convert: Telegram Desktop export to a draft examples file
 │   ├── config.py                 # Settings, load_settings, ConfigError
 │   ├── logging.py                # JSON-lines logging
 │   ├── health.py                 # heartbeat file and the app healthcheck
@@ -272,6 +273,10 @@ What exists now:
 │   │   ├── style_import.py       # PersonaImporter, ExamplesImporter
 │   │   ├── persona_service.py    # PersonaService
 │   │   ├── style_examples.py     # ExampleSelector, example statistics
+│   │   ├── chat_export_reader.py # reads a Telegram Desktop JSON export into plain messages
+│   │   ├── chat_redaction.py     # replaces e-mails, phones, links, usernames and names with tokens
+│   │   ├── chat_dialogues.py     # conversations, turns, dialogue candidates, sampling
+│   │   ├── chat_export_converter.py # the conversion and the guarded, atomic write of the draft
 │   │   ├── card_builder.py       # the owner's card from the stored contact
 │   │   ├── card_sender.py        # CardSender Protocol
 │   │   ├── card_announcer.py     # CardAnnouncer: card to the owner, new -> pending
@@ -448,6 +453,7 @@ The app connects to Telegram as the userbot and polls the control bot, and conne
 | `make login` | Log the second account in locally and save the session |
 | `make login-docker` | The same inside the compose image and volume |
 | `make persona-import FILE=...`, `make examples-import FILE=...`, `make examples-stats` | Import the persona text, import style examples from JSON, print counts per tag (see [Persona and style examples](#persona-and-style-examples)) |
+| `make examples-convert INPUT=... ME=... \| ME_ID=... [OUT=...]` | Convert a Telegram Desktop JSON chat export into a draft examples file; give exactly one of `ME` and `ME_ID`; needs no `.env` and no database |
 | `make llm-check` | Send one tiny request to DeepSeek with the `reply` settings and print the result (see [Checking the LLM key](#checking-the-llm-key)) |
 
 ### Checking the LLM key
@@ -491,6 +497,22 @@ make examples-stats
 uv run python -m cyrano persona show                                   # length and update time, never the text
 uv run python -m cyrano examples import data/style-examples.json --replace --yes   # replace everything
 ```
+
+To start from a chat exported by Telegram Desktop (machine-readable JSON, one chat), convert it into
+a draft first. The converter reads a file and writes a file: it needs no `.env`, no database and no
+network. Give exactly one way to identify yourself, `--me` (your sender name) or `--me-id` (your
+`from_id`, better when the name is awkward to quote in a shell):
+
+```sh
+make examples-convert INPUT=data/result.json ME_ID=user1000000001
+make examples-convert INPUT=data/result.json ME='Anna' OUT=data/style-examples.json
+uv run python -m cyrano examples convert data/result.json --me-id user1000000001 --tags flirty --max 100 --gap-hours 6 --window 6 --redact Annie --force
+```
+
+The draft goes to `data/` (other places need `--allow-any-path`), an existing file needs
+`--force`, and the output is counts only. Review the draft before importing it: the examples,
+the other person's lines included, are sent to the LLM provider inside prompts. Options, redaction
+and the review step: [.claude/docs/persona-and-examples.md](.claude/docs/persona-and-examples.md).
 
 Importing the same examples again skips the dialogues already stored. An invalid file imports
 nothing and the command prints up to 20 problems as locations and rules (for example

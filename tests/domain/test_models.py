@@ -8,6 +8,7 @@ from pydantic import ValidationError
 from cyrano.domain.enums import ContactStatus, MessageDirection
 from cyrano.domain.errors import ContactAlreadyExists, ContactNotFound
 from cyrano.domain.models import MAX_BIGINT, Contact, ContactCreate, MessageCreate, ModeCreate
+from tests.privacy import FAKE_TELEGRAM_ID, assert_absent
 
 NOW = datetime(2026, 1, 2, 3, 4, 5, tzinfo=UTC)
 
@@ -98,5 +99,5 @@ def test_inputs_reject_unknown_fields() -> None:
 
 
 def test_error_messages_carry_no_telegram_id() -> None:
-    assert "100" not in str(ContactAlreadyExists())
+    assert_absent(FAKE_TELEGRAM_ID, str(ContactAlreadyExists()))
     assert str(ContactNotFound(7)) == "contact 7 does not exist"

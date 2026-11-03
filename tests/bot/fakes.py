@@ -25,10 +25,11 @@ from aiogram.types import Chat, Message, PhotoSize, User
 
 from cyrano.config import Settings
 from cyrano.services.card_actions import CardActions
+from tests.privacy import FAKE_OWNER_TELEGRAM_ID, FAKE_STRANGER_TELEGRAM_ID
 from tests.services.fakes import FakeCardSender
 
-OWNER_ID = 987654321
-STRANGER_ID = 555000111
+OWNER_ID = FAKE_OWNER_TELEGRAM_ID
+STRANGER_ID = FAKE_STRANGER_TELEGRAM_ID
 FAKE_BOT_TOKEN = "123456:fake-token-for-tests-only-abcdefghijklmnop"
 FAKE_BOT_ID = 123456
 FAKE_TIME = datetime(2025, 1, 2, 3, 4, 5, tzinfo=UTC)

@@ -18,6 +18,7 @@ from cyrano.userbot.handler import (
     to_incoming_message,
 )
 from cyrano.userbot.protocols import UserbotClient
+from tests.privacy import assert_absent
 from tests.userbot.fakes import (
     FAKE_FIRST_NAME,
     FAKE_LAST_NAME,
@@ -175,7 +176,7 @@ async def test_failing_intake_does_not_propagate_and_logs_only_the_error_class(
         FAKE_LAST_NAME,
         str(FAKE_SENDER_ID),
     ):
-        assert personal not in logged
+        assert_absent(personal, logged)
 
 
 async def test_malformed_event_does_not_propagate() -> None:
@@ -297,7 +298,7 @@ async def test_intake_that_always_fails_is_tried_three_times_then_dropped_and_lo
         FAKE_LAST_NAME,
         str(FAKE_SENDER_ID),
     ):
-        assert personal not in logged
+        assert_absent(personal, logged)
 
     await handler.handle(FakeEvent(id=34))
 

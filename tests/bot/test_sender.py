@@ -19,6 +19,7 @@ from cyrano.bot import messages
 from cyrano.bot.sender import MAX_RETRY_AFTER_SECONDS, TelegramCardSender
 from cyrano.domain.models import ContactCard
 from tests.bot.fakes import OWNER_ID, RecordingSession, recording_bot
+from tests.privacy import assert_absent
 from tests.services.fakes import fake_card
 from tests.userbot.fakes import RecordingSleep
 
@@ -427,7 +428,7 @@ async def test_a_failure_is_logged_without_personal_data(
     logged = "".join(f"{r.getMessage()} {r.__dict__}" for r in caplog.records)
     assert "TelegramForbiddenError" in logged
     for private in ("Secretname", "secret_nick", "secretbio", str(OWNER_ID)):
-        assert private not in logged
+        assert_absent(private, logged)
 
 
 async def test_photo_paths_and_counters_do_not_leak_names_into_the_logs(
@@ -448,4 +449,4 @@ async def test_photo_paths_and_counters_do_not_leak_names_into_the_logs(
     logged = "".join(f"{r.getMessage()} {r.__dict__}" for r in caplog.records)
     assert "TelegramForbiddenError" in logged
     for private in ("Secretname", ".jpg", "profiles/", str(OWNER_ID)):
-        assert private not in logged
+        assert_absent(private, logged)

@@ -13,6 +13,7 @@ from cyrano.domain.errors import ContactAlreadyExists
 from cyrano.domain.models import Contact, ContactCreate, IncomingMessage, NewContactEvent
 from cyrano.services.contact_events import InMemoryContactEvents
 from cyrano.services.intake import IntakeResult, IntakeService
+from tests.privacy import FAKE_TELEGRAM_ID, assert_absent
 
 FAKE_TEXT = "fake-intake-text-that-must-not-leak"
 FAKE_NAME = "Fakeintake Person"
@@ -20,7 +21,7 @@ FIRST_SENT_AT = datetime(2025, 3, 1, 12, 0, tzinfo=UTC)
 
 
 def _incoming(
-    tg_id: int = 7001,
+    tg_id: int = FAKE_TELEGRAM_ID,
     tg_message_id: int = 1,
     text: str = FAKE_TEXT,
     sent_at: datetime = FIRST_SENT_AT,
@@ -68,7 +69,7 @@ async def test_new_sender_creates_a_new_contact_stores_the_message_and_publishes
 
     assert isinstance(result, IntakeResult)
     assert result.contact_created is True
-    contact = await contacts.get_by_tg_id(7001)
+    contact = await contacts.get_by_tg_id(FAKE_TELEGRAM_ID)
     assert contact is not None
     assert contact.id == result.contact_id
     assert contact.status is ContactStatus.NEW
@@ -211,7 +212,7 @@ async def test_media_only_message_is_registered_with_empty_text(
     result = await intake.handle(_incoming(text=""))
 
     assert result.contact_created is True
-    contact = await contacts.get_by_tg_id(7001)
+    contact = await contacts.get_by_tg_id(FAKE_TELEGRAM_ID)
     assert contact is not None
     assert [m.text for m in await messages.list_last(contact.id, 10)] == [""]
     assert events.published == 1
@@ -222,7 +223,7 @@ async def test_sender_without_username_and_name_is_registered(
 ) -> None:
     await intake.handle(_incoming(username=None, display_name=None))
 
-    contact = await contacts.get_by_tg_id(7001)
+    contact = await contacts.get_by_tg_id(FAKE_TELEGRAM_ID)
     assert contact is not None
     assert contact.username is None
     assert contact.display_name is None
@@ -235,7 +236,7 @@ async def test_last_message_at_only_moves_forward(
     await intake.handle(_incoming(tg_message_id=2, sent_at=later))
     await intake.handle(_incoming(tg_message_id=1, sent_at=FIRST_SENT_AT))
 
-    contact = await contacts.get_by_tg_id(7001)
+    contact = await contacts.get_by_tg_id(FAKE_TELEGRAM_ID)
     assert contact is not None
     assert contact.last_message_at == later
 
@@ -247,7 +248,7 @@ async def test_nul_bytes_are_removed_before_anything_is_stored(
         _incoming(text="te\x00xt", username="us\x00er", display_name="\x00na\x00me")
     )
 
-    contact = await contacts.get_by_tg_id(7001)
+    contact = await contacts.get_by_tg_id(FAKE_TELEGRAM_ID)
     assert contact is not None
     assert (contact.username, contact.display_name) == ("user", "name")
     stored = await messages.list_last(result.contact_id, 10)
@@ -260,7 +261,7 @@ async def test_a_full_event_queue_does_not_break_intake(
     full = InMemoryContactEvents[NewContactEvent](max_size=1)
     service = IntakeService(contacts, messages, full)
 
-    first = await service.handle(_incoming(tg_id=7001))
+    first = await service.handle(_incoming(tg_id=FAKE_TELEGRAM_ID))
     second = await service.handle(_incoming(tg_id=7002))
 
     assert first.contact_created is True
@@ -278,5 +279,5 @@ async def test_intake_logs_no_message_text_names_or_telegram_ids(
 
     logged = " ".join(f"{r.getMessage()} {r.__dict__}" for r in caplog.records)
     assert "cyrano.services.intake" in {r.name for r in caplog.records}
-    for personal in (FAKE_TEXT, FAKE_NAME, "fake_intake_user", "7001"):
-        assert personal not in logged
+    for personal in (FAKE_TEXT, FAKE_NAME, "fake_intake_user", str(FAKE_TELEGRAM_ID)):
+        assert_absent(personal, logged)

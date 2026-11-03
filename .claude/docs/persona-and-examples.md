@@ -1,6 +1,6 @@
 # Persona and style examples
 
-State as of CYR-14: the persona and the style examples are imported from local files, stored in
+State as of CYR-34: the persona and the style examples are imported from local files, stored in
 PostgreSQL and read through services. Nothing uses them yet: no prompt is built, no LLM is called
 and nothing is wired into `main.run`. The prompt builder (CYR-16) will consume the selectors
 described here.
@@ -141,6 +141,122 @@ newer: a later dialogue is newer.
 
 `PersonaService.get()` returns the persona or `None`.
 
+## From a Telegram Desktop export
+
+State as of CYR-34: a chat exported by Telegram Desktop can be converted into a **draft** of the
+examples file. The converter reads a file and writes a file. It does not touch the database, the
+network or Telegram, and it needs no `.env` and no credentials. You review the draft and then import
+it with the commands above.
+
+### Export the chat
+
+1. In Telegram Desktop open the chat with the person.
+2. Open the chat menu (the three dots at the top right) and choose **Export chat history**.
+3. Turn media off (photos, videos, voice messages and the rest); only the text is used.
+4. Set the format to **Machine-readable JSON** (not HTML).
+5. Export. Move the resulting `result.json` into `data/`.
+
+Only a single-chat export is accepted. HTML exports are not supported; an account-wide export
+(a top-level `chats` object) is refused with "export one chat".
+
+### Find who you are in the export
+
+Give exactly one of:
+
+- `--me-id ID`: your `from_id`. Open `result.json`, find any message you wrote and copy its
+  `from_id` value (for example `user1000000001`). This is the **recommended** way, and the only
+  sensible one whenever your sender name is awkward to quote in a shell (a single punctuation
+  character such as a backtick, quotes, `$`, spaces). The name does not matter in this mode; it may
+  even be `null`.
+- `--me NAME`: your sender name (`from`), exactly and case-sensitively.
+
+Giving both or neither is an error. If the value matches nobody, the command stops and says only
+how many distinct senders (or sender ids) it found, never their names or ids.
+
+### The command
+
+```sh
+make examples-convert INPUT=data/result.json ME_ID=user1000000001
+make examples-convert INPUT=data/result.json ME='Anna' OUT=data/style-examples.json
+python -m cyrano examples convert INPUT (--me NAME | --me-id ID) [--out data/style-examples.json] \
+    [--tags a,b] [--max N] [--gap-hours H] [--window K] [--redact WORD ...] [--force] [--allow-any-path]
+```
+
+The make target takes `INPUT`, exactly one of `ME` and `ME_ID`, and optionally `OUT`; values are
+passed through the environment, so spaces, quotes and `$` in them are safe (a backtick is still
+easier through `ME_ID`).
+
+| Option | Meaning | Default |
+| --- | --- | --- |
+| `INPUT` | the `result.json` of one chat; at most 50 MiB | required |
+| `--me`, `--me-id` | who you are, see above; exactly one | required |
+| `--out` | the draft; must be under `data/` of the current directory | `data/style-examples.json` |
+| `--tags a,b` | tags for every dialogue, validated like the import; none means generic | none |
+| `--max N` | at most N dialogues, from 1 to 500; more candidates are sampled evenly | 100 |
+| `--gap-hours H` | a gap longer than H hours between two messages starts a new conversation | 6 |
+| `--window K` | at most K turns per dialogue, from 2 to 50 (at most 20 are kept, see below) | 6 |
+| `--redact WORD ...` | extra words to replace by `<name>`, see below | none |
+| `--force` | replace an existing output file | off |
+| `--allow-any-path` | allow `--out` outside `data/` | off |
+
+An error exits with 1 and a readable message, never a traceback. The output file is written
+atomically (a temporary file in the same folder, validated by the real import validators, then
+renamed), so a failed run leaves no partial file, and an existing output is refused without
+`--force`.
+
+### How messages become dialogues
+
+1. Only normal messages are kept. Service messages, forwarded messages and messages with no text
+   are skipped (stickers, voice and video messages, media without a caption); a media message with a
+   caption is kept by its caption. A message without a usable time, or without the identity the
+   chosen option needs (a name for `--me`, a `from_id` for `--me-id`), is skipped and counted.
+2. Time is taken from `date_unixtime`, otherwise from `date` (a time without a zone is read as UTC,
+   which only matters for the gaps). Messages are ordered by time.
+3. Consecutive messages of one side merge into one **turn** (texts joined by a newline). Every
+   sender except you is "them".
+4. For each of your turns, the dialogue is the window of up to K turns ending with it, with your
+   turns removed from the start until it begins with a "them" turn; a window without a "them" turn
+   is dropped. A turn longer than 1000 characters is cut at a word boundary; a dialogue keeps at most
+   the last 20 turns.
+5. Exact duplicate dialogues are dropped, then, if more than `--max` remain, an evenly spaced
+   deterministic sample is taken, so the same input gives the same output.
+
+The command prints counts only: messages read and kept, skipped by reason, turns, candidates,
+dialogues written, truncations, redactions by kind and the output path.
+
+### What is redacted automatically, and what is not
+
+Before anything else, in every kept message:
+
+| Token | What |
+| --- | --- |
+| `<email>` | e-mail addresses |
+| `<phone>` | a run of at least 7 digits, with `+`, spaces, dashes and parentheses between them |
+| `<link>` | `http`, `https`, `www.`, `t.me/` and similar links (social sites, a bare `domain.tld/path`) |
+| `<username>` | `@username` |
+| `<name>` | every distinct sender name found in the export, split into words of at least 3 letters, replaced as whole words, case-insensitively (Cyrillic included); the same for every `--redact` word |
+
+A sender name with no word of at least 3 letters (a single punctuation character, for example)
+produces no pattern at all. A message that becomes only tokens is dropped.
+
+**Not redacted**: diminutives, nicknames, other case forms of a name (a different ending is a
+different word), other people's names mentioned in the text, cities, workplaces, dates and
+anything intimate. Add the nicknames and forms you know with `--redact Annie Anya Ane`; a
+`--redact` word is replaced as a whole word whatever its length.
+
+### Review before you import
+
+Read the whole draft. The converter is a heuristic: remove or edit anything that identifies a
+person or says more than needed, then import it with
+`make examples-import FILE=data/style-examples.json`.
+
+**Privacy.** The examples, **including the other person's lines**, are sent to the LLM provider
+inside prompts. Redact names and intimate details, and keep only the context that is needed: a
+smaller `--window` means less of the other person's text. The export, the draft and the command
+output are personal data (S9 in [safety-rules.md](safety-rules.md)): they stay under `data/`, which
+git and Docker ignore, and the command never logs or prints a text, a name, an id or a number from
+the chat.
+
 ## Commands
 
 Run locally, with a complete `.env` and Postgres reachable on the host port (`make db-up`), after
@@ -153,6 +269,7 @@ Run locally, with a complete `.env` and Postgres reachable on the host port (`ma
 | `make examples-import FILE=data/style-examples.json` | `python -m cyrano examples import FILE`: validates and adds the new dialogues |
 | `python -m cyrano examples import FILE --replace --yes` | replaces all stored examples in one transaction |
 | `make examples-stats` | `python -m cyrano examples stats`: total, generic count and count per tag |
+| `make examples-convert INPUT=... ME_ID=...` | `python -m cyrano examples convert`: converts a Telegram Desktop export into a draft file; needs no `.env` and no database (see [From a Telegram Desktop export](#from-a-telegram-desktop-export)) |
 
 Every command exits with 0 on success and 1 with a readable message on any error. An invalid
 configuration still exits with 2 like every other command.

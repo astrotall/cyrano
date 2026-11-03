@@ -16,6 +16,7 @@ from aiogram.utils.token import TokenValidationError
 from cyrano.bot.errors import BotTokenRejected, PollingFailed
 from cyrano.bot.handlers import build_router
 from cyrano.bot.middleware import OwnerOnlyMiddleware
+from cyrano.bot.notifier import TelegramOwnerNotifier
 from cyrano.bot.sender import TelegramCardSender
 from cyrano.config import Settings
 from cyrano.services.card_actions import CardActions
@@ -48,10 +49,15 @@ class ControlBot:
             raise BotTokenRejected from None
         self._dispatcher = build_dispatcher(settings.owner_telegram_id, actions)
         self._sender = TelegramCardSender(self._bot, settings.owner_telegram_id, settings.media_dir)
+        self._notifier = TelegramOwnerNotifier(self._bot, settings.owner_telegram_id)
 
     @property
     def sender(self) -> TelegramCardSender:
         return self._sender
+
+    @property
+    def notifier(self) -> TelegramOwnerNotifier:
+        return self._notifier
 
     async def poll(self) -> None:
         try:

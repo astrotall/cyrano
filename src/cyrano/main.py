@@ -15,12 +15,14 @@ from sqlalchemy.exc import SQLAlchemyError
 
 from cyrano.bot.app import ControlBot
 from cyrano.bot.errors import ControlBotError, PollingFailed
+from cyrano.bot.notifier import OUTBOX_NOTICES
 from cyrano.config import ConfigError, Settings, load_settings
 from cyrano.convert_cli import add_convert_parser, convert_request, run_convert
 from cyrano.db.repositories import (
     SqlContactRepository,
     SqlMessageRepository,
     SqlModeRepository,
+    SqlOutboxRepository,
     SqlPersonaRepository,
     SqlStyleExampleRepository,
 )
@@ -31,6 +33,13 @@ from cyrano.domain.models import ContactReadyEvent, NewContactEvent
 from cyrano.health import HEARTBEAT_INTERVAL, heartbeat_loop
 from cyrano.llm.factory import LLMClientFactory
 from cyrano.logging import configure_logging
+from cyrano.outbox_cli import (
+    OutboxCommands,
+    OutboxRequest,
+    OutboxUsageError,
+    add_outbox_parser,
+    outbox_request,
+)
 from cyrano.reply_cli import (
     ReplyPreviewCommand,
     ReplyPreviewRequest,
@@ -43,19 +52,21 @@ from cyrano.services.contact_events import InMemoryContactEvents
 from cyrano.services.intake import IntakeService
 from cyrano.services.llm_check import check_llm
 from cyrano.services.llm_client import LLMClient
+from cyrano.services.outbox_sender import OutboxSender
+from cyrano.services.outbox_service import OutboxService
 from cyrano.services.persona_service import PersonaService
 from cyrano.services.profile_collector import ProfileCollector
 from cyrano.services.prompt_builder import PromptBuilder
 from cyrano.services.reply_generator import ReplyGenerator
+from cyrano.services.send_guard import SendGuard
 from cyrano.services.style_examples import ExampleSelector
 from cyrano.services.style_import import ExamplesImporter, PersonaImporter
 from cyrano.style_cli import StyleCommands, StyleRequest, add_style_parsers, style_request
-from cyrano.userbot.client import build_client, ensure_session_exists
+from cyrano.userbot.client import UserbotAccess, build_access, ensure_session_exists
 from cyrano.userbot.errors import UserbotError
 from cyrano.userbot.leomatch_source import TelethonLeomatchSource
 from cyrano.userbot.login import run_login
 from cyrano.userbot.profile_source import TelethonProfileSource
-from cyrano.userbot.protocols import UserbotClient
 from cyrano.userbot.runner import Userbot
 
 logger = logging.getLogger("cyrano")
@@ -67,6 +78,7 @@ EXIT_CONFIG_ERROR = 2
 EXIT_LLM_ERROR = 1
 EXIT_STYLE_ERROR = 1
 EXIT_REPLY_PREVIEW_ERROR = 1
+EXIT_OUTBOX_ERROR = 1
 LOGIN_CANCELLED_MESSAGE = "Login cancelled. Nothing was saved."
 POLLING_ENDED_REASON = "polling ended unexpectedly"
 STORAGE_FAILED_MESSAGE = "storage failed: {error}"
@@ -88,6 +100,14 @@ def _report_announcer_exit(task: asyncio.Task[None]) -> None:
         logger.error("card announcer stopped", extra={"error": type(error).__name__})
 
 
+def _report_sender_exit(task: asyncio.Task[None]) -> None:
+    if task.cancelled():
+        return
+    error = task.exception()
+    if error is not None:
+        logger.error("outbox sender stopped", extra={"error": type(error).__name__})
+
+
 def _watch_polling(
     task: asyncio.Task[None], stop: asyncio.Event, failures: list[ControlBotError]
 ) -> None:
@@ -107,7 +127,7 @@ async def run(
     settings: Settings,
     stop: asyncio.Event | None = None,
     heartbeat_interval: float = HEARTBEAT_INTERVAL,
-    client_factory: Callable[[Settings], UserbotClient] = build_client,
+    client_factory: Callable[[Settings], UserbotAccess] = build_access,
 ) -> None:
     ensure_session_exists(settings.userbot_session_path)
     stop = stop or asyncio.Event()
@@ -124,7 +144,8 @@ async def run(
     new_contacts = InMemoryContactEvents[NewContactEvent]()
     ready_contacts = InMemoryContactEvents[ContactReadyEvent]()
     intake = IntakeService(contacts, messages, new_contacts)
-    client = client_factory(settings)
+    access = client_factory(settings)
+    client = access.client
     userbot = Userbot(client, intake)
     collector = ProfileCollector(
         contacts,
@@ -136,10 +157,19 @@ async def run(
     )
     control_bot = ControlBot(settings, CardActions(contacts, modes))
     announcer = CardAnnouncer(contacts, messages, modes, control_bot.sender, ready_contacts)
+    sender = OutboxSender(
+        SqlOutboxRepository(session_factory),
+        contacts,
+        access.transport,
+        control_bot.notifier,
+        SendGuard(settings),
+        OUTBOX_NOTICES,
+    )
     heartbeat = asyncio.create_task(heartbeat_loop(settings.heartbeat_path, heartbeat_interval))
     collector_task: asyncio.Task[None] | None = None
     announcer_task: asyncio.Task[None] | None = None
     polling_task: asyncio.Task[None] | None = None
+    sender_task: asyncio.Task[None] | None = None
     polling_failures: list[ControlBotError] = []
     try:
         await userbot.start(stop)
@@ -152,11 +182,16 @@ async def run(
             polling_task.add_done_callback(
                 lambda task: _watch_polling(task, stop, polling_failures)
             )
+            sender_task = asyncio.create_task(sender.run())
+            sender_task.add_done_callback(_report_sender_exit)
         await userbot.run_until(stop)
         if polling_failures:
             raise polling_failures[0]
     finally:
         logger.info("cyrano shutting down", extra={"service": "app"})
+        if sender_task is not None:
+            sender_task.cancel()
+            await asyncio.gather(sender_task, return_exceptions=True)
         if announcer_task is not None:
             announcer_task.cancel()
             await asyncio.gather(announcer_task, return_exceptions=True)
@@ -257,6 +292,21 @@ async def _run_reply_preview_command(settings: Settings, request: ReplyPreviewRe
         await engine.dispose()
 
 
+async def _run_outbox_command(settings: Settings, request: OutboxRequest) -> int:
+    engine = build_engine(settings)
+    session_factory = build_session_factory(engine)
+    outbox = SqlOutboxRepository(session_factory)
+    service = OutboxService(SqlContactRepository(session_factory), outbox, SendGuard(settings))
+    commands = OutboxCommands(service, outbox, clock=lambda: datetime.now(UTC))
+    try:
+        return await commands.run(request)
+    except (SQLAlchemyError, OSError) as exc:
+        print(STORAGE_FAILED_MESSAGE.format(error=type(exc).__name__), file=sys.stderr)
+        return EXIT_OUTBOX_ERROR
+    finally:
+        await engine.dispose()
+
+
 def _parse_args(argv: Sequence[str] | None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(prog="python -m cyrano", description=__doc__)
     commands = parser.add_subparsers(dest="command")
@@ -264,6 +314,7 @@ def _parse_args(argv: Sequence[str] | None) -> argparse.Namespace:
     commands.add_parser(LLM_CHECK_COMMAND, help="send one tiny request to the LLM provider")
     add_convert_parser(add_style_parsers(commands))
     add_reply_preview_parser(commands)
+    add_outbox_parser(commands)
     return parser.parse_args(argv)
 
 
@@ -273,6 +324,11 @@ def main(argv: Sequence[str] | None = None) -> int:
     if convert is not None:
         return run_convert(convert)
     try:
+        outbox = outbox_request(args)
+    except OutboxUsageError as exc:
+        print(exc, file=sys.stderr)
+        return EXIT_OUTBOX_ERROR
+    try:
         settings = load_settings()
     except ConfigError as exc:
         print(exc, file=sys.stderr)
@@ -280,6 +336,8 @@ def main(argv: Sequence[str] | None = None) -> int:
     configure_logging(settings.log_level, settings.library_log_levels)
     if args.command == LLM_CHECK_COMMAND:
         return asyncio.run(_run_llm_check_command(settings))
+    if outbox is not None:
+        return asyncio.run(_run_outbox_command(settings, outbox))
     preview = reply_preview_request(args)
     if preview is not None:
         return asyncio.run(_run_reply_preview_command(settings, preview))

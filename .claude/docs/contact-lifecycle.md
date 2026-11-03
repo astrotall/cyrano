@@ -4,8 +4,10 @@ The storage and the transition rules exist (CYR-9), and so does the registration
 (CYR-10): the userbot creates contacts with status `new` and stores their incoming messages. The
 collection of the profile for the owner's card exists too (CYR-11): it fills `profile` and changes
 no status. The owner's card exists since CYR-12: delivering it moves `new` to `pending`, and its two
-buttons move `pending` to `active` or `ignored`. The other flows that drive the lifecycle are
-**planned**, each marked with its ticket; nothing replies to an `active` contact yet.
+buttons move `pending` to `active` or `ignored`. The outbox and the guarded sender exist since
+CYR-19 ([outbox-and-sender.md](outbox-and-sender.md)), and only the owner's test command can add a
+row. The other flows that drive the lifecycle are **planned**, each marked with its ticket; nothing
+replies to an `active` contact automatically yet.
 
 ## Statuses
 
@@ -15,7 +17,7 @@ buttons move `pending` to `active` or `ignored`. The other flows that drive the 
 | --- | --- | --- | --- |
 | `new` | Registered by the userbot from an unknown sender | Never | userbot (CYR-10, exists) |
 | `pending` | A card was delivered to the owner, waiting for a decision | No | card announcer (CYR-12, exists) |
-| `active` | The owner pressed Reply and chose a mode | Yes, via the sender only (the sender is CYR-19; nothing replies yet) | owner (CYR-12 exists, modes CYR-15) |
+| `active` | The owner pressed Reply and chose a mode | Yes, via the sender only (the sender exists, CYR-19; the autopilot is CYR-17, so nothing replies automatically yet) | owner (CYR-12 exists, modes CYR-15) |
 | `paused` | Stopped by a stop-trigger, by a manual message of the owner, by two unanswered proactive messages, or by the owner | No | system (CYR-20, CYR-21, CYR-23) or owner |
 | `ignored` | The owner pressed Ignore | Never; silence forever | owner (CYR-12, exists) |
 
@@ -73,7 +75,7 @@ otherwise the `default` mode. If `default` itself is missing or disabled they ra
 | 7 | Stop-triggers: on a hit the contact becomes `paused`, the owner is notified and no reply is sent | CYR-20 |
 | 8 | The layered prompt is built: persona, mode fragment with few-shot examples, contact summary, last N messages | CYR-14, CYR-15, CYR-16, CYR-25 |
 | 9 | The LLM is called through the LLM interface; the response is validated | CYR-13 |
-| 10 | The reply goes through the sender: status guard, rate limits and FloodWait handling, humanized delay, typing action, splitting, quiet hours | CYR-19, CYR-22, CYR-18 |
+| 10 | The reply goes through the sender: status guard and FloodWait handling (exist, see [outbox-and-sender.md](outbox-and-sender.md)), rate limits, humanized delay, typing action, splitting, quiet hours | CYR-19, CYR-22, CYR-18 |
 | 11 | Background: contact summaries, proactive messages, reminders for undecided cards | CYR-25, CYR-23, CYR-24 |
 
 How stop-triggers are detected (lists, model output, both) and at which step each one is
@@ -83,8 +85,8 @@ known after step 9.
 ## Registration (CYR-10)
 
 Exists. The userbot listens on the second account and passes every real private message to
-`IntakeService.handle` in `services/intake.py`. It only listens and stores: it never sends, never
-marks anything as read and never answers anyone ([S2](safety-rules.md)).
+`IntakeService.handle` in `services/intake.py`. The intake only listens and stores: it never sends,
+never marks anything as read and never answers anyone ([S2](safety-rules.md)).
 
 What counts as a message to register: an incoming message in a private chat with a real user.
 Rejected without any effect, only counted in a DEBUG log: own (outgoing) messages, groups,
@@ -286,7 +288,7 @@ cancelled first on shutdown. It talks to the owner only through the `CardSender`
   stale card shows the truth), and removes the buttons. On `refused`, `not_found` and
   `mode_unavailable` it shows a short alert; if the contact is no longer `pending`, the buttons are
   removed. A card that can no longer be edited is only answered.
-- **Not yet.** Nothing replies to an `active` contact. The autopilot (CYR-17) must also answer
+- **Not yet.** Nothing replies to an `active` contact automatically. The autopilot (CYR-17) must also answer
   messages that arrived while the contact was `pending`. Pausing and resuming from the card, and the
   stop-trigger notification, are CYR-26 and CYR-20.
 
@@ -303,12 +305,14 @@ Fixed in CYR-9. Table `contacts`:
 | `mode_id` | Chosen mode, nullable, foreign key to `modes` |
 | `profile` | JSONB object: bio, photo path, matching-bot card text and card photo paths, `collected_at`. Structure: [The stored profile](#the-stored-profile) (CYR-11) |
 | `summary` | JSONB object: contact summary. Its schema arrives with CYR-25 |
-| `last_message_at` | Time of the latest message; only moves forward, a late event does not take it back |
+| `last_message_at` | Time of the latest message **from the contact**; only moves forward, a late event does not take it back. A message we send does not move it (CYR-19) |
 | `created_at`, `updated_at` | `updated_at` moves only when a row really changes |
 
 Message history is in table `messages` (the "last N messages" come from here), one row per Telegram
 message: `contact_id`, `direction` (`incoming`, `outgoing`), `text`, `tg_message_id`, `created_at`.
-Today only `incoming` rows are written, by the registration above.
+`incoming` rows are written by the registration above; `outgoing` rows by the sender's
+`complete_send`, in one transaction with marking the outbox row sent, with the Telegram message id and
+Telegram's send time (CYR-19).
 The counter of unanswered proactive messages does not exist yet; CYR-23 adds it with a migration.
 
 All timestamps are `timestamptz` stored in UTC. All of it is personal data: it stays in the database
@@ -327,8 +331,9 @@ when both events arrive at the same time. `list_last` returns the newest N in ch
 
 - Each incoming message schedules one delayed job. A burst of messages must produce one reply,
   not one per message. The debounce mechanism and the window length are decided in CYR-17.
-- The status is checked twice: when the job is scheduled and again right before the send. The
-  second check is made by the sender, not by the caller, so a status change between scheduling,
+- The status is checked twice: when the job is scheduled and again right before the send. Both
+  checks exist in the outbox since CYR-19 ([outbox-and-sender.md](outbox-and-sender.md#the-guard)); the
+  job itself is CYR-17. The second check is made by the sender, not by the caller, so a status change between scheduling,
   prompt building and sending (for example a stop-trigger or a manual message of the owner) always
   cancels the reply.
 - A job whose contact is not `active` when it runs finishes without sending.

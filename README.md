@@ -38,8 +38,12 @@ Key principles:
 
 > The project skeleton (CYR-8), the storage layer (CYR-9), the userbot intake (CYR-10), the
 > profile collection (CYR-11), the control bot with the contact card (CYR-12), the LLM client
-> (CYR-13) and the import of the owner persona and style examples (CYR-14) exist; the last two are
-> not used by the app yet. The flow below is the plan.
+> (CYR-13), the import of the owner persona and style examples (CYR-14), the converter of a chat
+> export into draft examples (CYR-34) and the layered reply prompt with the reply generator (CYR-16)
+> exist; these last four are not used by the running app, only by the `llm-check`, `persona`,
+> `examples` and `reply-preview` commands. The outbox with the one guarded sender (CYR-19) exists too,
+> and only the owner's test command can add a message to it: nothing is sent automatically. The flow
+> below is the plan.
 
 ## Architecture diagram
 
@@ -74,9 +78,9 @@ registering contacts only; the control bot box exists for the card and its two b
       |  reply text
       v
  +-----------------------------------------------+
- | sender: status guard, rate limits, humanized  |
- | delay, typing, splitting, quiet hours         |  --> Telegram
- | (planned)                                     |
+ | sender: outbox, status guard (exists);        |
+ | rate limits, humanized delay, typing,         |  --> Telegram
+ | splitting, quiet hours (planned)              |
  +-----------------------------------------------+
 ```
 
@@ -85,9 +89,10 @@ placeholder job, the contact status rules, the database schema with its migratio
 repositories, Docker and CI, and the userbot: it logs the second account in, listens for private
 messages, registers unknown senders as contacts with status `new`, stores their messages and
 publishes an in-memory event for each new contact; a collector then reads their profile for the
-owner's card (see [What is collected](#what-is-collected-about-a-new-contact)). It never sends
-anything. The control bot then shows the owner a card for every new contact with a Reply button per
-mode and an Ignore button (see [The control bot](#the-control-bot-and-the-card)). The `llm`
+owner's card (see [What is collected](#what-is-collected-about-a-new-contact)). The control bot then shows the owner a card for every new contact with a Reply button per
+mode and an Ignore button (see [The control bot](#the-control-bot-and-the-card)). The outbox and
+the one sender send what the owner's test command puts in the outbox, and nothing else (see
+[The outbox and the sender](#the-outbox-and-the-sender)). The `llm`
 package holds the DeepSeek client, which nothing in the app calls yet; `services` holds the
 repository interfaces, the LLM interface, the intake, the event queue, the collector and the card
 logic.
@@ -107,8 +112,8 @@ Does:
 
 Does not:
 
-- send anything, mark messages as read or answer anyone, unknown senders included. Replies are a
-  later ticket and will go only through the guarded sender;
+- send anything by itself, mark messages as read or answer anyone, unknown senders included. The
+  one way out is the guarded sender, and only the owner's test command gives it something to send;
 - react to groups, channels, bots, deleted accounts, Telegram's service account or its own
   messages;
 - change a status. The step from `new` to `pending` happens in the card announcer, after the card
@@ -167,8 +172,44 @@ minutes at most, so a failing collection never keeps the owner waiting):
 Reply moves the contact from `pending` to `active` with that mode, Ignore from `pending` to
 `ignored`; the card is then edited to show the decision and the buttons disappear. A button on an
 old card never changes a contact that is no longer waiting for a decision: it shows a short alert
-instead. Nothing replies to an `active` contact yet (the autopilot is CYR-17); this ticket sends
-nothing to contacts.
+instead. Nothing replies to an `active` contact automatically yet (the autopilot is CYR-17).
+
+### The outbox and the sender
+
+Every message to a contact goes through one table and one sender. A message is a row in the outbox
+(`scheduled_messages`). The sender, a background task of the app, takes one due row at a time,
+re-reads the contact, checks that it is still `active`, and only then sends. A row that may or may
+not have reached Telegram is never sent again: it is marked failed and the owner is told, because a
+duplicate message to a person cannot be taken back. Only a flood wait is rescheduled automatically;
+the sender calls Telegram once for a row whatever else goes wrong. Notifications to the owner carry
+internal ids and error class names only.
+The autopilot does not exist yet, so the owner's commands are the only source of rows. States,
+errors and rules: [.claude/docs/outbox-and-sender.md](.claude/docs/outbox-and-sender.md).
+
+```sh
+make outbox-enqueue CONTACT=<contact id> TEXT="..." [IN=<seconds>]   # default 5 seconds
+make outbox-list [STATE=<state>] [LIMIT=<n>]                         # never prints a text
+make outbox-cancel ID=<row id>                                       # scheduled rows only
+make outbox-retry ID=<row id> [IN=<seconds>] YES=1                   # failed rows only; check the chat first
+```
+
+**After a notification that the outcome is unknown.** The send failed in a way that does not tell
+whether the message reached Telegram (a timeout or a lost connection, for example), so the sender did
+not repeat it. Open the chat on the second account. If the message is there, do nothing: the row
+stays `failed`. If it is not, run `make outbox-retry ID=<row id> YES=1` (without `YES=1` the command
+only prints a reminder). The row goes out once, after the usual status check, so a contact that is
+no longer `active` gets nothing.
+
+The commands run on the host like `make migrate`: they need a complete `.env` and the database up. A
+refusal or any other error prints one line and exits with 1 (the `make` target reports that as its
+own failure). The contact must be `active`; `AUTOPILOT_ENABLED` does not apply to these commands.
+
+**Verifying the sender live.** With the app running and a contact you control approved through its
+card, run `make outbox-enqueue CONTACT=<id> TEXT="test" IN=10`, then `make outbox-list`: the row moves
+from `scheduled` to `sent`, and the message appears in that chat on the second account. To see the
+guard, enqueue for a contact that is not `active`: the command refuses with `contact_not_active` and
+stores nothing. To stop a planned row, enqueue with a longer `IN` and use `make outbox-cancel`. This
+uses a real account, so keep it to a few messages to a contact of your own.
 
 ### Code layers
 
@@ -201,7 +242,7 @@ import aiogram; full rules in
 | Delayed jobs | Arq on Redis | now (skeleton worker, placeholder job) |
 | Cache and queue | Redis 7.4 (AOF) | now (compose service) |
 | Database server | PostgreSQL 16.15 | now (compose service, migrations, tests) |
-| Userbot | Telethon | now (listens and registers contacts; sends nothing) |
+| Userbot | Telethon | now (listens, registers contacts, reads profiles; sends only through the guarded sender) |
 | Control bot | aiogram 3 | now (owner-only, contact card with Reply and Ignore) |
 | ORM and migrations | SQLAlchemy 2.x (async), asyncpg, Alembic | now (schema and repositories, used by the intake) |
 | LLM client | DeepSeek over plain httpx, no SDK | now (client, retries, `make llm-check`; not wired into the app yet) |
@@ -226,7 +267,7 @@ What exists now:
 ├── pyproject.toml                # dependencies, Ruff, mypy, pytest config
 ├── uv.lock
 ├── .python-version               # 3.14
-├── Makefile                      # install, check, test, fmt, up, down, logs, migrate, revision, db-up, login, login-docker, llm-check, persona-import, examples-import, examples-stats, examples-convert, reply-preview
+├── Makefile                      # install, check, test, fmt, up, down, logs, migrate, revision, db-up, login, login-docker, llm-check, persona-import, examples-import, examples-stats, examples-convert, reply-preview, outbox-enqueue, outbox-list, outbox-cancel, outbox-retry
 ├── Dockerfile                    # multi-stage, non-root runtime
 ├── docker-compose.yml            # app, worker, one-shot migrate, postgres, redis
 ├── docker-compose.override.yml   # dev: Postgres and Redis on 127.0.0.1, media in ./data/media
@@ -234,7 +275,7 @@ What exists now:
 ├── alembic.ini                   # points at migrations/; no URL, it comes from Settings
 ├── migrations/
 │   ├── env.py                    # async environment, URL from Settings
-│   └── versions/                 # 0001 creates the tables and seeds the default mode; 0002 adds persona and style_examples
+│   └── versions/                 # 0001 creates the tables and seeds the default mode; 0002 adds persona and style_examples; 0003 adds scheduled_messages
 ├── examples/                     # invented sample persona and style examples (the real files go to data/, never to git)
 ├── .dockerignore
 ├── .gitignore
@@ -243,6 +284,7 @@ What exists now:
 │   ├── contact-lifecycle.md      # statuses, transitions, message flow
 │   ├── persona-and-examples.md   # persona and style examples: formats, limits, commands, privacy
 │   ├── reply-generation.md       # the layered prompt, the budget, the reply cleaning, reply-preview
+│   ├── outbox-and-sender.md      # the outbox, the one sender, the guard, errors, owner commands
 │   ├── safety-rules.md           # S1..S10
 │   └── decisions.md              # decided and open
 ├── .github/
@@ -254,11 +296,12 @@ What exists now:
 │   ├── style_cli.py              # the persona and examples commands
 │   ├── convert_cli.py            # examples convert: Telegram Desktop export to a draft examples file
 │   ├── reply_cli.py              # reply-preview: generate one reply for a stored conversation
+│   ├── outbox_cli.py             # outbox enqueue, list, cancel, retry: the owner's commands
 │   ├── config.py                 # Settings, load_settings, ConfigError
 │   ├── logging.py                # JSON-lines logging
 │   ├── health.py                 # heartbeat file and the app healthcheck
-│   ├── userbot/                  # Telethon: protocols, filters, handler, client, login, runner, profile and Leomatch readers
-│   ├── bot/                      # aiogram: owner-only middleware, handlers, card rendering, card sender, polling
+│   ├── userbot/                  # Telethon: protocols, filters, handler, client, adapter (the only send), login, runner, profile and Leomatch readers
+│   ├── bot/                      # aiogram: owner-only middleware, handlers, card rendering, card sender, owner notifier, polling
 │   ├── llm/                      # DeepSeek client, retrying transport, factory (the only package that imports httpx)
 │   ├── prompts/                  # prompt texts and their pure rendering (imports only domain)
 │   ├── domain/                   # enums, status transition rules, errors, Pydantic models
@@ -288,7 +331,12 @@ What exists now:
 │   │   ├── card_builder.py       # the owner's card from the stored contact
 │   │   ├── card_sender.py        # CardSender Protocol
 │   │   ├── card_announcer.py     # CardAnnouncer: card to the owner, new -> pending
-│   │   └── card_actions.py       # CardActions: Reply (pending -> active) and Ignore
+│   │   ├── card_actions.py       # CardActions: Reply (pending -> active) and Ignore
+│   │   ├── send_guard.py         # the status and source check, at enqueue and before sending
+│   │   ├── outbox_service.py     # OutboxService: text validation, guard, row
+│   │   ├── outbox_sender.py      # OutboxSender: the only caller of send_text
+│   │   ├── message_transport.py  # MessageTransport Protocol: send_text
+│   │   └── owner_notifier.py     # OwnerNotifier Protocol: notify
 │   └── worker/
 │       └── settings.py           # Arq WorkerSettings, placeholder job
 └── tests/                        # mirrors src/cyrano; database tests need a real PostgreSQL
@@ -445,7 +493,7 @@ uv run arq --custom-log-dict cyrano.worker.settings.LOG_CONFIG \
 
 `.env` in the current directory is loaded; real environment variables take precedence over it.
 The app connects to Telegram as the userbot and polls the control bot, and connects to Postgres
-(when the first message arrives); it does not connect to Redis. The worker connects to Redis; the compose one works via `docker compose up -d redis`.
+(from the start: the sender polls the outbox every two seconds); it does not connect to Redis. The worker connects to Redis; the compose one works via `docker compose up -d redis`.
 
 ### Makefile targets
 
@@ -463,6 +511,7 @@ The app connects to Telegram as the userbot and polls the control bot, and conne
 | `make persona-import FILE=...`, `make examples-import FILE=...`, `make examples-stats` | Import the persona text, import style examples from JSON, print counts per tag (see [Persona and style examples](#persona-and-style-examples)) |
 | `make examples-convert INPUT=... ME=... \| ME_ID=... [OUT=...]` | Convert a Telegram Desktop JSON chat export into a draft examples file; give exactly one of `ME` and `ME_ID`; needs no `.env` and no database |
 | `make reply-preview CONTACT=... [MODE=...]` | Generate one reply for a stored conversation and print it with a stats line; sends nothing, writes nothing (see [Previewing a reply](#previewing-a-reply)) |
+| `make outbox-enqueue CONTACT=... TEXT="..." [IN=...]`, `make outbox-list [STATE=...] [LIMIT=...]`, `make outbox-cancel ID=...`, `make outbox-retry ID=... [IN=...] [YES=1]` | The owner's commands for the outbox (see [The outbox and the sender](#the-outbox-and-the-sender)) |
 | `make llm-check` | Send one tiny request to DeepSeek with the `reply` settings and print the result (see [Checking the LLM key](#checking-the-llm-key)) |
 
 ### Checking the LLM key
@@ -586,6 +635,7 @@ the default applies.
 | `STYLE_EXAMPLES_MAX` | no | `8` | Most style examples one selection returns, from 1 to 50. Only `reply-preview` selects examples so far |
 | `REPLY_HISTORY_MESSAGES` | no | `20` | How many last messages of a contact go into the reply prompt, from 1 to 100 |
 | `REPLY_PROMPT_BUDGET_CHARS` | no | `24000` | Character budget of the whole reply prompt, from 4000 to 200000; over it, examples and then the oldest messages are dropped |
+| `AUTOPILOT_ENABLED` | no | `false` | `true` allows outbox rows from the autopilot to be sent. The autopilot does not exist yet, and the owner's test commands do not consult this switch; the status check applies to both |
 | `HEARTBEAT_PATH` | no | `<tmpdir>/cyrano-heartbeat` | Liveness file touched by the app and read by the app healthcheck |
 | `LEOMATCH_BOT_USERNAME` | no | `leomatchbot` | Username of the matching bot whose chat is searched for a new contact's profile text; a leading `@` is allowed. The default is an assumption: check the bot's real username in Telegram |
 | `POSTGRES_USER`, `POSTGRES_PASSWORD`, `POSTGRES_DB` | for Docker | | Credentials and database name of the compose Postgres; see [Variables](#variables) |
@@ -613,9 +663,9 @@ loop, a real-process SIGTERM check, the Arq worker settings, the status transiti
 migration and the repositories, and for the userbot: the filters, the handler, the client and
 startup logic, the login flow, the intake on real PostgreSQL, the profile collection (parser, match
 check, matching-bot lookup, collector, `update_identity` on real PostgreSQL) and the check that the
-userbot never sends, and for the control bot: owner-only access, the card rendering, the card sender,
+userbot's read client cannot send, and for the control bot: owner-only access, the card rendering, the card sender,
 the handlers driven through the real dispatcher, the announcer and the Reply and Ignore actions on
-real PostgreSQL, and for the LLM client: the request and reply shapes, JSON validation with retries, the retry and deadline rules, the per-step settings and the logs, all against `httpx.MockTransport`, and for the persona and style examples: the file validation, the import and the replace on real PostgreSQL, the selection, the commands, migration `0002` and the sample files. Telegram and DeepSeek are always faked: no test connects to either. All tests use fake values only.
+real PostgreSQL, and for the LLM client: the request and reply shapes, JSON validation with retries, the retry and deadline rules, the per-step settings and the logs, all against `httpx.MockTransport`, and for the persona and style examples: the file validation, the import and the replace on real PostgreSQL, the selection, the commands, migration `0002` and the sample files, and for the outbox: the repository, the guard and the sender on real PostgreSQL, the adapter, the notifier, the commands and the structural check that only one module can send. Telegram and DeepSeek are always faked: no test connects to either. All tests use fake values only.
 
 Database tests run against real PostgreSQL, never SQLite, because JSONB and native enums must be
 tested for real. `TEST_DATABASE_URL` (from the environment or `.env`; the template value targets
@@ -657,5 +707,6 @@ cancels the older one.
 - [.claude/docs/contact-lifecycle.md](.claude/docs/contact-lifecycle.md)
 - [.claude/docs/persona-and-examples.md](.claude/docs/persona-and-examples.md)
 - [.claude/docs/reply-generation.md](.claude/docs/reply-generation.md)
+- [.claude/docs/outbox-and-sender.md](.claude/docs/outbox-and-sender.md)
 - [.claude/docs/safety-rules.md](.claude/docs/safety-rules.md)
 - [.claude/docs/decisions.md](.claude/docs/decisions.md)

@@ -17,13 +17,14 @@ import pytest
 from cyrano import main as main_module
 from cyrano.bot.errors import BotTokenRejected, PollingFailed
 from cyrano.config import Settings, load_settings
-from cyrano.domain.enums import ContactStatus
+from cyrano.domain.enums import ContactStatus, OutboxSource, OutboxState
 from cyrano.domain.models import ContactProfile
 from cyrano.logging import configure_logging
 from cyrano.main import main, run
+from cyrano.services.card_actions import CardActions
+from cyrano.userbot.client import UserbotAccess
 from cyrano.userbot.errors import Disconnected, SessionMissing, SessionNotAuthorized
-from cyrano.userbot.protocols import UserbotClient
-from tests.bot.fakes import fake_control_bot_class
+from tests.bot.fakes import FakeControlBot, fake_control_bot_class
 from tests.conftest import (
     OPTIONAL_ENV,
     PERSONAL_SETTING_NAMES,
@@ -34,6 +35,7 @@ from tests.conftest import (
 from tests.fake_app import CONNECTING_MARKER, HANGING_CONNECT_SCENARIO
 from tests.privacy import assert_absent
 from tests.services.fakes import FakeCardSender, InMemoryModes
+from tests.services.outbox_fakes import InMemoryOutbox, ScriptedTransport
 from tests.userbot.fakes import (
     FAKE_SENDER_ID,
     FakeClient,
@@ -64,14 +66,16 @@ class Repositories:
     contacts: InMemoryContacts
     messages: InMemoryMessages
     modes: InMemoryModes
+    outbox: InMemoryOutbox
 
 
 @pytest.fixture(autouse=True)
 def repositories(monkeypatch: pytest.MonkeyPatch) -> Repositories:
-    stored = Repositories(InMemoryContacts(), InMemoryMessages(), InMemoryModes())
+    stored = Repositories(InMemoryContacts(), InMemoryMessages(), InMemoryModes(), InMemoryOutbox())
     monkeypatch.setattr("cyrano.main.SqlContactRepository", lambda _: stored.contacts)
     monkeypatch.setattr("cyrano.main.SqlMessageRepository", lambda _: stored.messages)
     monkeypatch.setattr("cyrano.main.SqlModeRepository", lambda _: stored.modes)
+    monkeypatch.setattr("cyrano.main.SqlOutboxRepository", lambda _: stored.outbox)
     return stored
 
 
@@ -82,9 +86,13 @@ def bot_calls(monkeypatch: pytest.MonkeyPatch) -> list[str]:
     return calls
 
 
-def _factory(client: FakeClient) -> Callable[[Settings], UserbotClient]:
-    def build(_: Settings) -> UserbotClient:
-        return client
+def _factory(
+    client: FakeClient, transport: ScriptedTransport | None = None
+) -> Callable[[Settings], UserbotAccess]:
+    def build(_: Settings) -> UserbotAccess:
+        return UserbotAccess(
+            client=client, transport=transport if transport is not None else ScriptedTransport()
+        )
 
     return build
 
@@ -327,9 +335,9 @@ async def test_run_without_a_session_file_fails_before_any_client_is_built(
     settings = load_settings(env_file=None)
     built: list[Settings] = []
 
-    def build(from_settings: Settings) -> UserbotClient:
+    def build(from_settings: Settings) -> UserbotAccess:
         built.append(from_settings)
-        return FakeClient()
+        return UserbotAccess(client=FakeClient(), transport=ScriptedTransport())
 
     with pytest.raises(SessionMissing, match="make login"):
         await run(settings, asyncio.Event(), client_factory=build)
@@ -581,6 +589,206 @@ async def test_the_collector_is_not_started_when_the_start_is_interrupted(
 
     assert "run" not in created
     assert client.write_attempts == []
+
+
+class _SenderSpy:
+    def __init__(self, calls: list[str]) -> None:
+        self.calls = calls
+
+    async def run(self) -> None:
+        self.calls.append("sender.run")
+        try:
+            await asyncio.sleep(3600)
+        except asyncio.CancelledError:
+            self.calls.append("sender cancelled")
+            raise
+
+
+def _recording_sender(monkeypatch: pytest.MonkeyPatch, calls: list[str]) -> None:
+    monkeypatch.setattr("cyrano.main.OutboxSender", lambda *args, **kwargs: _SenderSpy(calls))
+
+
+async def test_the_sender_starts_after_the_userbot_and_the_bot(
+    session_env: dict[str, str],
+    heartbeat_file: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    bot_calls: list[str],
+) -> None:
+    _recording_sender(monkeypatch, bot_calls)
+    client = FakeClient(calls=bot_calls)
+    stop = asyncio.Event()
+    task = asyncio.create_task(
+        run(load_settings(env_file=None), stop, client_factory=_factory(client))
+    )
+
+    await _wait_until(lambda: _contains(bot_calls, "sender.run"))
+    stop.set()
+    await asyncio.wait_for(task, timeout=2)
+
+    assert bot_calls.index("catch_up") < bot_calls.index("sender.run")
+    assert bot_calls.index("bot.poll") < bot_calls.index("sender.run")
+
+
+async def test_the_sender_is_cancelled_before_everything_else_on_shutdown(
+    session_env: dict[str, str],
+    heartbeat_file: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    bot_calls: list[str],
+) -> None:
+    _recording_sender(monkeypatch, bot_calls)
+    _recording_announcer(monkeypatch, bot_calls)
+    client = FakeClient(calls=bot_calls)
+    stop = asyncio.Event()
+    task = asyncio.create_task(
+        run(load_settings(env_file=None), stop, client_factory=_factory(client))
+    )
+
+    await _wait_until(lambda: _contains(bot_calls, "sender.run"))
+    stop.set()
+    await asyncio.wait_for(task, timeout=2)
+
+    order = ["sender cancelled", "announcer cancelled", "bot.stop", "disconnect"]
+    assert [bot_calls.index(name) for name in order] == sorted(bot_calls.index(n) for n in order)
+
+
+async def test_the_sender_does_not_start_when_the_start_is_interrupted(
+    session_env: dict[str, str],
+    heartbeat_file: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    bot_calls: list[str],
+) -> None:
+    _recording_sender(monkeypatch, bot_calls)
+    client = FakeClient(hang_on_connect=True, calls=bot_calls)
+    stop = asyncio.Event()
+    asyncio.get_running_loop().call_later(0.05, stop.set)
+
+    await asyncio.wait_for(
+        run(load_settings(env_file=None), stop, client_factory=_factory(client)), timeout=2
+    )
+
+    assert "sender.run" not in bot_calls
+
+
+async def test_a_crashing_sender_is_logged_once_and_does_not_stop_the_intake(
+    session_env: dict[str, str],
+    heartbeat_file: Path,
+    repositories: Repositories,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    class _CrashingSender:
+        def __init__(self, *args: object, **kwargs: object) -> None:
+            pass
+
+        async def run(self) -> None:
+            raise RuntimeError("fake sender crash")
+
+    monkeypatch.setattr("cyrano.main.OutboxSender", _CrashingSender)
+    configure_logging("INFO")
+    client = _readable_client()
+    stop = asyncio.Event()
+    task = asyncio.create_task(
+        run(load_settings(env_file=None), stop, client_factory=_factory(client))
+    )
+    await asyncio.sleep(0.05)
+
+    await client.deliver(FakeEvent())
+    await asyncio.sleep(0.05)
+
+    assert not task.done()
+    assert len(repositories.messages.stored) == 1
+    stop.set()
+    await asyncio.wait_for(task, timeout=2)
+    records = [json.loads(line) for line in capsys.readouterr().out.splitlines() if line]
+    crashes = [r for r in records if r["msg"] == "outbox sender stopped"]
+    assert [r["error"] for r in crashes] == ["RuntimeError"]
+    assert "fake sender crash" not in json.dumps(records)
+
+
+async def _outbox_row_state(repositories: Repositories, row_id: int, state: OutboxState) -> bool:
+    row = await repositories.outbox.get(row_id)
+    return row is not None and row.state is state
+
+
+async def test_a_due_manual_row_for_an_active_contact_goes_out_with_the_switch_off(
+    session_env: dict[str, str], heartbeat_file: Path, repositories: Repositories
+) -> None:
+    contact = await repositories.contacts.seed(FAKE_SENDER_ID, status=ContactStatus.ACTIVE)
+    row = await repositories.outbox.enqueue(
+        contact.id, "fake text", datetime.now(UTC), OutboxSource.MANUAL_TEST
+    )
+    transport = ScriptedTransport()
+    client = FakeClient()
+    stop = asyncio.Event()
+    task = asyncio.create_task(
+        run(load_settings(env_file=None), stop, client_factory=_factory(client, transport))
+    )
+
+    await _wait_until(lambda: _outbox_row_state(repositories, row.id, OutboxState.SENT))
+    stop.set()
+    await asyncio.wait_for(task, timeout=2)
+
+    assert transport.calls == [(FAKE_SENDER_ID, "fake text")]
+    assert client.write_attempts == []
+
+
+async def test_a_due_autopilot_row_is_cancelled_when_the_switch_is_off(
+    session_env: dict[str, str], heartbeat_file: Path, repositories: Repositories
+) -> None:
+    contact = await repositories.contacts.seed(FAKE_SENDER_ID, status=ContactStatus.ACTIVE)
+    row = await repositories.outbox.enqueue(
+        contact.id, "fake text", datetime.now(UTC), OutboxSource.AUTOPILOT
+    )
+    transport = ScriptedTransport()
+    stop = asyncio.Event()
+    task = asyncio.create_task(
+        run(load_settings(env_file=None), stop, client_factory=_factory(FakeClient(), transport))
+    )
+
+    await _wait_until(lambda: _outbox_row_state(repositories, row.id, OutboxState.CANCELLED))
+    stop.set()
+    await asyncio.wait_for(task, timeout=2)
+
+    assert transport.calls == []
+
+
+async def test_a_row_left_in_sending_is_failed_at_start_with_one_notice_through_the_bot(
+    session_env: dict[str, str],
+    heartbeat_file: Path,
+    repositories: Repositories,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    contact = await repositories.contacts.seed(FAKE_SENDER_ID, status=ContactStatus.ACTIVE)
+    row = await repositories.outbox.enqueue(
+        contact.id, "fake text", datetime.now(UTC), OutboxSource.MANUAL_TEST
+    )
+    await repositories.outbox.claim_due(datetime.now(UTC))
+    built: list[FakeControlBot] = []
+    build_bot = fake_control_bot_class()
+
+    def remember(settings: Settings, actions: CardActions) -> FakeControlBot:
+        bot = build_bot(settings, actions)
+        built.append(bot)
+        return bot
+
+    monkeypatch.setattr("cyrano.main.ControlBot", remember)
+    transport = ScriptedTransport()
+    stop = asyncio.Event()
+    task = asyncio.create_task(
+        run(load_settings(env_file=None), stop, client_factory=_factory(FakeClient(), transport))
+    )
+
+    await _wait_until(lambda: _outbox_row_state(repositories, row.id, OutboxState.FAILED))
+    await _wait_until(lambda: _has_notices(built))
+    stop.set()
+    await asyncio.wait_for(task, timeout=2)
+
+    assert transport.calls == []
+    assert len(built[0].notifier.texts) == 1
+
+
+async def _has_notices(built: list[FakeControlBot]) -> bool:
+    return bool(built) and bool(built[0].notifier.texts)
 
 
 class _Announcer:

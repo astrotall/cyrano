@@ -39,6 +39,7 @@ OPTIONAL_ENV = (
     "STYLE_EXAMPLES_MAX",
     "REPLY_HISTORY_MESSAGES",
     "REPLY_PROMPT_BUDGET_CHARS",
+    "AUTOPILOT_ENABLED",
 )
 TOUCHED_LOGGERS = ("telethon", "aiogram", "httpx", "httpcore", "arq", "arq.worker", "arq.jobs")
 SECRET_VALUES = (

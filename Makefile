@@ -1,4 +1,4 @@
-.PHONY: install check test fmt up down logs migrate revision db-up login login-docker llm-check persona-import examples-import examples-stats examples-convert reply-preview
+.PHONY: install check test fmt up down logs migrate revision db-up login login-docker llm-check persona-import examples-import examples-stats examples-convert reply-preview outbox-enqueue outbox-list outbox-cancel outbox-retry
 
 install:
 	uv sync --locked
@@ -47,6 +47,21 @@ examples-convert:
 reply-preview:
 	@test -n "$(CONTACT)" || (echo 'usage: make reply-preview CONTACT=<contact id> [MODE=<mode name>]' >&2; exit 2)
 	uv run python -m cyrano reply-preview "$(CONTACT)" $(if $(MODE),--mode "$(MODE)")
+
+outbox-enqueue:
+	@test -n "$$CONTACT" -a -n "$$TEXT" || (echo 'usage: make outbox-enqueue CONTACT=<contact id> TEXT="<text>" [IN=<seconds>]' >&2; exit 2)
+	uv run python -m cyrano outbox enqueue $${IN:+--in-seconds "$$IN"} "$$CONTACT" -- "$$TEXT"
+
+outbox-list:
+	uv run python -m cyrano outbox list $${STATE:+--state "$$STATE"} $${LIMIT:+--limit "$$LIMIT"}
+
+outbox-cancel:
+	@test -n "$$ID" || (echo 'usage: make outbox-cancel ID=<row id>' >&2; exit 2)
+	uv run python -m cyrano outbox cancel "$$ID"
+
+outbox-retry:
+	@test -n "$$ID" || (echo 'usage: make outbox-retry ID=<row id> [IN=<seconds>] [YES=1]' >&2; exit 2)
+	uv run python -m cyrano outbox retry "$$ID" $${IN:+--in-seconds "$$IN"} $${YES:+--yes}
 
 revision:
 	@test -n "$(m)" || (echo 'usage: make revision m="what changed"' >&2; exit 2)

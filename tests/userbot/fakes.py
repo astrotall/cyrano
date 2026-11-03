@@ -23,7 +23,6 @@ from cyrano.domain.transitions import transition_needed
 from cyrano.services.intake import IntakeResult
 from cyrano.userbot.protocols import (
     EventCallback,
-    FullUserRequestLike,
     FullUserResponse,
     HistoryMessage,
     IncomingEvent,
@@ -135,7 +134,7 @@ class FakeClient:
         self.about: str | None = None
         self.photo_bytes: bytes | None = None
         self.history: list[HistoryMessage] = []
-        self.requests: list[FullUserRequestLike] = []
+        self.full_user_requests: list[int] = []
         self.history_queries: list[tuple[int | None, str | None, int]] = []
         self.photo_downloads: list[tuple[str, bool]] = []
         self.media_downloads: list[tuple[int, str]] = []
@@ -201,9 +200,9 @@ class FakeClient:
         if self._read_error is not None:
             raise self._read_error
 
-    async def __call__(self, request: FullUserRequestLike) -> FullUserResponse:
-        await self._read("request")
-        self.requests.append(request)
+    async def get_full_user(self, tg_id: int) -> FullUserResponse:
+        await self._read("get_full_user")
+        self.full_user_requests.append(tg_id)
         return FakeFullUserResponse(FakeFullUserInfo(self.about))
 
     async def get_entity(self, entity: int | str) -> SenderLike:

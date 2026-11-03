@@ -35,3 +35,18 @@ ALERT_REFUSED = "Контакт уже не ждёт решения."
 ALERT_NOT_FOUND = "Контакт не найден."
 ALERT_MODE_UNAVAILABLE = "Этот режим недоступен, выберите другой."
 ALERT_FAILED = "Не получилось, попробуйте ещё раз."
+
+OUTBOX_INTERRUPTED = (
+    "Отправка сообщения #{row_id} контакту #{contact_id} прервана ({error}). "
+    "Повторной отправки не будет. Проверьте чат вручную. Если сообщения там нет, "
+    "повторите отправку командой: python -m cyrano outbox retry {row_id} --yes"
+)
+OUTBOX_FAILED = "Сообщение #{row_id} контакту #{contact_id} не отправлено: {error}."
+OUTBOX_UNCERTAIN = (
+    "Исход отправки сообщения #{row_id} контакту #{contact_id} неизвестен: оно могло дойти. "
+    "Автоматического повтора не будет. Проверьте чат вручную. Если сообщения там нет, "
+    "повторите отправку командой: python -m cyrano outbox retry {row_id} --yes"
+)
+OUTBOX_FLOOD_WAIT = (
+    "Telegram просит подождать {seconds} с: сообщение #{row_id} контакту #{contact_id} отложено."
+)

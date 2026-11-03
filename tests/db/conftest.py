@@ -19,6 +19,7 @@ from cyrano.db.repositories import (
     SqlContactRepository,
     SqlMessageRepository,
     SqlModeRepository,
+    SqlOutboxRepository,
     SqlPersonaRepository,
     SqlStyleExampleRepository,
 )
@@ -150,6 +151,11 @@ def messages(session_factory: SessionFactory) -> SqlMessageRepository:
 @pytest.fixture
 def modes(session_factory: SessionFactory) -> SqlModeRepository:
     return SqlModeRepository(session_factory)
+
+
+@pytest.fixture
+def outbox(session_factory: SessionFactory) -> SqlOutboxRepository:
+    return SqlOutboxRepository(session_factory)
 
 
 @pytest.fixture

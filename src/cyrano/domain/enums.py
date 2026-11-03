@@ -1,4 +1,4 @@
-"""Contact statuses, message directions, LLM vocabulary and dialogue roles."""
+"""Contact statuses, message directions, LLM vocabulary, dialogue roles and outbox vocabulary."""
 
 from __future__ import annotations
 
@@ -45,3 +45,16 @@ class LLMStep(StrEnum):
 class TurnRole(StrEnum):
     ME = "me"
     THEM = "them"
+
+
+class OutboxState(StrEnum):
+    SCHEDULED = "scheduled"
+    SENDING = "sending"
+    SENT = "sent"
+    FAILED = "failed"
+    CANCELLED = "cancelled"
+
+
+class OutboxSource(StrEnum):
+    AUTOPILOT = "autopilot"
+    MANUAL_TEST = "manual_test"

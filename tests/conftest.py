@@ -6,12 +6,14 @@ from pathlib import Path
 
 import pytest
 
+from tests.privacy import FAKE_API_ID, FAKE_OWNER_TELEGRAM_ID
+
 REQUIRED_ENV = {
-    "TELEGRAM_API_ID": "2468013",
+    "TELEGRAM_API_ID": str(FAKE_API_ID),
     "TELEGRAM_API_HASH": "hash-secret-value",
     "USERBOT_SESSION_PATH": "/data/session/userbot",
     "BOT_TOKEN": "123:bot-token-secret",
-    "OWNER_TELEGRAM_ID": "987654321",
+    "OWNER_TELEGRAM_ID": str(FAKE_OWNER_TELEGRAM_ID),
     "DEEPSEEK_API_KEY": "sk-deepseek-secret",
     "DATABASE_URL": "postgresql+asyncpg://cyrano:db-password-secret@postgres:5432/cyrano",
     "REDIS_URL": "redis://:redis-password-secret@redis:6379/0",
@@ -44,7 +46,7 @@ SECRET_VALUES = (
     "db-password-secret",
     "redis-password-secret",
 )
-PERSONAL_VALUES = ("2468013", "987654321")
+PERSONAL_VALUES = (str(FAKE_API_ID), str(FAKE_OWNER_TELEGRAM_ID))
 PERSONAL_SETTING_NAMES = ("telegram_api_id", "owner_telegram_id")
 
 

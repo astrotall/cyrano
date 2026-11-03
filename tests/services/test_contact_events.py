@@ -11,6 +11,7 @@ from cyrano.services.contact_events import (
     ContactEventPublisher,
     InMemoryContactEvents,
 )
+from tests.privacy import FAKE_INTERNAL_ID, FAKE_OTHER_INTERNAL_ID, assert_absent
 
 
 def _event(number: int) -> NewContactEvent:
@@ -76,11 +77,13 @@ async def test_drop_warning_carries_counters_only(caplog: pytest.LogCaptureFixtu
     await events.publish(NewContactEvent(contact_id=424242, message_id=737373))
 
     with caplog.at_level(logging.WARNING):
-        await events.publish(NewContactEvent(contact_id=909090, message_id=818181))
+        await events.publish(
+            NewContactEvent(contact_id=FAKE_INTERNAL_ID, message_id=FAKE_OTHER_INTERNAL_ID)
+        )
 
     text = " ".join(f"{r.getMessage()} {r.__dict__}" for r in caplog.records)
-    assert "909090" not in text
-    assert "818181" not in text
+    assert_absent(FAKE_INTERNAL_ID, text)
+    assert_absent(FAKE_OTHER_INTERNAL_ID, text)
 
 
 async def test_two_queues_of_different_event_types_are_independent() -> None:
@@ -103,8 +106,8 @@ async def test_a_full_ready_queue_drops_the_new_event_with_counters_only(
     await ready.publish(ContactReadyEvent(contact_id=1))
 
     with caplog.at_level(logging.WARNING):
-        await ready.publish(ContactReadyEvent(contact_id=424242))
+        await ready.publish(ContactReadyEvent(contact_id=FAKE_INTERNAL_ID))
 
     assert ready.dropped == 1
     text = " ".join(f"{r.getMessage()} {r.__dict__}" for r in caplog.records)
-    assert "424242" not in text
+    assert_absent(FAKE_INTERNAL_ID, text)

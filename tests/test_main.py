@@ -32,6 +32,7 @@ from tests.conftest import (
     SECRET_VALUES,
 )
 from tests.fake_app import CONNECTING_MARKER, HANGING_CONNECT_SCENARIO
+from tests.privacy import assert_absent
 from tests.services.fakes import FakeCardSender, InMemoryModes
 from tests.userbot.fakes import (
     FAKE_SENDER_ID,
@@ -111,7 +112,7 @@ async def test_run_logs_startup_and_stops_on_event(
         "cyrano stopped",
     ]
     for secret in (*SECRET_VALUES, *PERSONAL_VALUES):
-        assert secret not in out
+        assert_absent(secret, out)
     for name in PERSONAL_SETTING_NAMES:
         assert name not in records[0]
 
@@ -141,7 +142,7 @@ def test_process_exits_cleanly_on_sigterm(
     first = proc.stdout.readline()
     assert json.loads(first)["msg"] == "cyrano started"
     for value in PERSONAL_VALUES:
-        assert value not in first
+        assert_absent(value, first)
     for _ in range(50):
         if _healthcheck(heartbeat_file) == 0:
             break
@@ -835,7 +836,7 @@ async def test_a_polling_failure_is_logged_with_the_class_name_only(
     assert "control bot polling failed" in out
     assert "secret detail" not in out
     for secret in (*SECRET_VALUES, *PERSONAL_VALUES):
-        assert secret not in out
+        assert_absent(secret, out)
 
 
 @pytest.mark.parametrize("error", [BotTokenRejected(), PollingFailed("RuntimeError")])

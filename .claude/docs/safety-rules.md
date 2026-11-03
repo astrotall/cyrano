@@ -150,7 +150,11 @@ only.
   text in the captured logs or in the raised errors; the `.gitignore` and `.dockerignore` content
   is tested too. Exists for the converter (CYR-34): the captured output, errors and logs of a full
   run and of the failures contain none of the invented names, ids, texts or numbers, and the
-  written draft contains none of the redacted strings.
+  written draft contains none of the redacted strings. Numeric markers in these tests (fake
+  Telegram ids, API ids, phone numbers, login codes, internal ids) must be distinctive and at least
+  12 digits long, taken from `tests/privacy.py`, because the captured log records carry timestamps
+  and thread and process ids that a short number can match by chance; `assert_absent` there refuses
+  a numeric marker shorter than 10 digits.
 
 ## S10. The assistant never answers a direct bot question
 

@@ -29,6 +29,7 @@ from cyrano.services.profile_collector import (
     ProfileCollector,
 )
 from cyrano.services.profile_source import CardPhotos, LeomatchLookup, ProfileSourceError
+from tests.privacy import FAKE_TELEGRAM_ID, assert_absent
 from tests.services.fakes import (
     FAKE_BIO,
     FAKE_PHOTO,
@@ -262,7 +263,7 @@ async def test_fetched_texts_are_sanitized_and_truncated(tmp_path: Path) -> None
 
 async def test_the_photo_path_is_relative_and_named_by_the_internal_id(tmp_path: Path) -> None:
     rig = _rig(tmp_path)
-    contact = await _new_contact(rig, tg_id=987654)
+    contact = await _new_contact(rig, tg_id=FAKE_TELEGRAM_ID)
 
     profile = await _collect(rig, contact)
 
@@ -270,7 +271,7 @@ async def test_the_photo_path_is_relative_and_named_by_the_internal_id(tmp_path:
     relative = Path(profile.photo)
     assert not relative.is_absolute()
     assert relative == Path(PROFILE_PHOTO_DIRECTORY) / f"{contact.id}.jpg"
-    assert "987654" not in profile.photo
+    assert_absent(FAKE_TELEGRAM_ID, profile.photo)
     assert "fake" not in profile.photo
     assert (rig.media_dir / relative).read_bytes() == FAKE_PHOTO
     assert sorted(p.name for p in (rig.media_dir / PROFILE_PHOTO_DIRECTORY).iterdir()) == [
@@ -661,7 +662,7 @@ async def test_nothing_personal_reaches_the_logs(
 
     with caplog.at_level(logging.DEBUG):
         for rig in rigs:
-            contact = await _new_contact(rig, tg_id=555123)
+            contact = await _new_contact(rig, tg_id=FAKE_TELEGRAM_ID)
             await _collect(rig, contact)
 
     logged = " ".join(f"{r.getMessage()} {r.__dict__}" for r in caplog.records)
@@ -676,14 +677,14 @@ async def test_nothing_personal_reaches_the_logs(
         OLD_USERNAME,
         "Freshfirst",
         OLD_NAME,
-        "555123",
+        str(FAKE_TELEGRAM_ID),
         ".jpg",
         "profiles/",
         "leak-fetch",
         "leak-photo",
         "leak-leomatch",
     ):
-        assert forbidden not in logged
+        assert_absent(forbidden, logged)
 
 
 def _card_rig(
@@ -705,7 +706,7 @@ def _card_path(contact: Contact, number: int) -> str:
 async def test_all_card_photos_are_stored_under_the_internal_id(tmp_path: Path) -> None:
     card_photos = FakeCardPhotos(3, contents={0: b"one", 1: b"two", 2: b"three"})
     rig = _card_rig(tmp_path, card_photos)
-    contact = await _new_contact(rig, tg_id=987654)
+    contact = await _new_contact(rig, tg_id=FAKE_TELEGRAM_ID)
 
     profile = await _collect(rig, contact)
 
@@ -713,7 +714,7 @@ async def test_all_card_photos_are_stored_under_the_internal_id(tmp_path: Path) 
     assert profile.leomatch.photos == [_card_path(contact, n) for n in (1, 2, 3)]
     for stored in profile.leomatch.photos:
         assert not Path(stored).is_absolute()
-        assert "987654" not in stored
+        assert_absent(FAKE_TELEGRAM_ID, stored)
     contents = [(rig.media_dir / stored).read_bytes() for stored in profile.leomatch.photos]
     assert contents == [b"one", b"two", b"three"]
     assert profile.photo == f"{PROFILE_PHOTO_DIRECTORY}/{contact.id}.jpg"
@@ -956,13 +957,13 @@ async def test_nothing_about_the_card_photos_reaches_the_logs(
 
     with caplog.at_level(logging.DEBUG):
         for rig in rigs:
-            contact = await _new_contact(rig, tg_id=555123)
+            contact = await _new_contact(rig, tg_id=FAKE_TELEGRAM_ID)
             await _collect(rig, contact)
 
     logged = " ".join(f"{r.getMessage()} {r.__dict__}" for r in caplog.records)
     assert "profile collection finished" in logged
-    for forbidden in ("-card", ".jpg", "profiles/", "leak-card", "555123", CARD_TEXT):
-        assert forbidden not in logged
+    for forbidden in ("-card", ".jpg", "profiles/", "leak-card", str(FAKE_TELEGRAM_ID), CARD_TEXT):
+        assert_absent(forbidden, logged)
 
 
 def _old_path(number: int) -> str:

@@ -17,10 +17,11 @@ from cyrano.userbot.login import (
     run_login,
 )
 from cyrano.userbot.protocols import LoginClient
+from tests.privacy import FAKE_LOGIN_CODE, FAKE_PHONE, assert_absent
 from tests.userbot.fakes import FakeLoginClient, touch_session_file
 
-PHONE = "+15550001234"
-CODE = "13579"
+PHONE = FAKE_PHONE
+CODE = FAKE_LOGIN_CODE
 PASSWORD = "fake-two-step-password"
 
 
@@ -108,10 +109,10 @@ async def test_phone_code_and_password_are_never_stored_or_logged(
     captured = capsys.readouterr()
     logged = " ".join(f"{r.getMessage()} {r.__dict__}" for r in caplog.records)
     for secret in (PHONE, CODE, PASSWORD, PHONE.lstrip("+")):
-        assert secret not in captured.out + captured.err
-        assert secret not in logged
-        assert secret not in repr(settings)
-        assert secret not in repr(settings.model_dump())
+        assert_absent(secret, captured.out + captured.err)
+        assert_absent(secret, logged)
+        assert_absent(secret, repr(settings))
+        assert_absent(secret, repr(settings.model_dump()))
 
 
 async def test_an_authorized_session_asks_no_code(
@@ -143,7 +144,7 @@ async def test_a_wrong_code_fails_readably_and_leaves_no_session_file(
         await run_login(settings, _Recorder().prompts, _factory(client, settings), output.append)
 
     assert "PhoneCodeInvalidError" in str(raised.value)
-    assert CODE not in str(raised.value)
+    assert_absent(CODE, str(raised.value))
     assert output == []
     assert not session_file(settings.userbot_session_path).exists()
     assert client.calls[-1] == "disconnect"

@@ -9,6 +9,7 @@ import pytest
 
 from cyrano.logging import JsonFormatter
 from tests.conftest import PERSONAL_SETTING_NAMES, PERSONAL_VALUES, SECRET_VALUES
+from tests.privacy import assert_absent
 
 PACKAGE_NAME = "cyrano.worker"
 MODULE_NAME = "cyrano.worker.settings"
@@ -53,7 +54,7 @@ async def test_startup_logs_without_secrets_or_personal_identifiers(
     records = [json.loads(line) for line in out.splitlines() if line]
     assert [r["msg"] for r in records] == ["cyrano worker started", "cyrano worker stopped"]
     for value in (*SECRET_VALUES, *PERSONAL_VALUES):
-        assert value not in out
+        assert_absent(value, out)
     for name in PERSONAL_SETTING_NAMES:
         assert name not in records[0]
 

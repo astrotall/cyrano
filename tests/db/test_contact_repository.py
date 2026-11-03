@@ -28,6 +28,7 @@ from cyrano.domain.models import (
 )
 from tests.db.conftest import fetch_all
 from tests.domain.cases import ALLOWED, FORBIDDEN
+from tests.privacy import FAKE_TELEGRAM_ID, assert_absent
 
 MISSING_ID = 999_999
 FAKE_PROFILE: dict[str, object] = {
@@ -108,12 +109,12 @@ async def test_create_stores_the_largest_telegram_id(contacts: SqlContactReposit
 async def test_duplicate_tg_id_raises_without_exposing_the_id(
     contacts: SqlContactRepository,
 ) -> None:
-    await _new_contact(contacts, tg_id=424242)
+    await _new_contact(contacts, tg_id=FAKE_TELEGRAM_ID)
 
     with pytest.raises(ContactAlreadyExists) as caught:
-        await _new_contact(contacts, tg_id=424242)
+        await _new_contact(contacts, tg_id=FAKE_TELEGRAM_ID)
 
-    assert "424242" not in str(caught.value)
+    assert_absent(FAKE_TELEGRAM_ID, str(caught.value))
     assert caught.value.__cause__ is None
     assert caught.value.__suppress_context__ is True
 

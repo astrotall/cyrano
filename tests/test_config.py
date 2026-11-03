@@ -8,13 +8,14 @@ from pydantic import SecretStr
 
 from cyrano.config import LOGGED_SETTINGS, ConfigError, Settings, load_settings
 from tests.conftest import PERSONAL_SETTING_NAMES, PERSONAL_VALUES, REQUIRED_ENV, SECRET_VALUES
+from tests.privacy import FAKE_API_ID, FAKE_OWNER_TELEGRAM_ID, assert_absent
 
 
 def test_loads_from_env(full_env: dict[str, str]) -> None:
     settings = load_settings(env_file=None)
 
-    assert settings.telegram_api_id == 2468013
-    assert settings.owner_telegram_id == 987654321
+    assert settings.telegram_api_id == FAKE_API_ID
+    assert settings.owner_telegram_id == FAKE_OWNER_TELEGRAM_ID
     assert settings.userbot_session_path == Path("/data/session/userbot")
     assert settings.bot_token.get_secret_value() == "123:bot-token-secret"
     assert settings.database_url.get_secret_value().startswith("postgresql+asyncpg://")
@@ -200,7 +201,7 @@ def test_safe_summary_has_no_secret_and_no_personal_identifier(full_env: dict[st
         assert name not in summary
     rendered = json.dumps(summary)
     for value in (*SECRET_VALUES, *PERSONAL_VALUES):
-        assert value not in rendered
+        assert_absent(value, rendered)
 
 
 def test_every_setting_is_either_logged_or_deliberately_withheld() -> None:

@@ -27,6 +27,7 @@ from tests.bot.fakes import (
     message_update,
     recording_bot,
 )
+from tests.privacy import assert_absent
 from tests.services.fakes import InMemoryModes
 from tests.userbot.fakes import InMemoryContacts
 
@@ -132,7 +133,7 @@ async def test_a_message_from_a_stranger_gets_no_reply_and_changes_nothing(
     assert (await rig.current()).status is ContactStatus.PENDING
     assert rig.contacts.status_changes == []
     logged = "".join(f"{r.getMessage()} {r.__dict__}" for r in caplog.records)
-    assert str(STRANGER_ID) not in logged
+    assert_absent(STRANGER_ID, logged)
     assert STRANGER_TEXT not in logged
 
 
@@ -161,7 +162,7 @@ async def test_a_button_press_from_a_stranger_changes_nothing_and_is_not_answere
     assert (await rig.current()).status is ContactStatus.PENDING
     assert rig.contacts.status_changes == []
     logged = "".join(f"{r.getMessage()} {r.__dict__}" for r in caplog.records)
-    assert str(STRANGER_ID) not in logged
+    assert_absent(STRANGER_ID, logged)
 
 
 async def test_reply_activates_the_contact_with_the_mode_and_updates_the_card() -> None:
@@ -385,4 +386,4 @@ async def test_callbacks_log_internal_ids_and_outcomes_only(
         rig.contact.id,
         "applied",
     )
-    assert str(OWNER_ID) not in "".join(r.getMessage() + str(r.__dict__) for r in caplog.records)
+    assert_absent(OWNER_ID, "".join(r.getMessage() + str(r.__dict__) for r in caplog.records))

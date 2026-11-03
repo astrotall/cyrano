@@ -5,7 +5,7 @@ from __future__ import annotations
 from collections.abc import Sequence
 from dataclasses import dataclass
 
-from cyrano.domain.enums import ContactStatus
+from cyrano.domain.enums import ContactStatus, OutboxState
 
 
 class DomainError(Exception):
@@ -135,3 +135,47 @@ class ReplyInvalid(DomainError):
     def __init__(self, reason: str) -> None:
         super().__init__(f"the model reply is unusable: {reason}")
         self.reason = reason
+
+
+class EnqueueRefused(DomainError):
+    def __init__(self, reason: str) -> None:
+        super().__init__(f"the message was not enqueued: {reason}")
+        self.reason = reason
+
+
+class OutboxRowNotFound(DomainError):
+    def __init__(self, row_id: int) -> None:
+        super().__init__(f"outbox row {row_id} does not exist")
+        self.row_id = row_id
+
+
+class OutboxRowInvalid(DomainError):
+    def __init__(self) -> None:
+        super().__init__("the outbox row breaks a table constraint")
+
+
+class OutboxStateConflict(DomainError):
+    def __init__(self, row_id: int, state: OutboxState) -> None:
+        super().__init__(f"outbox row {row_id} is in state {state}")
+        self.row_id = row_id
+        self.state = state
+
+
+class SendFailure(DomainError):
+    def __init__(self, error_class: str) -> None:
+        super().__init__(f"the send failed: {error_class}")
+        self.error_class = error_class
+
+
+class SendRejected(SendFailure):
+    pass
+
+
+class SendUncertain(SendFailure):
+    pass
+
+
+class SendFloodWait(SendFailure):
+    def __init__(self, error_class: str, seconds: int) -> None:
+        super().__init__(error_class)
+        self.seconds = seconds

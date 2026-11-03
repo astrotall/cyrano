@@ -5,7 +5,6 @@ from __future__ import annotations
 from pathlib import Path
 
 from telethon.errors import RPCError
-from telethon.tl.functions.users import GetFullUserRequest
 
 from cyrano.domain.models import TelegramProfile
 from cyrano.services.profile_source import ProfileSourceError
@@ -22,7 +21,7 @@ class TelethonProfileSource:
     async def fetch_profile(self, tg_id: int) -> TelegramProfile:
         try:
             user = await self._client.get_entity(tg_id)
-            full = await self._client(GetFullUserRequest(user))
+            full = await self._client.get_full_user(tg_id)
         except TELETHON_FAILURES as exc:
             raise ProfileSourceError(type(exc).__name__) from None
         return TelegramProfile(

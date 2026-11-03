@@ -25,7 +25,8 @@ The skeleton (CYR-8), the storage layer (CYR-9), the userbot intake (CYR-10), th
 collection (CYR-11), the control bot with the contact card (CYR-12), the LLM client (CYR-13, not
 used by the app yet), the persona and style examples import (CYR-14, not used by the app yet) and
 the layered reply prompt with the reply generator and the `reply-preview` command (CYR-16, not
-wired into the app) exist. Everything
+wired into the app) and the outbox with the one sender and the status guard (CYR-19; only the
+owner's test command writes rows, nothing is sent automatically) exist. Everything
 else is planned and marked with its ticket key.
 Never describe planned behaviour as existing.
 
@@ -58,7 +59,7 @@ Changing any of these is a large change (see Workflow expectations). Reasons:
 | SQLAlchemy 2.x async, asyncpg, Alembic | in the project (schema, repositories, used by the intake) |
 | Ruff, mypy strict, pytest, pytest-asyncio | in the project |
 | Docker, Docker Compose, GitHub Actions, Dependabot | in the project |
-| Telethon | in the project (userbot listens, registers contacts and reads profiles; imported only in `userbot/`) |
+| Telethon | in the project (userbot listens, registers contacts, reads profiles and sends only through `userbot/adapter.py` for the sender; imported only in `userbot/`) |
 | aiogram 3 | in the project (control bot; imported only in `bot/`) |
 | DeepSeek client over plain httpx | in the project (`llm/`; the only package that imports httpx; not wired into `main.py` yet) |
 | Persona and style examples | in the project (imported from local files into PostgreSQL by commands; selectors in `services/`; not wired into `main.run` yet) |
@@ -71,19 +72,20 @@ Changing any of these is a large change (see Workflow expectations). Reasons:
 .
 ├── CLAUDE.md, CONTRIBUTING.md, README.md
 ├── pyproject.toml, uv.lock, .python-version
-├── Makefile                      includes login, login-docker, llm-check, persona-import, examples-import, examples-stats, examples-convert and reply-preview
+├── Makefile                      includes login, login-docker, llm-check, persona-import, examples-import, examples-stats, examples-convert, reply-preview, outbox-enqueue, outbox-list, outbox-cancel and outbox-retry
 ├── Dockerfile, docker-compose.yml, docker-compose.override.yml
 ├── .env.example, .dockerignore, .gitignore
 ├── alembic.ini
 ├── migrations/                   async env.py, versions/
 ├── examples/                     invented sample persona and style examples (real files go to data/)
-├── .claude/docs/                 architecture, contact-lifecycle, safety-rules, decisions, persona-and-examples, reply-generation
+├── .claude/docs/                 architecture, contact-lifecycle, safety-rules, decisions, persona-and-examples, reply-generation, outbox-and-sender
 ├── .github/                      dependabot.yml, workflows/ci.yml
 ├── src/cyrano/
 │   ├── __main__.py, main.py      entrypoint (composition root), login, llm-check, persona and examples subcommands, signals, heartbeat
 │   ├── style_cli.py              the persona and examples commands
 │   ├── convert_cli.py            the examples convert command (chat export to a draft)
 │   ├── reply_cli.py              the reply-preview command
+│   ├── outbox_cli.py             the outbox enqueue, list, cancel and retry commands
 │   ├── config.py                 Settings, load_settings, ConfigError
 │   ├── logging.py                JSON-lines logging
 │   ├── health.py                 heartbeat file and the app healthcheck
@@ -94,10 +96,11 @@ Changing any of these is a large change (see Workflow expectations). Reasons:
 │   │                             card_actions, llm_client, llm_check, style_files, style_import, persona_service,
 │   │                             style_examples, chat_export_reader, chat_redaction, chat_dialogues,
 │   │                             chat_export_converter, contact_facts, prompt_builder,
-│   │                             reply_postprocess, reply_generator; the rest is planned
-│   ├── userbot/                  Telethon: protocols, filters, handler, client, login, runner, errors,
+│   │                             reply_postprocess, reply_generator, send_guard, outbox_service, outbox_sender,
+│   │                             message_transport, owner_notifier; the rest is planned
+│   ├── userbot/                  Telethon: protocols, filters, handler, client, adapter, login, runner, errors,
 │   │                             profile_source, leomatch_source, leomatch_match
-│   ├── bot/                      aiogram: app, middleware, handlers, rendering, callbacks, sender, messages, errors
+│   ├── bot/                      aiogram: app, middleware, handlers, rendering, callbacks, sender, notifier, messages, errors
 │   ├── prompts/                  prompt texts and their pure rendering (imports only domain)
 │   ├── llm/                      DeepSeek client, retrying transport, factory; the only package that imports httpx
 │   └── worker/settings.py        Arq WorkerSettings, placeholder job
@@ -108,7 +111,7 @@ CYR-8 added the package skeleton, typed configuration, JSON logging, app process
 Arq worker skeleton, Docker Compose, CI and Dependabot. CYR-9 added `domain/`, the content of
 `db/`, `services/repositories.py`, `alembic.ini`, `migrations/`, the one-shot `migrate` compose
 service and the database tests. CYR-10 added `userbot/` (the only package that imports Telethon;
-it listens and registers, it never sends), `services/intake.py`, `services/sanitize.py`,
+it listens and registers), `services/intake.py`, `services/sanitize.py`,
 `services/contact_events.py`, the `IncomingMessage` and `NewContactEvent` models, the
 `python -m cyrano login` command with the `make login` and `make login-docker` targets, and the
 userbot tests with their fakes. CYR-11 added the profile collection: `services/profile_collector.py`
@@ -157,6 +160,17 @@ pure rendering of the system and the user message), `domain/reply.py` (`ContactF
 `python -m cyrano reply-preview` command and the `reply-preview` Makefile target, the optional
 `REPLY_HISTORY_MESSAGES` and `REPLY_PROMPT_BUDGET_CHARS` settings, and the tests. The generator
 builds and cleans one reply text; it stores nothing, sends nothing, and `main.run` does not use it.
+CYR-19 added the outbox and the one sender: `domain/outbox.py`, the `OutboxState` and `OutboxSource`
+enums, the outbox and send errors in `domain/errors.py`, the optional `AUTOPILOT_ENABLED` setting,
+migration `0003` (`scheduled_messages`), `SqlOutboxRepository` and the `OutboxRepository` Protocol,
+`services/send_guard.py`, `outbox_service.py`, `outbox_sender.py` (`OutboxSender`, started by `main.run`
+after the userbot and the control bot and cancelled first; the only caller of `send_text`),
+`message_transport.py` and `owner_notifier.py` (one-method Protocols), `userbot/adapter.py`
+(`TelethonAdapter`, the only module with a Telethon write call; the rest of `userbot/` only listens
+and reads), `UserbotAccess` and `build_access` instead of `build_client`, `get_full_user`
+instead of the generic request call on `UserbotClient`, `bot/notifier.py`, `outbox_cli.py` with the
+`outbox` commands and their Makefile targets, and the tests, with the structural scans in
+`tests/test_one_sender.py`.
 
 ## Detailed guides
 
@@ -170,6 +184,9 @@ builds and cleans one reply text; it stores nothing, sends nothing, and `main.ru
 - [reply-generation.md](.claude/docs/reply-generation.md): the layered reply prompt, the budget and
   trimming, the injection defense, reply cleaning, the `reply-preview` command, what reaches the
   provider.
+- [outbox-and-sender.md](.claude/docs/outbox-and-sender.md): the outbox table and states, claiming,
+  the guard, crash and stale semantics, error handling, the two sources and the switch, the owner's
+  commands, what is not built yet.
 - [decisions.md](.claude/docs/decisions.md): what is decided and why; open questions.
 - [CONTRIBUTING.md](CONTRIBUTING.md): branches, commits, Jira, pull requests, checks.
 

@@ -5,11 +5,14 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import os
+from dataclasses import dataclass
 from pathlib import Path
 
 from telethon import TelegramClient
 
 from cyrano.config import Settings
+from cyrano.services.message_transport import MessageTransport
+from cyrano.userbot.adapter import TelethonAdapter
 from cyrano.userbot.errors import (
     ConnectFailed,
     ConnectTimedOut,
@@ -27,6 +30,12 @@ REQUEST_TIMEOUT_SECONDS = 10
 CONNECTION_RETRIES = 3
 REQUEST_RETRIES = 3
 RETRY_DELAY_SECONDS = 1
+
+
+@dataclass(frozen=True, slots=True)
+class UserbotAccess:
+    client: UserbotClient
+    transport: MessageTransport
 
 
 def session_file(session_path: Path) -> Path:
@@ -60,9 +69,9 @@ def _telegram_client(settings: Settings) -> TelegramClient:
     )
 
 
-def build_client(settings: Settings) -> UserbotClient:
-    client: UserbotClient = _telegram_client(settings)
-    return client
+def build_access(settings: Settings) -> UserbotAccess:
+    adapter = TelethonAdapter(_telegram_client(settings))
+    return UserbotAccess(client=adapter, transport=adapter)
 
 
 def build_login_client(settings: Settings) -> LoginClient:

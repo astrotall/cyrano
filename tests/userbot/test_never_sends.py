@@ -7,7 +7,6 @@ from pathlib import Path
 
 from cyrano.userbot.protocols import (
     FullUserInfo,
-    FullUserRequestLike,
     FullUserResponse,
     HistoryMessage,
     IncomingEvent,
@@ -26,7 +25,7 @@ ALLOWED_CLIENT_MEMBERS = frozenset(
         "catch_up",
         "add_event_handler",
         "remove_event_handler",
-        "__call__",
+        "get_full_user",
         "get_entity",
         "download_profile_photo",
         "download_media",
@@ -54,10 +53,11 @@ ALLOWED_SENDER_MEMBERS = frozenset(
 )
 WRITE_NAME = re.compile(
     r"^(?:(?:send|mark|edit|delete|forward|pin|unpin|upload|react|kick|ban|block|unblock|join|"
-    r"leave|report|archive|clear|click|set|request)_\w+|"
-    r"send|reply|respond|edit|delete|forward|upload|invoke)$"
+    r"leave|report|archive|clear|click|set|request|read)_\w+|"
+    r"send|reply|respond|edit|delete|forward|upload|invoke|action|typing)$"
 )
 ALLOWED_WRITE_LOOKING_NAMES = {
+    "adapter.py": {"send_message", "send_text"},
     "login.py": {"send_code_request"},
     "protocols.py": {"send_code_request"},
 }
@@ -85,7 +85,6 @@ def test_the_profile_protocols_expose_only_read_access() -> None:
     assert _members(HistoryMessage) == ALLOWED_HISTORY_MEMBERS
     assert _members(FullUserResponse) == {"full_user"}
     assert _members(FullUserInfo) == {"about"}
-    assert _members(FullUserRequestLike) == {"id"}
 
 
 def test_the_login_protocol_is_the_only_one_that_can_ask_for_a_code() -> None:
@@ -110,7 +109,7 @@ def _used_names(path: Path) -> set[str]:
     return names
 
 
-def test_no_userbot_module_uses_a_write_looking_name() -> None:
+def test_no_userbot_module_but_the_adapter_uses_a_write_looking_name() -> None:
     modules = sorted(USERBOT_ROOT.glob("*.py"))
     assert len(modules) >= 7
     for module in modules:
@@ -144,6 +143,16 @@ def test_the_only_telegram_request_the_userbot_builds_is_the_full_user_read() ->
 
     assert {pair for pair in requested if pair[0]} == ALLOWED_TELETHON_REQUESTS
     assert {name for source, name in requested if not source} <= {"GetFullUserRequest"}
+
+
+def test_the_full_user_request_is_built_only_by_the_adapter() -> None:
+    builders = {
+        module.name
+        for module in USERBOT_ROOT.glob("*.py")
+        if any(name.endswith(REQUEST_CLASS_SUFFIX) for _, name in _telethon_requests(module))
+    }
+
+    assert builders == {"adapter.py"}
 
 
 def test_the_request_scan_catches_a_send_request(tmp_path: Path) -> None:

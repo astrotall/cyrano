@@ -5,14 +5,13 @@ from pathlib import Path
 
 import pytest
 from telethon.errors import FloodWaitError, UserPrivacyRestrictedError
-from telethon.tl.functions.users import GetFullUserRequest
 
 from cyrano.services.profile_source import ProfileSource, ProfileSourceError
 from cyrano.userbot.profile_source import TelethonProfileSource
 from tests.userbot.fakes import FakeClient, FakeSender
 
 TG_ID = 5001
-READ_METHODS = {"get_entity", "request", "download_profile_photo"}
+READ_METHODS = {"get_entity", "get_full_user", "download_profile_photo"}
 
 
 def _client(
@@ -36,9 +35,8 @@ async def test_the_username_name_and_bio_are_fetched() -> None:
     profile = await TelethonProfileSource(client).fetch_profile(TG_ID)
 
     assert (profile.username, profile.display_name, profile.bio) == ("fake_user", "A B", "fake bio")
-    assert client.calls == ["get_entity", "request"]
-    assert len(client.requests) == 1
-    assert isinstance(client.requests[0], GetFullUserRequest)
+    assert client.calls == ["get_entity", "get_full_user"]
+    assert client.full_user_requests == [TG_ID]
 
 
 async def test_missing_username_names_and_bio_become_none() -> None:

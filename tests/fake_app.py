@@ -8,9 +8,10 @@ from cyrano import main as main_module
 from cyrano.config import load_settings
 from cyrano.logging import configure_logging
 from cyrano.main import run
-from cyrano.userbot.protocols import UserbotClient
+from cyrano.userbot.client import UserbotAccess
 from tests.bot.fakes import fake_control_bot_class
 from tests.services.fakes import InMemoryModes
+from tests.services.outbox_fakes import InMemoryOutbox, ScriptedTransport
 from tests.userbot.fakes import FakeClient, InMemoryContacts, InMemoryMessages
 
 HANGING_CONNECT_SCENARIO = "hanging-connect"
@@ -26,12 +27,12 @@ class _AnnouncingHangingClient(FakeClient):
         await super().connect()
 
 
-def _fake_client(_: object) -> UserbotClient:
-    return FakeClient()
+def _fake_client(_: object) -> UserbotAccess:
+    return UserbotAccess(client=FakeClient(), transport=ScriptedTransport())
 
 
-def _hanging_client(_: object) -> UserbotClient:
-    return _AnnouncingHangingClient()
+def _hanging_client(_: object) -> UserbotAccess:
+    return UserbotAccess(client=_AnnouncingHangingClient(), transport=ScriptedTransport())
 
 
 def _in_memory_contacts(_: object) -> InMemoryContacts:
@@ -46,6 +47,10 @@ def _in_memory_modes(_: object) -> InMemoryModes:
     return InMemoryModes()
 
 
+def _in_memory_outbox(_: object) -> InMemoryOutbox:
+    return InMemoryOutbox()
+
+
 def main(argv: list[str]) -> int:
     settings = load_settings(env_file=None)
     configure_logging(settings.log_level, settings.library_log_levels)
@@ -54,6 +59,7 @@ def main(argv: list[str]) -> int:
         patch.object(main_module, "SqlContactRepository", _in_memory_contacts),
         patch.object(main_module, "SqlMessageRepository", _in_memory_messages),
         patch.object(main_module, "SqlModeRepository", _in_memory_modes),
+        patch.object(main_module, "SqlOutboxRepository", _in_memory_outbox),
         patch.object(main_module, "ControlBot", fake_control_bot_class()),
     ):
         asyncio.run(run(settings, client_factory=factory))

@@ -219,6 +219,7 @@ def test_every_setting_is_either_logged_or_deliberately_withheld() -> None:
         "style_examples_max",
         "reply_history_messages",
         "reply_prompt_budget_chars",
+        "autopilot_enabled",
     }
 
     assert set(Settings.model_fields) == set(LOGGED_SETTINGS) | withheld
@@ -365,3 +366,30 @@ def test_empty_reply_settings_count_as_unset(
     settings = load_settings(env_file=None)
 
     assert (settings.reply_history_messages, settings.reply_prompt_budget_chars) == (20, 24000)
+
+
+def test_autopilot_is_off_unless_it_is_switched_on(full_env: dict[str, str]) -> None:
+    assert load_settings(env_file=None).autopilot_enabled is False
+
+
+@pytest.mark.parametrize(
+    ("value", "expected"), [("true", True), ("1", True), ("false", False), ("0", False)]
+)
+def test_autopilot_reads_booleans(
+    full_env: dict[str, str], monkeypatch: pytest.MonkeyPatch, value: str, expected: bool
+) -> None:
+    monkeypatch.setenv("AUTOPILOT_ENABLED", value)
+
+    assert load_settings(env_file=None).autopilot_enabled is expected
+
+
+def test_a_nonsense_autopilot_value_is_a_readable_error_without_the_value(
+    full_env: dict[str, str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("AUTOPILOT_ENABLED", "nonsense-marker-zq")
+
+    with pytest.raises(ConfigError) as raised:
+        load_settings(env_file=None)
+
+    assert "AUTOPILOT_ENABLED" in str(raised.value)
+    assert "nonsense-marker-zq" not in str(raised.value)

@@ -1,9 +1,10 @@
 # Safety rules
 
-**All rules below are planned until their tickets land, except where a rule says it exists.** As of
-CYR-10 nothing sends messages to contacts: the userbot only listens, and a test proves it (S1 and
-S2). S8 is enforced since CYR-12. The other rules are not enforced by code yet; they are the
-contract that the tickets must implement and test. Changing or dropping a rule is a large change (see [CLAUDE.md](../../CLAUDE.md)) and ships
+**All rules below are planned until their tickets land, except where a rule says it exists.** S1
+and S2 are enforced since CYR-19: one guarded sender is the only way to a contact, and nothing
+writes to the outbox except the owner's explicit test command, so nothing is sent automatically.
+S8 is enforced since CYR-12. S5 is enforced in part: flood waits since CYR-19. The other rules are
+not enforced by code yet; they are the contract that the tickets must implement and test. Changing or dropping a rule is a large change (see [CLAUDE.md](../../CLAUDE.md)) and ships
 with the code and the test ([CONTRIBUTING.md](../../CONTRIBUTING.md)). Statuses:
 [contact-lifecycle.md](contact-lifecycle.md).
 
@@ -15,31 +16,45 @@ only.
 - **Rule:** an automatic reply is sent only to a contact in status `active`. The status is checked
   when the reply is scheduled and again right before it is sent.
 - **Why:** replying to someone the owner has not approved is the worst failure of the product.
-- **Enforced where:** the status guard inside the sender (CYR-19); the scheduling check in the
-  worker job (CYR-17, CYR-19). Exists today (CYR-10): the userbot sends nothing at all, so no
-  reply can reach a contact in any status; see the structural test under S2.
-- **How it is tested:** every status other than `active` gets no send; status changed from
-  `active` to `paused` between scheduling and sending gets no send; contact missing at send time.
-  Exists today: the structural test "the userbot never sends" (S2).
+- **Enforced where:** exists (CYR-19). `services/send_guard.py` runs twice: in
+  `OutboxService.enqueue`, which refuses without storing anything, and in `OutboxSender` right before
+  sending, on a contact it has just re-read; a refusal there cancels the row and nothing is sent. An
+  `autopilot` row also needs `AUTOPILOT_ENABLED`; a `manual_test` row does not, but the status check
+  applies to it. Planned: the worker job that schedules automatic replies (CYR-17). Details:
+  [outbox-and-sender.md](outbox-and-sender.md).
+- **How it is tested:** exists. `tests/services/test_send_guard.py` runs the guard over every status,
+  source and switch value and an unknown contact, and proves a refused enqueue stores nothing.
+  `tests/services/test_outbox_sender.py` proves on real PostgreSQL that a contact that became `paused`
+  or `ignored` after the enqueue, a `new` or `pending` contact, a contact missing at send time and an
+  `autopilot` row with the switch off all get no transport call.
 
 ## S2. One sender is the only way out
 
 - **Rule:** every outgoing message goes through the sender. No other code path sends. This
   includes replies, proactive messages and reminders to contacts.
 - **Why:** guards, limits and pacing can only be trusted if they cannot be bypassed.
-- **Enforced where:** the sender in `services` (guard CYR-19, humanization CYR-18, limits CYR-22);
-  the import rules in [architecture.md](architecture.md); review. Exists today (CYR-10): the
-  userbot is structurally unable to send. The client Protocol it is typed against
-  (`UserbotClient` in `userbot/protocols.py`) has no write method, and Telethon is imported only
-  inside `userbot/`.
-- **How it is tested:** each guard has its own tests through the sender. Exists today
-  (`tests/userbot/test_never_sends.py`): the members of `UserbotClient`, `IncomingEvent` and
-  `SenderLike` are compared with an allowlist, so a new write method fails the test; every module of
-  the userbot package is scanned for write-looking Telegram names (`send_*`, `mark_*`, `edit_*`,
-  `delete_*`, `reply`, `respond` and so on), with `send_code_request` in `login.py` as the single
-  allowed exception (it asks Telegram for a login code, it sends no message); and the handler tests
-  run with a fake client and fake events whose write methods record the attempt and raise. When the
-  sender lands (CYR-19) the scan stays and the sender's own module is the only place allowed to send.
+- **Enforced where:** exists (CYR-19). `OutboxSender` in `services/outbox_sender.py` is the only
+  caller of `MessageTransport.send_text`, and `TelethonAdapter` in `userbot/adapter.py` is the only
+  module with a Telethon write call. The read Protocol `UserbotClient` has no write method and no
+  generic request call, so code typed against it cannot send, and the transport has exactly one
+  method. Telethon is imported only inside `userbot/`. A send with an unknown outcome is never retried
+  automatically, because the contact could receive the message twice: the transport is called once for
+  the row, and the owner checks the chat and decides. Planned in the sender: humanization (CYR-18) and
+  limits (CYR-22).
+- **How it is tested:** exists, as structural tests that fail on a new way out.
+  `tests/test_one_sender.py` scans the syntax tree of all of `src`: only the sender module calls
+  `send_text`, also through `getattr`; only the adapter and the Protocol define it; outside `bot/` only
+  the adapter uses a Telethon write method (`send_message`, `send_file`, `forward_messages`,
+  `edit_message`, `delete_messages`, `send_read_acknowledge`, `action` and similar); inside `bot/` only
+  the two owner-chat modules send; Telethon request classes are imported only by the adapter and only
+  from the allowlist (`GetFullUserRequest`); nothing outside `userbot/` imports Telethon and nothing
+  outside `bot/` imports aiogram; `UserbotClient` has no write member; `MessageTransport` has exactly
+  `send_text`. A last test proves the scans catch a planted violation.
+  `tests/userbot/test_never_sends.py` still compares the members of `UserbotClient`, `IncomingEvent` and
+  `SenderLike` with an allowlist, scans every userbot module for write-looking names, with the adapter's
+  `send_message` and `send_text` and `send_code_request` in `login.py` (it asks Telegram for a login
+  code) as the only allowed ones, and runs the handler tests with fakes whose write methods record the
+  attempt and raise.
 
 ## S3. Stop-triggers hand over
 
@@ -67,9 +82,13 @@ only.
 - **Rule:** sending is rate limited centrally, and Telegram's FloodWait is handled in the sender
   by waiting or giving up cleanly, never by hammering.
 - **Why:** account limits and bans are a main risk.
-- **Enforced where:** the sender (CYR-22).
-- **How it is tested:** limit reached delays or refuses the send; a FloodWait error from the fake
-  Telegram client is honoured; no send happens during the wait.
+- **Enforced where:** flood-wait rescheduling exists (CYR-19): `OutboxSender` puts the row back at
+  now + the wait + 5 s and notifies the owner above 60 s; no other failure is rescheduled. The
+  per-minute and daily limits are planned and come with CYR-22, in the sender.
+- **How it is tested:** exists for flood waits: `tests/services/test_outbox_sender.py` proves on real
+  PostgreSQL that the row is not sent during the wait and is sent after it, and
+  `tests/test_one_sender.py` proves that only the flood-wait handler reschedules. Planned (CYR-22): a
+  reached limit delays or refuses the send.
 
 ## S6. Humanized pacing and quiet hours
 
@@ -130,6 +149,7 @@ only.
   command that reads a file and writes a file, never logs or prints a message text, a name, a
   sender id or a number (only counts), and writes the draft only under `data/` unless the owner
   passes `--allow-any-path`.
+  Owner notifications about the outbox (CYR-19) carry internal ids, class names and seconds only.
 - **Why:** the data belongs to real people.
 - **Enforced where:** exists today: `.gitignore` and `.dockerignore` exclude `.env`, `*.session`,
   `media/` and `data/` (profile photos live under `MEDIA_DIR`, `.env.example` and compose put it

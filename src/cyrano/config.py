@@ -108,6 +108,7 @@ class Settings(BaseSettings):
         ge=MIN_REPLY_PROMPT_BUDGET_CHARS,
         le=MAX_REPLY_PROMPT_BUDGET_CHARS,
     )
+    autopilot_enabled: bool = False
 
     @field_validator(
         "log_level",

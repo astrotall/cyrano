@@ -18,7 +18,8 @@ from tests.db.conftest import ALEMBIC_INI, execute, fetch_all
 
 FIRST_REVISION_TABLES = {"contacts", "messages", "modes"}
 STYLE_TABLES = {"persona", "style_examples"}
-TABLES = FIRST_REVISION_TABLES | STYLE_TABLES
+OUTBOX_TABLE = "scheduled_messages"
+TABLES = FIRST_REVISION_TABLES | STYLE_TABLES | {OUTBOX_TABLE}
 ENUM_TYPES = {"contact_status", "message_direction"}
 TIMESTAMP_COLUMNS = {
     ("contacts", "created_at"),
@@ -29,6 +30,10 @@ TIMESTAMP_COLUMNS = {
     ("modes", "updated_at"),
     ("persona", "updated_at"),
     ("style_examples", "created_at"),
+    ("scheduled_messages", "send_at"),
+    ("scheduled_messages", "claimed_at"),
+    ("scheduled_messages", "created_at"),
+    ("scheduled_messages", "updated_at"),
 }
 EXPECTED_CONSTRAINTS = {
     "pk_contacts",
@@ -43,8 +48,18 @@ EXPECTED_CONSTRAINTS = {
     "ck_persona_single_row",
     "pk_style_examples",
     "uq_style_examples_content_hash",
+    "pk_scheduled_messages",
+    "fk_scheduled_messages_contact_id_contacts",
+    "ck_scheduled_messages_text_not_empty",
+    "ck_scheduled_messages_state_allowed",
+    "ck_scheduled_messages_source_allowed",
 }
-EXPECTED_INDEXES = {"ix_contacts_status", "ix_messages_contact_id_created_at"}
+EXPECTED_INDEXES = {
+    "ix_contacts_status",
+    "ix_messages_contact_id_created_at",
+    "ix_scheduled_messages_state_send_at",
+}
+PARTIAL_UNIQUE_INDEX = "uq_scheduled_messages_contact_id_trigger_message_id"
 
 
 async def _tables(url: URL) -> set[object]:
@@ -128,10 +143,46 @@ async def test_revision_0002_downgrades_to_0001_without_touching_the_first_table
 async def test_revision_0002_follows_0001(alembic_config: Config) -> None:
     script = ScriptDirectory.from_config(alembic_config)
 
-    assert script.get_heads() == ["0002"]
     revision = script.get_revision("0002")
     assert revision is not None
     assert revision.down_revision == "0001"
+
+
+async def test_revision_0003_is_the_head_and_follows_0002(alembic_config: Config) -> None:
+    script = ScriptDirectory.from_config(alembic_config)
+
+    assert script.get_heads() == ["0003"]
+    revision = script.get_revision("0003")
+    assert revision is not None
+    assert revision.down_revision == "0002"
+
+
+async def test_revision_0003_downgrades_to_0002_and_upgrades_again(
+    database_url: URL, alembic_config: Config
+) -> None:
+    await asyncio.to_thread(command.upgrade, alembic_config, "head")
+    assert OUTBOX_TABLE in await _tables(database_url)
+
+    await asyncio.to_thread(command.downgrade, alembic_config, "0002")
+
+    assert await _tables(database_url) == FIRST_REVISION_TABLES | STYLE_TABLES
+
+    await asyncio.to_thread(command.upgrade, alembic_config, "head")
+
+    assert await _tables(database_url) == TABLES
+
+
+async def test_the_outbox_unique_index_covers_only_rows_with_a_trigger(migrated_url: URL) -> None:
+    rows = await fetch_all(
+        migrated_url,
+        "SELECT indexdef FROM pg_indexes WHERE indexname = :name",
+        {"name": PARTIAL_UNIQUE_INDEX},
+    )
+
+    definition = str(rows[0][0])
+    assert "UNIQUE" in definition
+    assert "(contact_id, trigger_message_id)" in definition
+    assert "WHERE (trigger_message_id IS NOT NULL)" in definition
 
 
 async def test_style_columns_have_the_expected_types(migrated_url: URL) -> None:

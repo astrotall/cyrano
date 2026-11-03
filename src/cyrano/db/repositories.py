@@ -5,7 +5,7 @@ from __future__ import annotations
 from collections.abc import Sequence
 from datetime import datetime
 
-from sqlalchemy import delete, func, select
+from sqlalchemy import delete, func, select, update
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -16,16 +16,20 @@ from cyrano.db.models import (
     MessageRow,
     ModeRow,
     PersonaRow,
+    ScheduledMessageRow,
     StyleExampleRow,
 )
 from cyrano.db.session import SessionFactory
-from cyrano.domain.enums import ContactStatus
+from cyrano.domain.enums import ContactStatus, MessageDirection, OutboxSource, OutboxState
 from cyrano.domain.errors import (
     ContactAlreadyExists,
     ContactNotFound,
     DefaultModeUnavailable,
     ModeAlreadyExists,
     ModeNotFound,
+    OutboxRowInvalid,
+    OutboxRowNotFound,
+    OutboxStateConflict,
 )
 from cyrano.domain.models import (
     DEFAULT_MODE_NAME,
@@ -37,6 +41,7 @@ from cyrano.domain.models import (
     Mode,
     ModeCreate,
 )
+from cyrano.domain.outbox import ScheduledMessage
 from cyrano.domain.style import ExamplesAddResult, Persona, StyleExample, StyleExampleCreate
 from cyrano.domain.transitions import transition_needed
 
@@ -316,3 +321,211 @@ class SqlStyleExampleRepository:
             .returning(StyleExampleRow.id)
         )
         return len((await session.scalars(statement)).all())
+
+
+def _require_aware(moment: datetime) -> None:
+    if moment.utcoffset() is None:
+        msg = "an outbox time must be timezone-aware"
+        raise ValueError(msg)
+
+
+async def _locked_outbox_row(session: AsyncSession, row_id: int) -> ScheduledMessageRow:
+    row = await session.get(ScheduledMessageRow, row_id, with_for_update=True)
+    if row is None:
+        raise OutboxRowNotFound(row_id)
+    return row
+
+
+def _require_state(row: ScheduledMessageRow, *allowed: OutboxState) -> None:
+    if row.state not in allowed:
+        raise OutboxStateConflict(row.id, row.state)
+
+
+class SqlOutboxRepository:
+    def __init__(self, session_factory: SessionFactory) -> None:
+        self._session_factory = session_factory
+
+    async def enqueue(
+        self,
+        contact_id: int,
+        text: str,
+        send_at: datetime,
+        source: OutboxSource,
+        trigger_message_id: int | None = None,
+    ) -> ScheduledMessage:
+        _require_aware(send_at)
+        insert_new = (
+            insert(ScheduledMessageRow)
+            .values(
+                contact_id=contact_id,
+                trigger_message_id=trigger_message_id,
+                text=text,
+                source=source,
+                send_at=send_at,
+            )
+            .on_conflict_do_nothing(
+                index_elements=[
+                    ScheduledMessageRow.contact_id,
+                    ScheduledMessageRow.trigger_message_id,
+                ],
+                index_where=ScheduledMessageRow.trigger_message_id.is_not(None),
+            )
+            .returning(ScheduledMessageRow)
+        )
+        select_existing = select(ScheduledMessageRow).where(
+            ScheduledMessageRow.contact_id == contact_id,
+            ScheduledMessageRow.trigger_message_id == trigger_message_id,
+        )
+        try:
+            async with self._session_factory.begin() as session:
+                if await session.get(ContactRow, contact_id) is None:
+                    raise ContactNotFound(contact_id)
+                row = await session.scalar(insert_new)
+                if row is None:
+                    row = (await session.scalars(select_existing)).one()
+                return ScheduledMessage.model_validate(row)
+        except IntegrityError:
+            raise OutboxRowInvalid from None
+
+    async def get(self, row_id: int) -> ScheduledMessage | None:
+        async with self._session_factory() as session:
+            row = await session.get(ScheduledMessageRow, row_id)
+            return None if row is None else ScheduledMessage.model_validate(row)
+
+    async def claim_due(self, now: datetime) -> ScheduledMessage | None:
+        _require_aware(now)
+        due = (
+            select(ScheduledMessageRow)
+            .where(
+                ScheduledMessageRow.state == OutboxState.SCHEDULED,
+                ScheduledMessageRow.send_at <= now,
+            )
+            .order_by(ScheduledMessageRow.send_at, ScheduledMessageRow.id)
+            .limit(1)
+            .with_for_update(skip_locked=True)
+        )
+        async with self._session_factory.begin() as session:
+            row = await session.scalar(due)
+            if row is None:
+                return None
+            row.state = OutboxState.SENDING
+            row.claimed_at = now
+            await session.flush()
+            return ScheduledMessage.model_validate(row)
+
+    async def reschedule(
+        self, row_id: int, send_at: datetime, error_class: str | None = None
+    ) -> ScheduledMessage:
+        _require_aware(send_at)
+        async with self._session_factory.begin() as session:
+            row = await _locked_outbox_row(session, row_id)
+            _require_state(row, OutboxState.SENDING)
+            row.state = OutboxState.SCHEDULED
+            row.send_at = send_at
+            row.claimed_at = None
+            row.error_class = error_class
+            await session.flush()
+            return ScheduledMessage.model_validate(row)
+
+    async def complete_send(
+        self, row_id: int, contact_id: int, text: str, tg_message_id: int, sent_at: datetime
+    ) -> ScheduledMessage:
+        _require_aware(sent_at)
+        store_message = (
+            insert(MessageRow)
+            .values(
+                contact_id=contact_id,
+                direction=MessageDirection.OUTGOING,
+                text=text,
+                tg_message_id=tg_message_id,
+                created_at=sent_at,
+            )
+            .on_conflict_do_nothing(
+                index_elements=[MessageRow.contact_id, MessageRow.tg_message_id]
+            )
+        )
+        try:
+            async with self._session_factory.begin() as session:
+                row = await _locked_outbox_row(session, row_id)
+                await session.execute(store_message)
+                row.state = OutboxState.SENT
+                row.sent_tg_message_id = tg_message_id
+                row.error_class = None
+                await session.flush()
+                return ScheduledMessage.model_validate(row)
+        except IntegrityError:
+            raise ContactNotFound(contact_id) from None
+
+    async def mark_cancelled(self, row_id: int, reason: str) -> ScheduledMessage:
+        async with self._session_factory.begin() as session:
+            row = await _locked_outbox_row(session, row_id)
+            _require_state(row, OutboxState.SCHEDULED, OutboxState.SENDING)
+            row.state = OutboxState.CANCELLED
+            row.cancel_reason = reason
+            await session.flush()
+            return ScheduledMessage.model_validate(row)
+
+    async def cancel_scheduled(self, row_id: int, reason: str) -> ScheduledMessage:
+        async with self._session_factory.begin() as session:
+            row = await _locked_outbox_row(session, row_id)
+            _require_state(row, OutboxState.SCHEDULED)
+            row.state = OutboxState.CANCELLED
+            row.cancel_reason = reason
+            await session.flush()
+            return ScheduledMessage.model_validate(row)
+
+    async def mark_failed(self, row_id: int, error_class: str) -> ScheduledMessage:
+        async with self._session_factory.begin() as session:
+            row = await _locked_outbox_row(session, row_id)
+            _require_state(row, OutboxState.SENDING)
+            row.state = OutboxState.FAILED
+            row.error_class = error_class
+            await session.flush()
+            return ScheduledMessage.model_validate(row)
+
+    async def retry_failed(self, row_id: int, send_at: datetime) -> ScheduledMessage:
+        _require_aware(send_at)
+        async with self._session_factory.begin() as session:
+            row = await _locked_outbox_row(session, row_id)
+            _require_state(row, OutboxState.FAILED)
+            row.state = OutboxState.SCHEDULED
+            row.send_at = send_at
+            row.claimed_at = None
+            row.error_class = None
+            row.cancel_reason = None
+            await session.flush()
+            return ScheduledMessage.model_validate(row)
+
+    async def cancel_pending_for_contact(self, contact_id: int, reason: str) -> int:
+        statement = (
+            update(ScheduledMessageRow)
+            .where(
+                ScheduledMessageRow.contact_id == contact_id,
+                ScheduledMessageRow.state == OutboxState.SCHEDULED,
+            )
+            .values(state=OutboxState.CANCELLED, cancel_reason=reason)
+            .returning(ScheduledMessageRow.id)
+        )
+        async with self._session_factory.begin() as session:
+            return len((await session.scalars(statement)).all())
+
+    async def stale_sending(self, claimed_before: datetime) -> list[ScheduledMessage]:
+        _require_aware(claimed_before)
+        async with self._session_factory() as session:
+            rows = await session.scalars(
+                select(ScheduledMessageRow)
+                .where(
+                    ScheduledMessageRow.state == OutboxState.SENDING,
+                    ScheduledMessageRow.claimed_at <= claimed_before,
+                )
+                .order_by(ScheduledMessageRow.claimed_at, ScheduledMessageRow.id)
+            )
+            return [ScheduledMessage.model_validate(row) for row in rows]
+
+    async def list_rows(self, state: OutboxState | None, limit: int) -> list[ScheduledMessage]:
+        statement = select(ScheduledMessageRow).order_by(ScheduledMessageRow.id.desc()).limit(limit)
+        if state is not None:
+            statement = statement.where(ScheduledMessageRow.state == state)
+        async with self._session_factory() as session:
+            rows = await session.scalars(statement)
+            return [ScheduledMessage.model_validate(row) for row in rows]

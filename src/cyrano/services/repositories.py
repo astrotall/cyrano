@@ -6,7 +6,7 @@ from collections.abc import Sequence
 from datetime import datetime
 from typing import Protocol
 
-from cyrano.domain.enums import ContactStatus
+from cyrano.domain.enums import ContactStatus, OutboxSource, OutboxState
 from cyrano.domain.models import (
     Contact,
     ContactCreate,
@@ -16,6 +16,7 @@ from cyrano.domain.models import (
     Mode,
     ModeCreate,
 )
+from cyrano.domain.outbox import ScheduledMessage
 from cyrano.domain.style import ExamplesAddResult, Persona, StyleExample, StyleExampleCreate
 
 
@@ -79,3 +80,40 @@ class StyleExampleRepository(Protocol):
     async def count(self) -> int: ...
 
     async def delete_all(self) -> int: ...
+
+
+class OutboxRepository(Protocol):
+    async def enqueue(
+        self,
+        contact_id: int,
+        text: str,
+        send_at: datetime,
+        source: OutboxSource,
+        trigger_message_id: int | None = None,
+    ) -> ScheduledMessage: ...
+
+    async def get(self, row_id: int) -> ScheduledMessage | None: ...
+
+    async def claim_due(self, now: datetime) -> ScheduledMessage | None: ...
+
+    async def reschedule(
+        self, row_id: int, send_at: datetime, error_class: str | None = None
+    ) -> ScheduledMessage: ...
+
+    async def complete_send(
+        self, row_id: int, contact_id: int, text: str, tg_message_id: int, sent_at: datetime
+    ) -> ScheduledMessage: ...
+
+    async def mark_cancelled(self, row_id: int, reason: str) -> ScheduledMessage: ...
+
+    async def cancel_scheduled(self, row_id: int, reason: str) -> ScheduledMessage: ...
+
+    async def mark_failed(self, row_id: int, error_class: str) -> ScheduledMessage: ...
+
+    async def retry_failed(self, row_id: int, send_at: datetime) -> ScheduledMessage: ...
+
+    async def cancel_pending_for_contact(self, contact_id: int, reason: str) -> int: ...
+
+    async def stale_sending(self, claimed_before: datetime) -> list[ScheduledMessage]: ...
+
+    async def list_rows(self, state: OutboxState | None, limit: int) -> list[ScheduledMessage]: ...

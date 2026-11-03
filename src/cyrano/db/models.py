@@ -13,6 +13,7 @@ from sqlalchemy import (
     Enum,
     ForeignKey,
     Index,
+    Integer,
     MetaData,
     SmallInteger,
     Text,
@@ -24,7 +25,9 @@ from sqlalchemy import (
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
-from cyrano.domain.enums import ContactStatus, MessageDirection
+from cyrano.domain.enums import ContactStatus, MessageDirection, OutboxSource, OutboxState
+
+OUTBOX_VOCABULARY_LENGTH = 32
 
 NAMING_CONVENTION = {
     "ix": "ix_%(table_name)s_%(column_0_N_name)s",
@@ -124,3 +127,57 @@ class StyleExampleRow(Base):
     turns: Mapped[list[dict[str, str]]] = mapped_column(JSONB)
     content_hash: Mapped[str] = mapped_column(Text, unique=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
+def _allowed_values(column: str, enum_type: type[StrEnum]) -> str:
+    quoted = ", ".join(f"'{value}'" for value in _enum_values(enum_type))
+    return f"{column} IN ({quoted})"
+
+
+class ScheduledMessageRow(Base):
+    __tablename__ = "scheduled_messages"
+    __table_args__ = (
+        CheckConstraint("text <> ''", name="text_not_empty"),
+        CheckConstraint(_allowed_values("state", OutboxState), name="state_allowed"),
+        CheckConstraint(_allowed_values("source", OutboxSource), name="source_allowed"),
+        Index(
+            "uq_scheduled_messages_contact_id_trigger_message_id",
+            "contact_id",
+            "trigger_message_id",
+            unique=True,
+            postgresql_where=text("trigger_message_id IS NOT NULL"),
+        ),
+        Index(None, "state", "send_at"),
+    )
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+    contact_id: Mapped[int] = mapped_column(BigInteger, ForeignKey(ContactRow.id))
+    trigger_message_id: Mapped[int | None] = mapped_column(BigInteger)
+    text: Mapped[str] = mapped_column(Text)
+    source: Mapped[OutboxSource] = mapped_column(
+        Enum(
+            OutboxSource,
+            native_enum=False,
+            length=OUTBOX_VOCABULARY_LENGTH,
+            values_callable=_enum_values,
+        )
+    )
+    send_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    state: Mapped[OutboxState] = mapped_column(
+        Enum(
+            OutboxState,
+            native_enum=False,
+            length=OUTBOX_VOCABULARY_LENGTH,
+            values_callable=_enum_values,
+        ),
+        server_default=OutboxState.SCHEDULED.value,
+    )
+    attempts: Mapped[int] = mapped_column(Integer, server_default="0")
+    error_class: Mapped[str | None] = mapped_column(Text)
+    cancel_reason: Mapped[str | None] = mapped_column(Text)
+    claimed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    sent_tg_message_id: Mapped[int | None] = mapped_column(BigInteger)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
+    )

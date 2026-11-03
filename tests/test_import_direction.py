@@ -120,3 +120,44 @@ def test_no_module_outside_llm_and_config_mentions_the_provider() -> None:
         and "deepseek" in path.read_text().lower()
     }
     assert mentioning == {"config.py"}
+
+
+def test_prompts_import_only_the_domain_and_the_standard_library() -> None:
+    for module in _imported_modules("prompts"):
+        if module.startswith("cyrano."):
+            assert module.startswith(("cyrano.domain", "cyrano.prompts"))
+        else:
+            assert module.split(".")[0] in sys.stdlib_module_names | {"__future__"}
+
+
+def test_services_use_the_prompts_package() -> None:
+    assert any(module.startswith("cyrano.prompts") for module in _imported_modules("services"))
+
+
+def test_only_services_and_the_prompts_themselves_import_the_prompts_package() -> None:
+    importers: set[str] = set()
+    for path in SOURCE_ROOT.rglob("*.py"):
+        relative = path.relative_to(SOURCE_ROOT)
+        for node in ast.walk(ast.parse(path.read_text())):
+            names = (
+                [alias.name for alias in node.names]
+                if isinstance(node, ast.Import)
+                else [node.module]
+                if isinstance(node, ast.ImportFrom) and node.module is not None
+                else []
+            )
+            if any(name.startswith("cyrano.prompts") for name in names):
+                importers.add(relative.parts[0])
+    assert importers == {"services", "prompts"}
+
+
+def test_services_do_not_import_httpx_or_the_llm_package() -> None:
+    for module in _imported_modules("services"):
+        assert module.split(".")[0] != "httpx"
+        assert not module.startswith("cyrano.llm")
+
+
+def test_the_domain_and_the_prompts_do_not_mention_the_provider() -> None:
+    for package in ("domain", "prompts", "services"):
+        for path in (SOURCE_ROOT / package).rglob("*.py"):
+            assert "deepseek" not in path.read_text().lower()

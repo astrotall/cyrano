@@ -1,7 +1,10 @@
 # Architecture
 
-State as of CYR-14: the skeleton, the storage layer, the userbot intake, the profile collection, the
-control bot with the contact card, the LLM client and the persona with the style examples exist (the LLM client, the persona and the examples have no consumer yet). Anything else is marked **planned** with its ticket.
+State as of CYR-16: the skeleton, the storage layer, the userbot intake, the profile collection, the
+control bot with the contact card, the LLM client, the persona with the style examples and the
+layered reply prompt with the reply generator exist. The LLM client, the persona, the examples and
+the reply generator have no consumer in the running app: only the `llm-check` and `reply-preview`
+commands use them. Anything else is marked **planned** with its ticket.
 Product and decisions: [CLAUDE.md](../../CLAUDE.md). Reasons: [decisions.md](decisions.md).
 
 ## Layers
@@ -14,26 +17,30 @@ Source lives in `src/cyrano/`.
 | `bot/` | The only package that imports aiogram: the owner-only control bot. `app.py` (`ControlBot`: bot, dispatcher, polling, stop), `middleware.py` (owner-only), `handlers.py` (`/start`, the card buttons), `rendering.py` (pure card text, keyboard, decision), `callbacks.py` (callback data), `sender.py` (`TelegramCardSender`), `messages.py` (every Russian text), `errors.py` (readable fatal errors). Planned: notifications of stop-triggers and the rest of the panel (CYR-20, CYR-26) | exists for the card and its two buttons (CYR-12) |
 | `llm/` | The only package that imports httpx and the only one that knows the provider: `deepseek.py` (`DeepSeekClient`, `StepConfig`), `transport.py` (`RetryingTransport`), `factory.py` (`LLMClientFactory`), `wire.py` (the response fields it reads), `json_reply.py` (JSON extraction and validation problems), `prompts.py` (the texts it adds for JSON), `constants.py` (every number and string). See [LLM client](#llm-client-cyr-13) | exists (CYR-13); not wired into `main.py` yet, the first consumers are CYR-16, CYR-17 and CYR-25 |
 | `db/` | SQLAlchemy models (`models.py`), engine and session factory (`session.py`), repositories (`repositories.py`; CYR-14 added `SqlPersonaRepository` and `SqlStyleExampleRepository`) | exists; called by the intake (CYR-10) and by the import commands (CYR-14) |
-| `services/` | Business logic shared by userbot, bot and worker: contact lifecycle, sender, reply pipeline. `repositories.py` holds the repository Protocols, `intake.py` the `IntakeService`, `sanitize.py` the NUL-byte removal, `contact_events.py` the generic `ContactEventPublisher[T]` and `ContactEventSubscriber[T]` Protocols and the in-memory queue; CYR-11 added `profile_source.py` (the `ProfileSource` and `LeomatchSource` Protocols and `ProfileSourceError`), `leomatch.py` (the card parser) and `profile_collector.py` (`ProfileCollector`); CYR-12 added `card_sender.py` (the `CardSender` Protocol), `card_builder.py` (assembles the `ContactCard`), `card_announcer.py` (`CardAnnouncer`) and `card_actions.py` (`CardActions`); CYR-13 added `llm_client.py` (the `LLMClient` Protocol) and `llm_check.py` (`check_llm`, the request behind `llm-check`); CYR-14 added `style_files.py` (reading and validating the two import files), `style_import.py` (`PersonaImporter`, `ExamplesImporter`), `persona_service.py` (`PersonaService`) and `style_examples.py` (`ExampleSelector`, `collect_example_stats`), and the `PersonaRepository` and `StyleExampleRepository` Protocols in `repositories.py` | Protocols, intake, sanitization, events (CYR-10), the profile collector (CYR-11), the card announcer and actions (CYR-12), the LLM Protocol (CYR-13) and the persona and example services (CYR-14) exist; the rest is planned from CYR-15 on |
+| `services/` | Business logic shared by userbot, bot and worker: contact lifecycle, sender, reply pipeline. `repositories.py` holds the repository Protocols, `intake.py` the `IntakeService`, `sanitize.py` the NUL-byte removal, `contact_events.py` the generic `ContactEventPublisher[T]` and `ContactEventSubscriber[T]` Protocols and the in-memory queue; CYR-11 added `profile_source.py` (the `ProfileSource` and `LeomatchSource` Protocols and `ProfileSourceError`), `leomatch.py` (the card parser) and `profile_collector.py` (`ProfileCollector`); CYR-12 added `card_sender.py` (the `CardSender` Protocol), `card_builder.py` (assembles the `ContactCard`), `card_announcer.py` (`CardAnnouncer`) and `card_actions.py` (`CardActions`); CYR-13 added `llm_client.py` (the `LLMClient` Protocol) and `llm_check.py` (`check_llm`, the request behind `llm-check`); CYR-14 added `style_files.py` (reading and validating the two import files), `style_import.py` (`PersonaImporter`, `ExamplesImporter`), `persona_service.py` (`PersonaService`) and `style_examples.py` (`ExampleSelector`, `collect_example_stats`), and the `PersonaRepository` and `StyleExampleRepository` Protocols in `repositories.py`; CYR-16 added `contact_facts.py` (`build_contact_facts`), `prompt_builder.py` (`PromptBuilder`), `reply_postprocess.py` (`clean_reply`) and `reply_generator.py` (`ReplyGenerator`); see [Reply generation](#reply-generation-cyr-16) | Protocols, intake, sanitization, events (CYR-10), the profile collector (CYR-11), the card announcer and actions (CYR-12), the LLM Protocol (CYR-13) and the persona and example services (CYR-14) and the prompt builder and reply generator (CYR-16) exist; the rest is planned from CYR-15 on |
 | `worker/` | Arq worker: `settings.py` holds `WorkerSettings`, `startup`, `shutdown`, a placeholder `noop` job (Arq refuses to start a worker with no registered functions) | skeleton works; real jobs planned CYR-17 |
 | `config.py` | `Settings` (pydantic-settings), `load_settings`, `ConfigError` | exists |
 | `logging.py` | JSON-lines formatter, `build_log_config`, `configure_logging` | exists |
 | `health.py` | Heartbeat file, `is_alive`, `python -m cyrano.health` | exists |
-| `main.py`, `__main__.py` | App entrypoint (composition root), the `login`, `llm-check`, `persona` and `examples` subcommands, signal handling, heartbeat task | exists; the userbot is plugged in (CYR-10), the collector (CYR-11), the control bot and the announcer (CYR-12); `llm-check` builds the LLM factory (CYR-13); the persona and examples commands build the two repositories and the importers (CYR-14); `run` builds neither the LLM client nor the persona and example services yet |
+| `main.py`, `__main__.py` | App entrypoint (composition root), the `login`, `llm-check`, `persona`, `examples` and `reply-preview` subcommands, signal handling, heartbeat task | exists; the userbot is plugged in (CYR-10), the collector (CYR-11), the control bot and the announcer (CYR-12); `llm-check` builds the LLM factory (CYR-13); the persona and examples commands build the two repositories and the importers (CYR-14); `reply-preview` builds the repositories, the selector, the `PromptBuilder`, the `reply` client and the `ReplyGenerator` (CYR-16); `run` builds neither the LLM client nor the persona, example and reply services yet |
 | `style_cli.py` | The `persona` and `examples` commands: the argparse definitions, `StyleRequest` and `StyleCommands`, which receive their importers, service and repository by injection and print counts only. `main.py` builds the concrete objects | exists (CYR-14); see [Persona and style examples](#persona-and-style-examples-cyr-14) |
 | `convert_cli.py` | The `examples convert` command (CYR-34): the argparse definition, `ConvertRequest`, the report printing. `main.py` dispatches it **before** `load_settings`, so it needs no `Settings`, `.env`, database or network | exists (CYR-34); see [Chat export converter](#chat-export-converter-cyr-34) |
-| `domain/` | Leaf package, imports only pydantic and the standard library: enums, status transition rules, domain errors (the LLM errors and the import validation errors among them), Pydantic models the layers exchange (`llm.py`: `LLMMessage`, `LLMUsage`, `LLMResult`; `style.py`: `Persona`, `Turn`, `StyleExample`, `StyleExampleCreate`, the persona and example limits, the content hash; `chat_export.py`: the converter's limits, `SkipReason`, `RedactionKind`, `ConvertOptions`, `ConvertReport`; `ChatExportError`) | exists |
-| `prompts` | Prompt texts, few-shot data loading, trigger lists | planned, not created; the layered builder's location is decided in CYR-16 |
+| `reply_cli.py` | The `reply-preview` command (CYR-16): the argparse definition, `ReplyPreviewRequest`, `ReplyPreviewCommand`, which receives the `ReplyGenerator` by injection and prints the reply, one stats line and one-line errors. `main.py` builds the concrete objects | exists (CYR-16); see [Reply generation](#reply-generation-cyr-16) |
+| `domain/` | Leaf package, imports only pydantic and the standard library: enums, status transition rules, domain errors (the LLM errors, the import validation errors and the reply errors among them), Pydantic models the layers exchange (`reply.py`: `ContactFacts`, `BuiltPrompt`, `GeneratedReply` and the reply limits; `llm.py`: `LLMMessage`, `LLMUsage`, `LLMResult`; `style.py`: `Persona`, `Turn`, `StyleExample`, `StyleExampleCreate`, the persona and example limits, the content hash; `chat_export.py`: the converter's limits, `SkipReason`, `RedactionKind`, `ConvertOptions`, `ConvertReport`; `ChatExportError`) | exists |
+| `prompts/` | Prompt text only: `texts.py` (headers, instructions, labels, the dialogue boundary token) and `render.py` (pure functions that render the system and the user message). No calls, no IO; imports only `domain` | exists (CYR-16). The builder itself, with its budget logic, lives in `services/prompt_builder.py`. Planned in the same package or `config`: trigger lists (CYR-20) |
 
 `tests/` mirrors the packages (`tests/userbot`, `tests/bot`, `tests/llm`, `tests/domain`,
-`tests/db`, `tests/services`, `tests/worker`, and `tests/cli` for `style_cli.py`); the skeleton packages have empty test packages.
+`tests/db`, `tests/prompts`, `tests/services`, `tests/worker`, and `tests/cli` for `style_cli.py`,
+`convert_cli.py` and `reply_cli.py`); the skeleton packages have empty test packages.
 `tests/userbot/fakes.py` holds the fake Telethon client, event and sender; `tests/llm/fakes.py` the scripted `httpx.MockTransport` handlers.
 
 ## Import direction
 
 Enforced by review. `tests/test_import_direction.py` also checks the part that exists: `domain`
-imports only pydantic, the standard library and itself; `db` imports neither `services` nor `llm`;
-`services` imports neither `db`, `userbot` nor `bot`, nor Telethon or aiogram; `userbot` imports
+imports only pydantic, the standard library and itself; `prompts` imports only the standard library
+and `domain`; `db` imports neither `services` nor `llm`; `services` imports neither `db`, `userbot`
+nor `bot`, nor Telethon, aiogram or httpx, and not `llm`; only `services` and `prompts` import
+`prompts`; `userbot` imports
 none of `db`, `llm`, `bot`; `bot` imports none of `db`, `userbot`, `llm`; `llm` imports none of `services`, `db`, `userbot`,
 `bot`; only the `userbot` package imports `telethon`, only the `bot` package imports `aiogram`
 and only the `llm` package imports `httpx`; outside `llm` only `main.py` imports `cyrano.llm`, and
@@ -46,8 +53,8 @@ no module outside `llm` and `config.py` mentions the provider by name.
    `ModeRepository`, `db/repositories.py` satisfies them structurally, and mypy checks that in
    `tests/db/test_session.py`.
 3. `llm` and `db` never import `services` or each other.
-4. `config`, `domain` and `prompts` are leaves: they import no application layer. Any layer may
-   import them. Today `config` also imports `health` for the default heartbeat path (`health` is
+4. `config`, `domain` and `prompts` are leaves: they import no application layer (`prompts` imports
+   `domain` only). `services` use `prompts`; no other layer needs it. Today `config` also imports `health` for the default heartbeat path (`health` is
    stdlib-only), so `config` is not a pure leaf until that default moves.
 5. `main` is the composition root: the only place that builds concrete objects and passes them
    to the layers.
@@ -77,7 +84,9 @@ question in [decisions.md](decisions.md).
 | A repository interface | `services/repositories.py` |
 | Arq job functions and worker settings | `worker` |
 | A data type or rule used by several layers | `domain` |
-| Prompt text, few-shot loading, trigger lists | `prompts` (planned) or config |
+| Prompt text and the pure functions that render it | `prompts` |
+| Assembling a prompt from stored data, trimming it to a budget, cleaning a model reply | `services` (`prompt_builder.py`, `reply_postprocess.py`, `reply_generator.py`) |
+| Trigger lists | config or a dedicated module (CYR-20) |
 | Parsing or validating a persona or examples file, choosing the examples for a mode | `services` (`style_files.py`, `style_examples.py`) |
 | A command-line subcommand and its output | an injected class in a top-level module like `style_cli.py`; `main.py` parses, builds and dispatches |
 | An environment-driven setting | `config.py` and the README Settings section, together; `.env.example` too when the variable is required |
@@ -391,8 +400,9 @@ only `python -m cyrano llm-check` does.
 ## Persona and style examples (CYR-14)
 
 Data and rules for the user: [persona-and-examples.md](persona-and-examples.md). This section is the
-code map. Nothing here is wired into `main.run`, calls an LLM, builds a prompt or sends a message;
-the prompt builder (CYR-16) will consume `PersonaService` and `ExampleSelector`.
+code map. Nothing here is wired into `main.run`, calls an LLM or sends a message; the prompt
+builder (CYR-16, see [Reply generation](#reply-generation-cyr-16)) consumes `PersonaService` and
+`ExampleSelector`.
 
 | Where | What |
 | --- | --- |
@@ -461,6 +471,37 @@ writes a file: no database, no network, no Telegram, no LLM. It **needs no `Sett
   written draft through `ExamplesImporter` into the test database; one asserts that the converter
   modules import neither `config`, `db`, Telethon, aiogram nor httpx.
 
+## Reply generation (CYR-16)
+
+Rules and shapes for the reader: [reply-generation.md](reply-generation.md). This section is the
+code map and the decisions about layering. Nothing here is wired into `main.run`, writes to the
+database or sends a message.
+
+| Where | What |
+| --- | --- |
+| `prompts/texts.py`, `prompts/render.py` | Every fixed text and the pure rendering of the system and the user message |
+| `domain/reply.py`, `domain/errors.py` | The models, the limits (`MIN_HISTORY_MESSAGES` 4, `REPLY_MAX_CHARS` 600, the four fact limits) and `PersonaMissing`, `ModeNameNotFound`, `NoMessagesToReplyTo`, `PromptTooLarge`, `ReplyInvalid` |
+| `services/contact_facts.py` | `build_contact_facts(contact)`: name, age, city, about, bio, truncated; the only function that decides which profile fields reach a prompt |
+| `services/prompt_builder.py` | `PromptBuilder(budget_chars, timezone, clock)`: a synchronous `build(...)` that renders the two messages and trims examples, then the oldest messages, to the character budget |
+| `services/reply_postprocess.py` | `clean_reply`, `cap_length`: pure |
+| `services/reply_generator.py` | `ReplyGenerator`: `generate`, and `prepare` plus `complete`, its two halves |
+| `reply_cli.py`, `main.py` | The `reply-preview` command and its wiring |
+
+- **Dependencies.** `ReplyGenerator` depends on the `ContactRepository`, `MessageRepository` and
+  `ModeRepository` Protocols, `PersonaService`, `ExampleSelector`, `PromptBuilder` and the
+  `LLMClient` Protocol. It knows nothing about SQLAlchemy, httpx or the provider; `main.py` passes
+  in the client bound to the `reply` step.
+- **Where the builder lives.** The text is in `prompts` (a leaf, easy to review and to change);
+  the assembly and the budget logic are in `services`, because they decide what data reaches the
+  provider and need the domain models. `llm` stays ignorant of prompts.
+- **Clock and zone.** The builder takes a clock (`Callable[[], datetime]`) and a `ZoneInfo`
+  (`Settings.tzinfo`), so tests fix both.
+- **Tests.** `tests/prompts/`, `tests/services/test_prompt_builder.py`,
+  `test_reply_postprocess.py`, `test_contact_facts.py`, `test_prompt_snapshot.py` (one full prompt
+  from invented data against an expected text), `test_reply_generator.py` (real PostgreSQL, a
+  scripted fake client), `tests/cli/test_reply_cli.py`. All data is invented; the privacy tests use
+  the 12-digit markers of `tests/privacy.py`.
+
 ## Persistence
 
 - **Tables**: `contacts`, `messages`, `modes`; native enums `contact_status` and
@@ -524,6 +565,8 @@ the raw input. `load_settings(env_file=None)` ignores any `.env`.
 | `HTTPX_LOG_LEVEL` | no | `WARNING` | also applied to `httpcore` |
 | `LEOMATCH_BOT_USERNAME` | no | `leomatchbot` | username of the matching bot whose chat is searched for a contact's texts; a leading `@` is removed; the default is an assumption to check in Telegram; not in the startup log line |
 | `STYLE_EXAMPLES_MAX` | no | `8` | most style examples one selection returns; 1 to 50; not in the startup log line |
+| `REPLY_HISTORY_MESSAGES` | no | `20` | how many last messages of a contact the reply prompt loads; 1 to 100; not in the startup log line |
+| `REPLY_PROMPT_BUDGET_CHARS` | no | `24000` | character budget of the whole reply prompt; 4000 to 200000; not in the startup log line |
 | `HEARTBEAT_PATH` | no | `<tmpdir>/cyrano-heartbeat` | liveness file; also read straight from `os.environ` by `cyrano.health`, the one exception to hard rule 3 ([decisions.md](decisions.md)) |
 
 `TEST_DATABASE_URL` is not in this table: tests read it themselves
@@ -558,7 +601,8 @@ the raw input. `load_settings(env_file=None)` ignores any `.env`.
   `cyrano.services.contact_events`, the collector `cyrano.services.profile_collector`, the announcer
   `cyrano.services.card_announcer`, the control bot `cyrano.bot` with its submodules, the LLM
   client `cyrano.llm.deepseek` and `cyrano.llm.transport`, and the persona and example import
-  `cyrano.services.style_import` (INFO: counts only).
+  `cyrano.services.style_import` (INFO: counts only), and the reply generator
+`cyrano.services.reply_generator` (INFO: counters and token counts only, never a prompt or a reply).
 - Library loggers (`telethon`, `aiogram`, `httpx`, `httpcore`) have their own levels
   (`*_LOG_LEVEL`, default `WARNING`), independent of `LOG_LEVEL`. `httpcore` follows
   `HTTPX_LOG_LEVEL` because it is httpx's transport.
@@ -650,7 +694,8 @@ the raw input. `load_settings(env_file=None)` ignores any `.env`.
   attempt against the deadline, no httpx exception leaking, the backoff values through a fake
   sleep), the per-step settings and their validation, the logs, `llm-check` with a fake client and
   with a mocked transport, and the import direction for httpx and the provider. `FakeLLMClient` in
-  `tests/services/fakes.py` is the scripted fake for the consumers (CYR-16, CYR-17, CYR-25).
+  `tests/services/fakes.py` is the fake for the consumers (CYR-16, CYR-17, CYR-25);
+  `ScriptedLLMClient` there replays a list of replies and errors.
   CYR-14 added: the domain models (limits at, under and over the boundary, tag normalization, the
   content hash, validation errors without input values), the file validation (every rule violated
   once, 20 problems at most printed, invalid JSON, a missing, oversized, non-UTF-8 file and a
@@ -661,6 +706,18 @@ the raw input. `load_settings(env_file=None)` ignores any `.env`.
   `0002` (upgrade, downgrade to `0001`, no drift), the new setting, the sample files against the real
   validators with the `.gitignore` and `.dockerignore` content, and a captured full import that
   must not contain any sample text.
+  CYR-16 added: the layered prompt (order and headers, every optional layer omitted when absent, the
+  facts allowlist and truncation, the summary slot with a fake text, the dialogue block with roles,
+  order, multi-line messages, the boundary token removed even when rebuilt from pieces, an injection
+  attempt staying inside the block, the date line from an injected clock and zone), the budget
+  (examples dropped first from the end, then the oldest messages, never below the minimum, counters,
+  the persona untouched, `PromptTooLarge`, no incoming message, a last outgoing message), the reply
+  cleaning (every rule and combinations, the cap at a sentence boundary, the refusals), the
+  generator on real PostgreSQL with a scripted fake client (the exact two messages, mode fallback,
+  every error, no database writes, captured logs without any invented text or marker), one prompt
+  snapshot, the `reply-preview` command (format, `--show-prompt`, each error and exit code, no row
+  changes, through `main` with a mocked provider), the new settings and the import direction for
+  `prompts`.
 - Failure cases to cover for new behaviour:
   empty input, malformed Telegram event, invalid LLM JSON, status changed between scheduling and
   sending, FloodWait.
@@ -668,6 +725,5 @@ the raw input. `load_settings(env_file=None)` ignores any `.env`.
 ## Open design questions
 
 Listed in [decisions.md](decisions.md) under "Open questions": how the worker sends through the
-userbot session, worker reconnect to Redis, where the layered prompt builder lives, how the persona
-and the examples share the prompt's token budget, whether `bot`,
-`userbot` and `worker` may import each other, and the Leomatch cases not yet observed (a card with a description, search, the caption position and message order inside an album, a video card).
+userbot session, worker reconnect to Redis, tuning the reply instructions on real outputs, whether
+`bot`, `userbot` and `worker` may import each other, and the Leomatch cases not yet observed (a card with a description, search, the caption position and message order inside an album, a video card).

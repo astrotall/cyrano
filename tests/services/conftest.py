@@ -9,6 +9,7 @@ from tests.db.conftest import (
     session_factory,
     style_examples,
 )
+from tests.reply_db import repos
 
 __all__ = [
     "alembic_config",
@@ -18,6 +19,7 @@ __all__ = [
     "migrated_url",
     "modes",
     "personas",
+    "repos",
     "session_factory",
     "style_examples",
 ]

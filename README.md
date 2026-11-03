@@ -172,7 +172,7 @@ nothing to contacts.
 
 ### Code layers
 
-Import direction (enforced by review, and by a test for `domain`, `db`, `services`, `userbot` and
+Import direction (enforced by review, and by a test for `domain`, `prompts`, `db`, `services`, `userbot` and
 `bot`; `userbot` is the only package that may import Telethon and `bot` the only one that may
 import aiogram; full rules in
 [.claude/docs/architecture.md](.claude/docs/architecture.md)):
@@ -205,7 +205,8 @@ import aiogram; full rules in
 | Control bot | aiogram 3 | now (owner-only, contact card with Reply and Ignore) |
 | ORM and migrations | SQLAlchemy 2.x (async), asyncpg, Alembic | now (schema and repositories, used by the intake) |
 | LLM client | DeepSeek over plain httpx, no SDK | now (client, retries, `make llm-check`; not wired into the app yet) |
-| Persona and style examples | Imported from local files, stored in PostgreSQL | now (import commands and selectors; not used by the app yet) |
+| Persona and style examples | Imported from local files, stored in PostgreSQL | now (import commands and selectors; used by the reply preview only) |
+| Reply prompt | Layered prompt builder, reply cleaning, `reply-preview` command | now (nothing in the app generates a reply by itself yet) |
 | Lint, format | Ruff | now |
 | Types | mypy strict with the Pydantic plugin | now |
 | Tests | pytest, pytest-asyncio | now |
@@ -225,7 +226,7 @@ What exists now:
 ├── pyproject.toml                # dependencies, Ruff, mypy, pytest config
 ├── uv.lock
 ├── .python-version               # 3.14
-├── Makefile                      # install, check, test, fmt, up, down, logs, migrate, revision, db-up, login, login-docker, llm-check, persona-import, examples-import, examples-stats, examples-convert
+├── Makefile                      # install, check, test, fmt, up, down, logs, migrate, revision, db-up, login, login-docker, llm-check, persona-import, examples-import, examples-stats, examples-convert, reply-preview
 ├── Dockerfile                    # multi-stage, non-root runtime
 ├── docker-compose.yml            # app, worker, one-shot migrate, postgres, redis
 ├── docker-compose.override.yml   # dev: Postgres and Redis on 127.0.0.1, media in ./data/media
@@ -241,6 +242,7 @@ What exists now:
 │   ├── architecture.md           # layers, import rules, processes, config, logging
 │   ├── contact-lifecycle.md      # statuses, transitions, message flow
 │   ├── persona-and-examples.md   # persona and style examples: formats, limits, commands, privacy
+│   ├── reply-generation.md       # the layered prompt, the budget, the reply cleaning, reply-preview
 │   ├── safety-rules.md           # S1..S10
 │   └── decisions.md              # decided and open
 ├── .github/
@@ -251,12 +253,14 @@ What exists now:
 │   ├── main.py                   # app entrypoint, login, llm-check, persona and examples subcommands, signals, heartbeat
 │   ├── style_cli.py              # the persona and examples commands
 │   ├── convert_cli.py            # examples convert: Telegram Desktop export to a draft examples file
+│   ├── reply_cli.py              # reply-preview: generate one reply for a stored conversation
 │   ├── config.py                 # Settings, load_settings, ConfigError
 │   ├── logging.py                # JSON-lines logging
 │   ├── health.py                 # heartbeat file and the app healthcheck
 │   ├── userbot/                  # Telethon: protocols, filters, handler, client, login, runner, profile and Leomatch readers
 │   ├── bot/                      # aiogram: owner-only middleware, handlers, card rendering, card sender, polling
 │   ├── llm/                      # DeepSeek client, retrying transport, factory (the only package that imports httpx)
+│   ├── prompts/                  # prompt texts and their pure rendering (imports only domain)
 │   ├── domain/                   # enums, status transition rules, errors, Pydantic models
 │   ├── db/                       # SQLAlchemy models, engine and sessions, repositories
 │   ├── services/
@@ -277,6 +281,10 @@ What exists now:
 │   │   ├── chat_redaction.py     # replaces e-mails, phones, links, usernames and names with tokens
 │   │   ├── chat_dialogues.py     # conversations, turns, dialogue candidates, sampling
 │   │   ├── chat_export_converter.py # the conversion and the guarded, atomic write of the draft
+│   │   ├── contact_facts.py      # the profile facts that may reach a prompt
+│   │   ├── prompt_builder.py     # PromptBuilder: the layered prompt and the budget trimming
+│   │   ├── reply_postprocess.py  # cleaning of the model reply
+│   │   ├── reply_generator.py    # ReplyGenerator: build, call the LLM, clean
 │   │   ├── card_builder.py       # the owner's card from the stored contact
 │   │   ├── card_sender.py        # CardSender Protocol
 │   │   ├── card_announcer.py     # CardAnnouncer: card to the owner, new -> pending
@@ -454,6 +462,7 @@ The app connects to Telegram as the userbot and polls the control bot, and conne
 | `make login-docker` | The same inside the compose image and volume |
 | `make persona-import FILE=...`, `make examples-import FILE=...`, `make examples-stats` | Import the persona text, import style examples from JSON, print counts per tag (see [Persona and style examples](#persona-and-style-examples)) |
 | `make examples-convert INPUT=... ME=... \| ME_ID=... [OUT=...]` | Convert a Telegram Desktop JSON chat export into a draft examples file; give exactly one of `ME` and `ME_ID`; needs no `.env` and no database |
+| `make reply-preview CONTACT=... [MODE=...]` | Generate one reply for a stored conversation and print it with a stats line; sends nothing, writes nothing (see [Previewing a reply](#previewing-a-reply)) |
 | `make llm-check` | Send one tiny request to DeepSeek with the `reply` settings and print the result (see [Checking the LLM key](#checking-the-llm-key)) |
 
 ### Checking the LLM key
@@ -482,7 +491,7 @@ never answers can take about four minutes to fail.
 
 The persona (one text that describes the owner) and the style examples (real dialogues that end
 with the owner's reply) are imported by a command and stored in PostgreSQL; the app never reads a
-file for them. Nothing in the app uses them yet. Formats, limits, selection and privacy rules:
+file for them. Only `reply-preview` uses them so far. Formats, limits, selection and privacy rules:
 [.claude/docs/persona-and-examples.md](.claude/docs/persona-and-examples.md). Samples with invented
 content are in `examples/`.
 
@@ -518,6 +527,19 @@ Importing the same examples again skips the dialogues already stored. An invalid
 nothing and the command prints up to 20 problems as locations and rules (for example
 `dialogues[3].turns[1].text: empty`), never the text. Every command exits with 0, or with 1 and a
 readable message on an error. `STYLE_EXAMPLES_MAX` limits how many examples one selection returns.
+
+### Previewing a reply
+
+`make reply-preview CONTACT=<contact id> [MODE=<mode name>]` (or
+`uv run python -m cyrano reply-preview ID [--mode NAME] [--show-prompt]`) builds the layered prompt
+from the persona, the mode, the contact's profile facts, the examples and the last messages of a
+stored conversation, asks the LLM for the owner's next message and prints it, followed by one stats
+line (model, tokens, examples and messages kept of offered, prompt characters). It lets the owner
+judge the style before any autopilot exists. It needs a complete `.env` with `DEEPSEEK_API_KEY`, the
+database up and an imported persona. It sends nothing to Telegram and writes nothing to the
+database. `--show-prompt` prints the two messages of the prompt first, with a warning: they contain
+personal data. Errors print one line with the error class and exit with 1. Layers, budget, cleaning
+and what the prompt contains: [.claude/docs/reply-generation.md](.claude/docs/reply-generation.md).
 
 ### Migrations
 
@@ -561,7 +583,9 @@ the default applies.
 | `TELETHON_LOG_LEVEL`, `AIOGRAM_LOG_LEVEL` | no | `WARNING` | Level of the `telethon` and `aiogram` loggers; same allowed values as `LOG_LEVEL` |
 | `HTTPX_LOG_LEVEL` | no | `WARNING` | Level of the `httpx` logger, also applied to `httpcore`; same allowed values as `LOG_LEVEL` |
 | `TIMEZONE` | no | `Europe/Moscow` | IANA zone name, validated at startup |
-| `STYLE_EXAMPLES_MAX` | no | `8` | Most style examples one selection returns, from 1 to 50. Nothing in the app selects examples yet |
+| `STYLE_EXAMPLES_MAX` | no | `8` | Most style examples one selection returns, from 1 to 50. Only `reply-preview` selects examples so far |
+| `REPLY_HISTORY_MESSAGES` | no | `20` | How many last messages of a contact go into the reply prompt, from 1 to 100 |
+| `REPLY_PROMPT_BUDGET_CHARS` | no | `24000` | Character budget of the whole reply prompt, from 4000 to 200000; over it, examples and then the oldest messages are dropped |
 | `HEARTBEAT_PATH` | no | `<tmpdir>/cyrano-heartbeat` | Liveness file touched by the app and read by the app healthcheck |
 | `LEOMATCH_BOT_USERNAME` | no | `leomatchbot` | Username of the matching bot whose chat is searched for a new contact's profile text; a leading `@` is allowed. The default is an assumption: check the bot's real username in Telegram |
 | `POSTGRES_USER`, `POSTGRES_PASSWORD`, `POSTGRES_DB` | for Docker | | Credentials and database name of the compose Postgres; see [Variables](#variables) |
@@ -632,5 +656,6 @@ cancels the older one.
 - [.claude/docs/architecture.md](.claude/docs/architecture.md)
 - [.claude/docs/contact-lifecycle.md](.claude/docs/contact-lifecycle.md)
 - [.claude/docs/persona-and-examples.md](.claude/docs/persona-and-examples.md)
+- [.claude/docs/reply-generation.md](.claude/docs/reply-generation.md)
 - [.claude/docs/safety-rules.md](.claude/docs/safety-rules.md)
 - [.claude/docs/decisions.md](.claude/docs/decisions.md)

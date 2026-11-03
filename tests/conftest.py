@@ -37,6 +37,8 @@ OPTIONAL_ENV = (
     "HEARTBEAT_PATH",
     "LEOMATCH_BOT_USERNAME",
     "STYLE_EXAMPLES_MAX",
+    "REPLY_HISTORY_MESSAGES",
+    "REPLY_PROMPT_BUDGET_CHARS",
 )
 TOUCHED_LOGGERS = ("telethon", "aiogram", "httpx", "httpcore", "arq", "arq.worker", "arq.jobs")
 SECRET_VALUES = (

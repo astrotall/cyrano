@@ -255,3 +255,36 @@ class FakeLLMClient:
         max_tokens: int | None = None,
     ) -> T:
         raise NotImplementedError
+
+
+class ScriptedLLMClient:
+    def __init__(self, *steps: str | LLMError) -> None:
+        self._steps = list(steps)
+        self.calls: list[tuple[Sequence[LLMMessage], float | None, int | None]] = []
+
+    async def complete(
+        self,
+        messages: Sequence[LLMMessage],
+        *,
+        temperature: float | None = None,
+        max_tokens: int | None = None,
+    ) -> LLMResult:
+        self.calls.append((messages, temperature, max_tokens))
+        step = self._steps.pop(0)
+        if isinstance(step, LLMError):
+            raise step
+        return LLMResult(
+            text=step,
+            usage=LLMUsage(input_tokens=321, output_tokens=17, cache_hit_tokens=None),
+            truncated=False,
+        )
+
+    async def complete_json[T: BaseModel](
+        self,
+        messages: Sequence[LLMMessage],
+        schema: type[T],
+        *,
+        temperature: float | None = None,
+        max_tokens: int | None = None,
+    ) -> T:
+        raise NotImplementedError

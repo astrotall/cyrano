@@ -1,4 +1,4 @@
-.PHONY: install check test fmt up down logs migrate revision db-up login login-docker llm-check persona-import examples-import examples-stats examples-convert
+.PHONY: install check test fmt up down logs migrate revision db-up login login-docker llm-check persona-import examples-import examples-stats examples-convert reply-preview
 
 install:
 	uv sync --locked
@@ -43,6 +43,10 @@ examples-convert:
 	@if [ -n "$$ME" ] && [ -n "$$ME_ID" ]; then echo 'give exactly one of ME and ME_ID' >&2; exit 2; fi
 	@if [ -z "$$ME" ] && [ -z "$$ME_ID" ]; then echo 'give exactly one of ME and ME_ID' >&2; exit 2; fi
 	uv run python -m cyrano examples convert "$$INPUT" $${ME:+--me "$$ME"} $${ME_ID:+--me-id "$$ME_ID"} --out "$${OUT:-data/style-examples.json}"
+
+reply-preview:
+	@test -n "$(CONTACT)" || (echo 'usage: make reply-preview CONTACT=<contact id> [MODE=<mode name>]' >&2; exit 2)
+	uv run python -m cyrano reply-preview "$(CONTACT)" $(if $(MODE),--mode "$(MODE)")
 
 revision:
 	@test -n "$(m)" || (echo 'usage: make revision m="what changed"' >&2; exit 2)

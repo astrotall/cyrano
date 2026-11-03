@@ -15,6 +15,7 @@ from sqlalchemy.exc import SQLAlchemyError
 from cyrano.bot.app import ControlBot
 from cyrano.bot.errors import ControlBotError, PollingFailed
 from cyrano.config import ConfigError, Settings, load_settings
+from cyrano.convert_cli import add_convert_parser, convert_request, run_convert
 from cyrano.db.repositories import (
     SqlContactRepository,
     SqlMessageRepository,
@@ -218,12 +219,15 @@ def _parse_args(argv: Sequence[str] | None) -> argparse.Namespace:
     commands = parser.add_subparsers(dest="command")
     commands.add_parser(LOGIN_COMMAND, help="log the second account in and save the session")
     commands.add_parser(LLM_CHECK_COMMAND, help="send one tiny request to the LLM provider")
-    add_style_parsers(commands)
+    add_convert_parser(add_style_parsers(commands))
     return parser.parse_args(argv)
 
 
 def main(argv: Sequence[str] | None = None) -> int:
     args = _parse_args(argv)
+    convert = convert_request(args)
+    if convert is not None:
+        return run_convert(convert)
     try:
         settings = load_settings()
     except ConfigError as exc:

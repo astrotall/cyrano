@@ -69,7 +69,7 @@ Changing any of these is a large change (see Workflow expectations). Reasons:
 .
 ├── CLAUDE.md, CONTRIBUTING.md, README.md
 ├── pyproject.toml, uv.lock, .python-version
-├── Makefile                      includes login, login-docker, llm-check, persona-import, examples-import and examples-stats
+├── Makefile                      includes login, login-docker, llm-check, persona-import, examples-import, examples-stats and examples-convert
 ├── Dockerfile, docker-compose.yml, docker-compose.override.yml
 ├── .env.example, .dockerignore, .gitignore
 ├── alembic.ini
@@ -80,6 +80,7 @@ Changing any of these is a large change (see Workflow expectations). Reasons:
 ├── src/cyrano/
 │   ├── __main__.py, main.py      entrypoint (composition root), login, llm-check, persona and examples subcommands, signals, heartbeat
 │   ├── style_cli.py              the persona and examples commands
+│   ├── convert_cli.py            the examples convert command (chat export to a draft)
 │   ├── config.py                 Settings, load_settings, ConfigError
 │   ├── logging.py                JSON-lines logging
 │   ├── health.py                 heartbeat file and the app healthcheck
@@ -88,7 +89,8 @@ Changing any of these is a large change (see Workflow expectations). Reasons:
 │   ├── services/                 repositories (Protocols), intake, sanitize, contact_events, profile_source,
 │   │                             leomatch, profile_collector, card_sender, card_builder, card_announcer,
 │   │                             card_actions, llm_client, llm_check, style_files, style_import, persona_service,
-│   │                             style_examples; the rest is planned
+│   │                             style_examples, chat_export_reader, chat_redaction, chat_dialogues,
+│   │                             chat_export_converter; the rest is planned
 │   ├── userbot/                  Telethon: protocols, filters, handler, client, login, runner, errors,
 │   │                             profile_source, leomatch_source, leomatch_match
 │   ├── bot/                      aiogram: app, middleware, handlers, rendering, callbacks, sender, messages, errors
@@ -135,6 +137,12 @@ hash), the import errors in `domain/errors.py`, `services/style_files.py`, `styl
 `persona` and `examples` subcommands and their Makefile targets, the optional `STYLE_EXAMPLES_MAX`
 setting, the invented samples in `examples/`, the `.gitignore` rules for real files, and the tests.
 They are stored in PostgreSQL, not read from a path at runtime; nothing in the app uses them yet.
+CYR-34 added the converter of a Telegram Desktop JSON chat export into a draft examples file:
+`domain/chat_export.py` (limits, vocabulary, report), `services/chat_export_reader.py`,
+`chat_redaction.py`, `chat_dialogues.py`, `chat_export_converter.py`, `convert_cli.py` (the
+`examples convert` command with `--me` or `--me-id`; dispatched before `Settings` load, so it needs
+no `.env` and no database), `ChatExportError`, the `examples-convert` Makefile target and the tests.
+It reads a file and writes a file under `data/`; nothing in the app uses it.
 
 ## Detailed guides
 

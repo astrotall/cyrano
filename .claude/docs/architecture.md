@@ -21,7 +21,8 @@ Source lives in `src/cyrano/`.
 | `health.py` | Heartbeat file, `is_alive`, `python -m cyrano.health` | exists |
 | `main.py`, `__main__.py` | App entrypoint (composition root), the `login`, `llm-check`, `persona` and `examples` subcommands, signal handling, heartbeat task | exists; the userbot is plugged in (CYR-10), the collector (CYR-11), the control bot and the announcer (CYR-12); `llm-check` builds the LLM factory (CYR-13); the persona and examples commands build the two repositories and the importers (CYR-14); `run` builds neither the LLM client nor the persona and example services yet |
 | `style_cli.py` | The `persona` and `examples` commands: the argparse definitions, `StyleRequest` and `StyleCommands`, which receive their importers, service and repository by injection and print counts only. `main.py` builds the concrete objects | exists (CYR-14); see [Persona and style examples](#persona-and-style-examples-cyr-14) |
-| `domain/` | Leaf package, imports only pydantic and the standard library: enums, status transition rules, domain errors (the LLM errors and the import validation errors among them), Pydantic models the layers exchange (`llm.py`: `LLMMessage`, `LLMUsage`, `LLMResult`; `style.py`: `Persona`, `Turn`, `StyleExample`, `StyleExampleCreate`, the persona and example limits, the content hash) | exists |
+| `convert_cli.py` | The `examples convert` command (CYR-34): the argparse definition, `ConvertRequest`, the report printing. `main.py` dispatches it **before** `load_settings`, so it needs no `Settings`, `.env`, database or network | exists (CYR-34); see [Chat export converter](#chat-export-converter-cyr-34) |
+| `domain/` | Leaf package, imports only pydantic and the standard library: enums, status transition rules, domain errors (the LLM errors and the import validation errors among them), Pydantic models the layers exchange (`llm.py`: `LLMMessage`, `LLMUsage`, `LLMResult`; `style.py`: `Persona`, `Turn`, `StyleExample`, `StyleExampleCreate`, the persona and example limits, the content hash; `chat_export.py`: the converter's limits, `SkipReason`, `RedactionKind`, `ConvertOptions`, `ConvertReport`; `ChatExportError`) | exists |
 | `prompts` | Prompt texts, few-shot data loading, trigger lists | planned, not created; the layered builder's location is decided in CYR-16 |
 
 `tests/` mirrors the packages (`tests/userbot`, `tests/bot`, `tests/llm`, `tests/domain`,
@@ -420,6 +421,45 @@ the prompt builder (CYR-16) will consume `PersonaService` and `ExampleSelector`.
 - **Exit codes.** The commands exit with 0, or with 1 and a readable message on any error (a
   storage failure prints the exception class only). An invalid configuration exits with 2 like
   every command.
+
+## Chat export converter (CYR-34)
+
+Data and rules for the user: [persona-and-examples.md](persona-and-examples.md#from-a-telegram-desktop-export).
+`python -m cyrano examples convert INPUT (--me NAME | --me-id ID) ...` turns a chat exported by
+Telegram Desktop (machine-readable JSON, one chat) into a draft examples file. It reads a file and
+writes a file: no database, no network, no Telegram, no LLM. It **needs no `Settings`**:
+`main.main` parses the arguments and dispatches it before `load_settings`, so it works without
+`.env` and credentials. (The other `examples` and `persona` commands still need the full
+`Settings`; that is unchanged.)
+
+| Where | What |
+| --- | --- |
+| `domain/chat_export.py` | Constants (size cap, defaults, ranges), `SkipReason`, `RedactionKind` and its token, `ExportMessage`, `ChatTurn`, `ConvertOptions`, `ConvertReport` |
+| `services/chat_export_reader.py` | `load_export_file` (the file checks), `message_items`, `read_messages`: tolerant reading of the JSON into `ExportMessage`s; every message goes through a Pydantic model with `extra="ignore"` and `JsonValue` fields, so an unknown or missing field never crashes it |
+| `services/chat_redaction.py` | `Redactor`: one compiled pattern, one pass, tokens `<email>`, `<phone>`, `<link>`, `<username>`, `<name>` |
+| `services/chat_dialogues.py` | Pure: `split_conversations`, `build_turns`, `truncate_turns`, `dialogue_candidates`, `drop_duplicates`, `sample_evenly` |
+| `services/chat_export_converter.py` | `validate_options`, `build_draft` (the pipeline), `render_draft`, the output guards, `write_draft` (atomic, validated) and `convert_chat_export` |
+| `convert_cli.py` | Arguments, the request, the counts-only report |
+
+- **Pipeline.** Read and order the messages, check the owner is among the senders, redact every
+  message (a message that becomes only tokens is dropped), split into conversations, merge into
+  turns, truncate long turns, build one candidate per owner turn, drop exact duplicates, sample.
+  Redaction comes first so no later stage handles raw sensitive text.
+- **Owner.** `--me` is compared with the `from` name and `--me-id` with `from_id`, both exactly
+  and case-sensitively; exactly one is required. In id mode the name may be null or odd.
+- **Output.** The draft is written only under `data/` of the current directory (symlinks and `..`
+  resolved) unless `--allow-any-path`; an existing file needs `--force`; the text goes to a
+  private temporary file in the same folder (mode 0600), is validated by the real CYR-14 validators
+  (`read_import_file`, `parse_examples`) and only then renamed over the target. A failure removes
+  the temporary file.
+- **Logging.** Logger `cyrano.services.chat_export_converter`, one INFO line with counts. Stdout
+  and stderr carry counts, option names and paths, never a text, a name, an id or a number from the
+  chat. No logging is configured by the command (it has no `Settings`), so INFO is not shown.
+- **Tests.** `tests/services/test_chat_export_*.py`, `test_chat_dialogues.py`,
+  `test_chat_redaction.py` and `tests/cli/test_convert_cli.py`: all fixtures are invented and built
+  in the tests; one test runs the command in a subprocess with an empty environment; one imports the
+  written draft through `ExamplesImporter` into the test database; one asserts that the converter
+  modules import neither `config`, `db`, Telethon, aiogram nor httpx.
 
 ## Persistence
 

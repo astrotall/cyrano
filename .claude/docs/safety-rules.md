@@ -122,6 +122,10 @@ only.
   paths and JSON-path style locations of problems, never a persona or example text; `persona show`
   prints the length and the update time only and `examples stats` prints counts per tag. The real
   files live only in `data/`.
+  A Telegram Desktop chat export is personal data too (CYR-34): it is converted locally by a
+  command that reads a file and writes a file, never logs or prints a message text, a name, a
+  sender id or a number (only counts), and writes the draft only under `data/` unless the owner
+  passes `--allow-any-path`.
 - **Why:** the data belongs to real people.
 - **Enforced where:** exists today: `.gitignore` and `.dockerignore` exclude `.env`, `*.session`,
   `media/` and `data/` (profile photos live under `MEDIA_DIR`, `.env.example` and compose put it
@@ -144,7 +148,9 @@ only.
   file error is asserted to contain no marker text, the commands' output is asserted to contain no
   sample text, and a full import of the sample files with all loggers at DEBUG must leave no sample
   text in the captured logs or in the raised errors; the `.gitignore` and `.dockerignore` content
-  is tested too.
+  is tested too. Exists for the converter (CYR-34): the captured output, errors and logs of a full
+  run and of the failures contain none of the invented names, ids, texts or numbers, and the
+  written draft contains none of the redacted strings.
 
 ## S10. The assistant never answers a direct bot question
 

@@ -91,6 +91,10 @@ class ImportFileError(DomainError):
     pass
 
 
+class ChatExportError(DomainError):
+    pass
+
+
 class ContentValidationError(DomainError):
     def __init__(self, subject: str, problems: Sequence[ContentProblem]) -> None:
         shown = problems[:MAX_REPORTED_PROBLEMS]

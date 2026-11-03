@@ -37,7 +37,9 @@ class StyleRequest:
     confirmed: bool = False
 
 
-def add_style_parsers(commands: argparse._SubParsersAction[argparse.ArgumentParser]) -> None:
+def add_style_parsers(
+    commands: argparse._SubParsersAction[argparse.ArgumentParser],
+) -> argparse._SubParsersAction[argparse.ArgumentParser]:
     persona = commands.add_parser(PERSONA_COMMAND, help="manage the owner persona text")
     persona_actions = persona.add_subparsers(dest=ACTION_DEST, required=True)
     persona_import = persona_actions.add_parser(
@@ -59,6 +61,7 @@ def add_style_parsers(commands: argparse._SubParsersAction[argparse.ArgumentPars
         "--yes", action="store_true", dest="confirmed", help="confirm --replace"
     )
     example_actions.add_parser(STATS_ACTION, help="print counts per tag, never texts")
+    return example_actions
 
 
 def style_request(args: argparse.Namespace) -> StyleRequest | None:

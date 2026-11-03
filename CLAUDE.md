@@ -23,8 +23,9 @@ Contact statuses: `new -> pending -> active -> paused / ignored`. Meaning and tr
 
 The skeleton (CYR-8), the storage layer (CYR-9), the userbot intake (CYR-10), the profile
 collection (CYR-11), the control bot with the contact card (CYR-12), the LLM client (CYR-13, not
-used by the app yet) and the persona and style examples import (CYR-14, not used by the app yet)
-exist. Everything
+used by the app yet), the persona and style examples import (CYR-14, not used by the app yet) and
+the layered reply prompt with the reply generator and the `reply-preview` command (CYR-16, not
+wired into the app) exist. Everything
 else is planned and marked with its ticket key.
 Never describe planned behaviour as existing.
 
@@ -61,6 +62,7 @@ Changing any of these is a large change (see Workflow expectations). Reasons:
 | aiogram 3 | in the project (control bot; imported only in `bot/`) |
 | DeepSeek client over plain httpx | in the project (`llm/`; the only package that imports httpx; not wired into `main.py` yet) |
 | Persona and style examples | in the project (imported from local files into PostgreSQL by commands; selectors in `services/`; not wired into `main.run` yet) |
+| Layered reply prompt | in the project (`prompts/` for texts, builder and generator in `services/`; used by `reply-preview` only) |
 | httpx.MockTransport in tests | in the project (no respx) |
 
 ## Repository layout
@@ -69,18 +71,19 @@ Changing any of these is a large change (see Workflow expectations). Reasons:
 .
 ├── CLAUDE.md, CONTRIBUTING.md, README.md
 ├── pyproject.toml, uv.lock, .python-version
-├── Makefile                      includes login, login-docker, llm-check, persona-import, examples-import, examples-stats and examples-convert
+├── Makefile                      includes login, login-docker, llm-check, persona-import, examples-import, examples-stats, examples-convert and reply-preview
 ├── Dockerfile, docker-compose.yml, docker-compose.override.yml
 ├── .env.example, .dockerignore, .gitignore
 ├── alembic.ini
 ├── migrations/                   async env.py, versions/
 ├── examples/                     invented sample persona and style examples (real files go to data/)
-├── .claude/docs/                 architecture, contact-lifecycle, safety-rules, decisions, persona-and-examples
+├── .claude/docs/                 architecture, contact-lifecycle, safety-rules, decisions, persona-and-examples, reply-generation
 ├── .github/                      dependabot.yml, workflows/ci.yml
 ├── src/cyrano/
 │   ├── __main__.py, main.py      entrypoint (composition root), login, llm-check, persona and examples subcommands, signals, heartbeat
 │   ├── style_cli.py              the persona and examples commands
 │   ├── convert_cli.py            the examples convert command (chat export to a draft)
+│   ├── reply_cli.py              the reply-preview command
 │   ├── config.py                 Settings, load_settings, ConfigError
 │   ├── logging.py                JSON-lines logging
 │   ├── health.py                 heartbeat file and the app healthcheck
@@ -90,10 +93,12 @@ Changing any of these is a large change (see Workflow expectations). Reasons:
 │   │                             leomatch, profile_collector, card_sender, card_builder, card_announcer,
 │   │                             card_actions, llm_client, llm_check, style_files, style_import, persona_service,
 │   │                             style_examples, chat_export_reader, chat_redaction, chat_dialogues,
-│   │                             chat_export_converter; the rest is planned
+│   │                             chat_export_converter, contact_facts, prompt_builder,
+│   │                             reply_postprocess, reply_generator; the rest is planned
 │   ├── userbot/                  Telethon: protocols, filters, handler, client, login, runner, errors,
 │   │                             profile_source, leomatch_source, leomatch_match
 │   ├── bot/                      aiogram: app, middleware, handlers, rendering, callbacks, sender, messages, errors
+│   ├── prompts/                  prompt texts and their pure rendering (imports only domain)
 │   ├── llm/                      DeepSeek client, retrying transport, factory; the only package that imports httpx
 │   └── worker/settings.py        Arq WorkerSettings, placeholder job
 └── tests/                        mirrors src/cyrano
@@ -143,6 +148,15 @@ CYR-34 added the converter of a Telegram Desktop JSON chat export into a draft e
 `examples convert` command with `--me` or `--me-id`; dispatched before `Settings` load, so it needs
 no `.env` and no database), `ChatExportError`, the `examples-convert` Makefile target and the tests.
 It reads a file and writes a file under `data/`; nothing in the app uses it.
+CYR-16 added the `prompts/` package (`texts.py` with every fixed prompt text, `render.py` with the
+pure rendering of the system and the user message), `domain/reply.py` (`ContactFacts`,
+`BuiltPrompt`, `GeneratedReply`, the limits and refusal reasons), the errors `PersonaMissing`,
+`ModeNameNotFound`, `NoMessagesToReplyTo`, `PromptTooLarge` and `ReplyInvalid`,
+`services/contact_facts.py`, `prompt_builder.py` (`PromptBuilder`), `reply_postprocess.py`
+(`clean_reply`) and `reply_generator.py` (`ReplyGenerator`), `reply_cli.py` with the
+`python -m cyrano reply-preview` command and the `reply-preview` Makefile target, the optional
+`REPLY_HISTORY_MESSAGES` and `REPLY_PROMPT_BUDGET_CHARS` settings, and the tests. The generator
+builds and cleans one reply text; it stores nothing, sends nothing, and `main.run` does not use it.
 
 ## Detailed guides
 
@@ -153,6 +167,9 @@ It reads a file and writes a file under `data/`; nothing in the app uses it.
 - [safety-rules.md](.claude/docs/safety-rules.md): rules S1..S10, why, where enforced, how tested.
 - [persona-and-examples.md](.claude/docs/persona-and-examples.md): the persona and style examples:
   file formats, limits, import commands, selection, privacy.
+- [reply-generation.md](.claude/docs/reply-generation.md): the layered reply prompt, the budget and
+  trimming, the injection defense, reply cleaning, the `reply-preview` command, what reaches the
+  provider.
 - [decisions.md](.claude/docs/decisions.md): what is decided and why; open questions.
 - [CONTRIBUTING.md](CONTRIBUTING.md): branches, commits, Jira, pull requests, checks.
 

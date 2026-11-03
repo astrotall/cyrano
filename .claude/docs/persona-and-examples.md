@@ -1,9 +1,9 @@
 # Persona and style examples
 
-State as of CYR-34: the persona and the style examples are imported from local files, stored in
-PostgreSQL and read through services. Nothing uses them yet: no prompt is built, no LLM is called
-and nothing is wired into `main.run`. The prompt builder (CYR-16) will consume the selectors
-described here.
+State as of CYR-16: the persona and the style examples are imported from local files, stored in
+PostgreSQL and read through services. The prompt builder reads them (see
+[reply-generation.md](reply-generation.md)), but only the `reply-preview` command runs it: nothing
+is wired into `main.run`.
 
 Product and decisions: [CLAUDE.md](../../CLAUDE.md). Reasons: [decisions.md](decisions.md).
 
@@ -141,6 +141,9 @@ newer: a later dialogue is newer.
 
 `PersonaService.get()` returns the persona or `None`.
 
+The reply prompt asks for the examples of the contact's mode name and may drop some of them to fit
+the budget, always from the end of this order (see [reply-generation.md](reply-generation.md)).
+
 ## From a Telegram Desktop export
 
 State as of CYR-34: a chat exported by Telegram Desktop can be converted into a **draft** of the
@@ -251,7 +254,7 @@ person or says more than needed, then import it with
 `make examples-import FILE=data/style-examples.json`.
 
 **Privacy.** The examples, **including the other person's lines**, are sent to the LLM provider
-inside prompts. Redact names and intimate details, and keep only the context that is needed: a
+inside prompts (`reply-preview` does it today, the autopilot will). Redact names and intimate details, and keep only the context that is needed: a
 smaller `--window` means less of the other person's text. The export, the draft and the command
 output are personal data (S9 in [safety-rules.md](safety-rules.md)): they stay under `data/`, which
 git and Docker ignore, and the command never logs or prints a text, a name, an id or a number from

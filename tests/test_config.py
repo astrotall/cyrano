@@ -217,6 +217,8 @@ def test_every_setting_is_either_logged_or_deliberately_withheld() -> None:
         "leomatch_bot_username",
         "deepseek_base_url",
         "style_examples_max",
+        "reply_history_messages",
+        "reply_prompt_budget_chars",
     }
 
     assert set(Settings.model_fields) == set(LOGGED_SETTINGS) | withheld
@@ -299,3 +301,67 @@ def test_an_invalid_style_examples_max_is_a_readable_error_without_the_value(
     assert "STYLE_EXAMPLES_MAX" in message
     assert f": {value}" not in message
     assert "'" + value + "'" not in message
+
+
+def test_the_reply_settings_default_to_twenty_messages_and_24000_characters(
+    full_env: dict[str, str],
+) -> None:
+    settings = load_settings(env_file=None)
+
+    assert settings.reply_history_messages == 20
+    assert settings.reply_prompt_budget_chars == 24000
+
+
+@pytest.mark.parametrize(
+    ("name", "value", "field"),
+    [
+        ("REPLY_HISTORY_MESSAGES", "1", "reply_history_messages"),
+        ("REPLY_HISTORY_MESSAGES", "100", "reply_history_messages"),
+        ("REPLY_PROMPT_BUDGET_CHARS", "4000", "reply_prompt_budget_chars"),
+        ("REPLY_PROMPT_BUDGET_CHARS", "200000", "reply_prompt_budget_chars"),
+    ],
+)
+def test_the_reply_settings_accept_their_bounds(
+    full_env: dict[str, str], monkeypatch: pytest.MonkeyPatch, name: str, value: str, field: str
+) -> None:
+    monkeypatch.setenv(name, value)
+
+    assert getattr(load_settings(env_file=None), field) == int(value)
+
+
+@pytest.mark.parametrize(
+    ("name", "value"),
+    [
+        ("REPLY_HISTORY_MESSAGES", "0"),
+        ("REPLY_HISTORY_MESSAGES", "101"),
+        ("REPLY_HISTORY_MESSAGES", "-3"),
+        ("REPLY_HISTORY_MESSAGES", "twenty"),
+        ("REPLY_HISTORY_MESSAGES", "2.5"),
+        ("REPLY_PROMPT_BUDGET_CHARS", "3999"),
+        ("REPLY_PROMPT_BUDGET_CHARS", "200001"),
+        ("REPLY_PROMPT_BUDGET_CHARS", "big"),
+    ],
+)
+def test_an_invalid_reply_setting_is_a_readable_error_without_the_value(
+    full_env: dict[str, str], monkeypatch: pytest.MonkeyPatch, name: str, value: str
+) -> None:
+    monkeypatch.setenv(name, value)
+
+    with pytest.raises(ConfigError) as caught:
+        load_settings(env_file=None)
+
+    message = str(caught.value)
+    assert name in message
+    assert f": {value}" not in message
+    assert "'" + value + "'" not in message
+
+
+def test_empty_reply_settings_count_as_unset(
+    full_env: dict[str, str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("REPLY_HISTORY_MESSAGES", "")
+    monkeypatch.setenv("REPLY_PROMPT_BUDGET_CHARS", "")
+
+    settings = load_settings(env_file=None)
+
+    assert (settings.reply_history_messages, settings.reply_prompt_budget_chars) == (20, 24000)

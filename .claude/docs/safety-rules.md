@@ -115,7 +115,11 @@ only.
   The collector logs internal contact ids, part names, error class names and counters only.
   Prompts and model replies contain personal data: the LLM client never logs a prompt, a reply
   (valid or not) or a response body at any level, and its errors carry the status code or the
-  exception class only. Its log lines carry the step, the model, token counts, the duration and
+  exception class only. A reply prompt (CYR-16) holds the persona, the style examples, the
+  contact's name, age, city, about text and bio, and the last messages of the conversation; it
+  never holds the username, a Telegram id, an internal id, a photo path or a raw Leomatch text. The
+  reply generator logs counters only, the errors of the reply pipeline carry ids and counts, and
+  `reply-preview --show-prompt` prints the prompt to the terminal only, with a warning. Its log lines carry the step, the model, token counts, the duration and
   retry counters. It never logs the API key.
   The persona text and the style examples are personal data too (CYR-14): they are never logged
   at any level and never go to git. The import commands and the services print and log counts,
@@ -148,7 +152,11 @@ only.
   file error is asserted to contain no marker text, the commands' output is asserted to contain no
   sample text, and a full import of the sample files with all loggers at DEBUG must leave no sample
   text in the captured logs or in the raised errors; the `.gitignore` and `.dockerignore` content
-  is tested too. Exists for the converter (CYR-34): the captured output, errors and logs of a full
+  is tested too. Exists for the reply pipeline (CYR-16): the generator is run with all loggers at DEBUG and the
+  persona, message, reply, bio and username markers, the Telegram id and the summary text are
+  asserted absent from the captured logs; the facts model and the rendered prompt are asserted to
+  carry no username, id, path or raw Leomatch text; the preview command's errors are asserted to
+  contain none of those texts. Exists for the converter (CYR-34): the captured output, errors and logs of a full
   run and of the failures contain none of the invented names, ids, texts or numbers, and the
   written draft contains none of the redacted strings. Numeric markers in these tests (fake
   Telegram ids, API ids, phone numbers, login codes, internal ids) must be distinctive and at least

@@ -104,3 +104,34 @@ class ContentValidationError(DomainError):
         lines = [header, *(f"  {problem.path}: {problem.rule}" for problem in shown)]
         super().__init__("\n".join(lines))
         self.problems = tuple(problems)
+
+
+class PersonaMissing(DomainError):
+    def __init__(self) -> None:
+        super().__init__("no persona is stored")
+
+
+class ModeNameNotFound(DomainError):
+    def __init__(self) -> None:
+        super().__init__("the requested mode does not exist")
+
+
+class NoMessagesToReplyTo(DomainError):
+    def __init__(self, contact_id: int) -> None:
+        super().__init__(f"contact {contact_id} has no incoming message to reply to")
+        self.contact_id = contact_id
+
+
+class PromptTooLarge(DomainError):
+    def __init__(self, characters: int, budget: int) -> None:
+        super().__init__(
+            f"the prompt has {characters} characters at its smallest, over the budget of {budget}"
+        )
+        self.characters = characters
+        self.budget = budget
+
+
+class ReplyInvalid(DomainError):
+    def __init__(self, reason: str) -> None:
+        super().__init__(f"the model reply is unusable: {reason}")
+        self.reason = reason

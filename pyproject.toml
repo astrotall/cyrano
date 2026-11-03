@@ -56,6 +56,7 @@ select = [
 [tool.ruff.lint.per-file-ignores]
 "tests/**" = ["S101", "S105", "S106", "RUF001"]  # asserts, fake secrets and Cyrillic fixtures are fine in tests
 "src/cyrano/bot/messages.py" = ["RUF001"]  # the owner-facing texts are Russian
+"src/cyrano/services/reply_postprocess.py" = ["RUF001"]  # the speaker prefixes and quotes are not ASCII
 
 [tool.mypy]
 python_version = "3.14"

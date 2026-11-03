@@ -9,6 +9,7 @@ import logging
 import signal
 import sys
 from collections.abc import Callable, Sequence
+from datetime import UTC, datetime
 
 from sqlalchemy.exc import SQLAlchemyError
 
@@ -30,6 +31,12 @@ from cyrano.domain.models import ContactReadyEvent, NewContactEvent
 from cyrano.health import HEARTBEAT_INTERVAL, heartbeat_loop
 from cyrano.llm.factory import LLMClientFactory
 from cyrano.logging import configure_logging
+from cyrano.reply_cli import (
+    ReplyPreviewCommand,
+    ReplyPreviewRequest,
+    add_reply_preview_parser,
+    reply_preview_request,
+)
 from cyrano.services.card_actions import CardActions
 from cyrano.services.card_announcer import CardAnnouncer
 from cyrano.services.contact_events import InMemoryContactEvents
@@ -38,6 +45,9 @@ from cyrano.services.llm_check import check_llm
 from cyrano.services.llm_client import LLMClient
 from cyrano.services.persona_service import PersonaService
 from cyrano.services.profile_collector import ProfileCollector
+from cyrano.services.prompt_builder import PromptBuilder
+from cyrano.services.reply_generator import ReplyGenerator
+from cyrano.services.style_examples import ExampleSelector
 from cyrano.services.style_import import ExamplesImporter, PersonaImporter
 from cyrano.style_cli import StyleCommands, StyleRequest, add_style_parsers, style_request
 from cyrano.userbot.client import build_client, ensure_session_exists
@@ -56,6 +66,7 @@ EXIT_USERBOT_ERROR = 1
 EXIT_CONFIG_ERROR = 2
 EXIT_LLM_ERROR = 1
 EXIT_STYLE_ERROR = 1
+EXIT_REPLY_PREVIEW_ERROR = 1
 LOGIN_CANCELLED_MESSAGE = "Login cancelled. Nothing was saved."
 POLLING_ENDED_REASON = "polling ended unexpectedly"
 STORAGE_FAILED_MESSAGE = "storage failed: {error}"
@@ -214,12 +225,45 @@ async def _run_style_command(settings: Settings, request: StyleRequest) -> int:
         await engine.dispose()
 
 
+async def _run_reply_preview_command(settings: Settings, request: ReplyPreviewRequest) -> int:
+    engine = build_engine(settings)
+    session_factory = build_session_factory(engine)
+    personas = SqlPersonaRepository(session_factory)
+    factory = LLMClientFactory(settings)
+    try:
+        client = factory.get(LLMStep.REPLY)
+        generator = ReplyGenerator(
+            contacts=SqlContactRepository(session_factory),
+            messages=SqlMessageRepository(session_factory),
+            modes=SqlModeRepository(session_factory),
+            persona=PersonaService(personas),
+            examples=ExampleSelector(
+                SqlStyleExampleRepository(session_factory), settings.style_examples_max
+            ),
+            builder=PromptBuilder(
+                budget_chars=settings.reply_prompt_budget_chars,
+                timezone=settings.tzinfo,
+                clock=lambda: datetime.now(UTC),
+            ),
+            client=client,
+            history_limit=settings.reply_history_messages,
+        )
+        return await ReplyPreviewCommand(generator, client.model).run(request)
+    except (SQLAlchemyError, OSError) as exc:
+        print(STORAGE_FAILED_MESSAGE.format(error=type(exc).__name__), file=sys.stderr)
+        return EXIT_REPLY_PREVIEW_ERROR
+    finally:
+        await factory.aclose()
+        await engine.dispose()
+
+
 def _parse_args(argv: Sequence[str] | None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(prog="python -m cyrano", description=__doc__)
     commands = parser.add_subparsers(dest="command")
     commands.add_parser(LOGIN_COMMAND, help="log the second account in and save the session")
     commands.add_parser(LLM_CHECK_COMMAND, help="send one tiny request to the LLM provider")
     add_convert_parser(add_style_parsers(commands))
+    add_reply_preview_parser(commands)
     return parser.parse_args(argv)
 
 
@@ -236,6 +280,9 @@ def main(argv: Sequence[str] | None = None) -> int:
     configure_logging(settings.log_level, settings.library_log_levels)
     if args.command == LLM_CHECK_COMMAND:
         return asyncio.run(_run_llm_check_command(settings))
+    preview = reply_preview_request(args)
+    if preview is not None:
+        return asyncio.run(_run_reply_preview_command(settings, preview))
     request = style_request(args)
     if request is not None:
         return asyncio.run(_run_style_command(settings, request))

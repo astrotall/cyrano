@@ -191,6 +191,10 @@ changing one is a large change.
 | The owner's commands are `outbox enqueue`, `list`, `cancel` and `retry`; they print ids, states and class names, never a text; any error, a bad command line included, is one line and exit 1. The root parser hands the arguments over unparsed, to a strict parser that never echoes them | argparse would otherwise exit with 2 and quote the offending argument, which may be the text |
 | `AUTOPILOT_ENABLED` is withheld from the startup log line | Same rule as other new settings: added to the allowlist only when someone needs it there |
 | The text is trimmed and NUL-free before it is stored, with at most 4096 UTF-16 code units (`MAX_OUTBOX_TEXT_LENGTH`) | What is stored is what is sent. PostgreSQL rejects NUL; 4096 is Telegram's limit for one message, and Telegram counts UTF-16 code units, so an emoji counts as two |
+| Local git hooks (CYR-29): one `pre-commit` hook in `.githooks/`, enabled by `make setup-hooks` (`git config core.hooksPath .githooks`); no pre-push hook, no commit-message or branch-name hook, no hook manager | It is the one point where a red CI can be stopped before the commit exists. A second gate in front of push repeats the same work, and a hook manager would be a new dependency for one script |
+| The hook runs `make check`, then `make test`, and stops at the first failure with its exit code. `CYRANO_HOOK_SKIP_TESTS=1` skips only the test step; any other value, including `0`, an empty value and `yes`, does not skip. `git commit --no-verify` skips everything and is documented as such | The full `make test` takes one to two minutes on real PostgreSQL, too slow for a small commit, while `make check` is fast and always runs. Accepting only the exact `1` stops a stray `0` or an empty variable from silently switching the tests off. CI runs the same commands anyway |
+| The hook only reads: it never formats, never stages or changes a file, makes no network call and runs nothing but the two make targets. It changes into the repository root from its own location, not from the current directory | A hook that rewrote files would commit something the owner did not review; formatting stays with `make fmt`. Using the script's location makes it work from any directory git starts it in |
+| If `TEST_DATABASE_URL` is not set in the environment the hook prints one hint line before `make test` and still runs it | The tests need a reachable PostgreSQL and fail loudly with a clear message when it is not; the hint tells the owner why before the failure. The variable may also come from `.env`, so the hook must not refuse to run |
 
 ## Open questions
 
@@ -213,7 +217,6 @@ changing one is a large change.
 | Limits for proactive messages, which do not exist yet | CYR-23 |
 | Numbers: limits on proactive messages beyond two unanswered | CYR-23 |
 | May `bot`, `userbot` and `worker` import each other, or only `services`? | open, no ticket |
-| Which hooks CYR-29 installs and which tool manages them | CYR-29 |
 | Pause, resume and ignore for ACTIVE contacts have no MVP entry point | CYR-26 and the stop-trigger notification of CYR-20 |
 | What the owner sees when a contact writes again after being ignored (today nothing: `ignored` is silence forever and the message is only stored) | open, no ticket |
 | LLM, to check by the owner with a real key: the current model names, prices and limits. The DeepSeek pages read during CYR-13 list `deepseek-flash` and `deepseek-v4-pro` and do not mention `deepseek-chat` (the default of `DEEPSEEK_MODEL`, kept unchanged because the ticket forbids inventing names); `llm-check` shows whether the configured name is accepted. Also whether the step defaults (temperature, max tokens) suit real replies | CYR-13 follow-up, `make llm-check` |

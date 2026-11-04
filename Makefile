@@ -1,4 +1,4 @@
-.PHONY: install check test fmt up down logs migrate revision db-up login login-docker llm-check persona-import examples-import examples-stats examples-convert reply-preview outbox-enqueue outbox-list outbox-cancel outbox-retry outbox-status outbox-resume
+.PHONY: install check test fmt up down logs migrate revision db-up login login-docker llm-check persona-import examples-import examples-stats examples-convert reply-preview outbox-enqueue outbox-list outbox-cancel outbox-retry outbox-status outbox-resume setup-hooks
 
 install:
 	uv sync --locked
@@ -86,3 +86,6 @@ login-docker:
 
 llm-check:
 	uv run python -m cyrano llm-check
+
+setup-hooks:
+	git config core.hooksPath .githooks

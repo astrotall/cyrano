@@ -529,6 +529,7 @@ The app connects to Telegram as the userbot and polls the control bot, and conne
 | `make check` | Ruff lint, Ruff format check, mypy strict |
 | `make test` | pytest; database tests need `make db-up` |
 | `make fmt` | Ruff fix and format |
+| `make setup-hooks` | `git config core.hooksPath .githooks`: enable the local `pre-commit` hook, once per clone |
 | `make up`, `make down`, `make logs` | Start the stack in Docker (build included), stop it, follow logs |
 | `make db-up` | Postgres from compose, with the dev override |
 | `make migrate`, `make revision m="..."` | Run Alembic, or autogenerate a revision |
@@ -718,8 +719,11 @@ make fmt       # ruff check --fix, ruff format
 Ruff: line length 100, target `py314`, rule sets E, W, F, I, B, UP, SIM, ASYNC, RUF, S. mypy runs
 in strict mode with the Pydantic plugin over `src` and `tests`.
 
-Local git hooks are planned (CYR-29). Until they land, run `make check` and `make test` before
-every commit.
+Run `make setup-hooks` once per clone to enable the local `pre-commit` hook (`.githooks/pre-commit`).
+It runs `make check` and then `make test` before every commit, the same commands as CI, and only
+reads: it never formats or stages anything. `CYRANO_HOOK_SKIP_TESTS=1 git commit ...` skips only the
+tests (they need PostgreSQL, see [Testing](#testing)), and `git commit --no-verify` skips the hook.
+See [CONTRIBUTING.md](CONTRIBUTING.md#git-hooks).
 
 ## What CI runs
 

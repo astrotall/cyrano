@@ -182,11 +182,30 @@ Do not merge a pull request with red CI.
 
 ## Git hooks
 
-Planned, CYR-29. Nothing is installed today; do not assume any hook runs.
+One hook, `pre-commit`, lives in `.githooks/` and runs the same two commands as CI, so a red CI is
+caught on your machine. There is no pre-push hook and no hook for commit messages or branch names.
 
-The intent is to run the same checks locally that CI runs, and to reject commit messages and
-branch names that break the formats above. The exact set of hooks and the tool that manages them
-are decided in CYR-29.
+Enable it once per clone:
+
+```sh
+make setup-hooks   # git config core.hooksPath .githooks
+```
+
+On every `git commit` the hook changes into the repository root, then runs `make check` and
+`make test`, and stops at the first failure with that command's exit code. It only reads: it never
+formats, never stages or changes a file, and makes no network calls. Run `make fmt` yourself when
+`make check` complains about formatting.
+
+- The tests need a reachable PostgreSQL (see the README, Testing). If `TEST_DATABASE_URL` is not set
+  in the environment the hook prints one hint line and still runs `make test`.
+- `CYRANO_HOOK_SKIP_TESTS=1 git commit ...` skips only the test step for that commit (the full
+  `make test` takes one to two minutes). Only the exact value `1` skips; `make check` always runs.
+- `git commit --no-verify` skips the hook entirely.
+- CI runs the same commands on every push and pull request, so skipping the hook only moves a red
+  result from your machine to CI.
+
+The owner commit flow is: change files, `git add`, `git commit` (the hook runs), push, open the pull
+request.
 
 ## Checks and CI
 
@@ -198,6 +217,7 @@ make check     # ruff check, ruff format --check, mypy
 make db-up     # start Postgres from compose; database tests need it
 make test      # pytest
 make fmt       # auto-fix lint and formatting
+make setup-hooks   # once per clone: run check and test before every commit
 ```
 
 CI (`.github/workflows/ci.yml`) runs on every push and pull request with Python 3.14 installed

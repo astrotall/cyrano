@@ -40,6 +40,12 @@ OPTIONAL_ENV = (
     "REPLY_HISTORY_MESSAGES",
     "REPLY_PROMPT_BUDGET_CHARS",
     "AUTOPILOT_ENABLED",
+    "SEND_LIMIT_MINUTE",
+    "SEND_LIMIT_HOUR",
+    "SEND_LIMIT_DAY",
+    "SEND_LIMIT_CONTACT_MINUTE",
+    "SEND_LIMIT_CONTACT_HOUR",
+    "SEND_LIMIT_CONTACT_DAY",
 )
 TOUCHED_LOGGERS = ("telethon", "aiogram", "httpx", "httpcore", "arq", "arq.worker", "arq.jobs")
 SECRET_VALUES = (

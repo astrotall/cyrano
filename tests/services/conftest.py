@@ -7,6 +7,7 @@ from tests.db.conftest import (
     modes,
     outbox,
     personas,
+    sender_state,
     session_factory,
     style_examples,
 )
@@ -22,6 +23,7 @@ __all__ = [
     "outbox",
     "personas",
     "repos",
+    "sender_state",
     "session_factory",
     "style_examples",
 ]

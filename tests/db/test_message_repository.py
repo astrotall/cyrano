@@ -33,6 +33,11 @@ async def contact(contacts: SqlContactRepository) -> Contact:
     return await contacts.create(ContactCreate(tg_id=100))
 
 
+@pytest.fixture
+async def other(contacts: SqlContactRepository) -> Contact:
+    return await contacts.create(ContactCreate(tg_id=101))
+
+
 async def _count(session_factory: SessionFactory) -> int | None:
     async with session_factory() as session:
         return await session.scalar(select(func.count()).select_from(MessageRow))
@@ -189,3 +194,136 @@ async def test_driver_errors_do_not_carry_the_statement_parameters(
             await session.execute(statement, {"contact_id": MISSING_ID, "text": FAKE_TEXT})
 
     assert FAKE_TEXT not in str(caught.value)
+
+
+async def _stored(
+    messages: SqlMessageRepository,
+    session_factory: SessionFactory,
+    contact_id: int,
+    tg_message_id: int,
+    direction: MessageDirection,
+    created_at: datetime,
+) -> None:
+    stored = await messages.append(
+        MessageCreate(
+            contact_id=contact_id,
+            direction=direction,
+            text=FAKE_TEXT,
+            tg_message_id=tg_message_id,
+        )
+    )
+    async with session_factory.begin() as session:
+        await session.execute(
+            update(MessageRow).where(MessageRow.id == stored.id).values(created_at=created_at)
+        )
+
+
+WINDOW_NOW = datetime(2025, 3, 4, 5, 6, 7, tzinfo=UTC)
+
+
+def _before(seconds: int) -> datetime:
+    return WINDOW_NOW - timedelta(seconds=seconds)
+
+
+async def test_outgoing_times_reads_only_outgoing_messages_newest_first_from_the_window_start(
+    messages: SqlMessageRepository, session_factory: SessionFactory, contact: Contact
+) -> None:
+    outgoing = MessageDirection.OUTGOING
+    await _stored(messages, session_factory, contact.id, 1, outgoing, _before(30))
+    await _stored(messages, session_factory, contact.id, 2, outgoing, _before(10))
+    await _stored(messages, session_factory, contact.id, 3, outgoing, _before(60))
+    await _stored(messages, session_factory, contact.id, 4, outgoing, _before(61))
+    await _stored(messages, session_factory, contact.id, 5, MessageDirection.INCOMING, _before(5))
+
+    times = await messages.outgoing_times(_before(60), 10)
+
+    assert times == [_before(10), _before(30), _before(60)]
+
+
+async def test_outgoing_times_returns_at_most_the_limit_keeping_the_most_recent(
+    messages: SqlMessageRepository, session_factory: SessionFactory, contact: Contact
+) -> None:
+    for number, seconds in enumerate((40, 10, 30, 20), start=1):
+        await _stored(
+            messages,
+            session_factory,
+            contact.id,
+            number,
+            MessageDirection.OUTGOING,
+            _before(seconds),
+        )
+
+    assert await messages.outgoing_times(_before(60), 2) == [_before(10), _before(20)]
+
+
+async def test_outgoing_times_for_a_contact_does_not_mix_contacts_and_global_adds_them(
+    messages: SqlMessageRepository,
+    session_factory: SessionFactory,
+    contact: Contact,
+    other: Contact,
+) -> None:
+    outgoing = MessageDirection.OUTGOING
+    await _stored(messages, session_factory, contact.id, 1, outgoing, _before(10))
+    await _stored(messages, session_factory, other.id, 2, outgoing, _before(20))
+
+    assert await messages.outgoing_times(_before(60), 10, contact.id) == [_before(10)]
+    assert await messages.outgoing_times(_before(60), 10, other.id) == [_before(20)]
+    assert await messages.outgoing_times(_before(60), 10) == [_before(10), _before(20)]
+
+
+async def test_outgoing_times_is_empty_without_history_and_refuses_a_naive_start(
+    messages: SqlMessageRepository,
+) -> None:
+    assert await messages.outgoing_times(_before(60), 10) == []
+    with pytest.raises(ValueError, match="timezone-aware"):
+        await messages.outgoing_times(datetime(2025, 1, 1), 10)
+    with pytest.raises(ValueError, match="timezone-aware"):
+        await messages.busiest_outgoing_contact(datetime(2025, 1, 1))
+
+
+async def test_outgoing_times_returns_utc(
+    messages: SqlMessageRepository, session_factory: SessionFactory, contact: Contact
+) -> None:
+    await _stored(messages, session_factory, contact.id, 1, MessageDirection.OUTGOING, _before(1))
+
+    times = await messages.outgoing_times(_before(60), 1)
+
+    assert times[0].utcoffset() == timedelta(0)
+
+
+async def test_the_busiest_contact_counts_outgoing_messages_after_the_start_only(
+    messages: SqlMessageRepository,
+    session_factory: SessionFactory,
+    contact: Contact,
+    other: Contact,
+) -> None:
+    outgoing = MessageDirection.OUTGOING
+    await _stored(messages, session_factory, contact.id, 1, outgoing, _before(10))
+    await _stored(messages, session_factory, other.id, 2, outgoing, _before(20))
+    await _stored(messages, session_factory, other.id, 3, outgoing, _before(30))
+    await _stored(messages, session_factory, contact.id, 4, MessageDirection.INCOMING, _before(1))
+    await _stored(messages, session_factory, contact.id, 5, MessageDirection.INCOMING, _before(2))
+    await _stored(messages, session_factory, contact.id, 6, outgoing, _before(60))
+    await _stored(messages, session_factory, contact.id, 7, outgoing, _before(70))
+
+    peak = await messages.busiest_outgoing_contact(_before(60))
+
+    assert peak is not None
+    assert (peak.contact_id, peak.count) == (other.id, 2)
+    assert await messages.busiest_outgoing_contact(WINDOW_NOW) is None
+
+
+async def test_the_busiest_contact_breaks_a_tie_by_the_lower_id(
+    messages: SqlMessageRepository,
+    session_factory: SessionFactory,
+    contact: Contact,
+    other: Contact,
+) -> None:
+    outgoing = MessageDirection.OUTGOING
+    await _stored(messages, session_factory, other.id, 1, outgoing, _before(10))
+    await _stored(messages, session_factory, contact.id, 2, outgoing, _before(20))
+
+    peak = await messages.busiest_outgoing_contact(_before(60))
+
+    assert peak is not None
+    assert peak.contact_id == min(contact.id, other.id)

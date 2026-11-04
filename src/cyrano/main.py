@@ -24,6 +24,7 @@ from cyrano.db.repositories import (
     SqlModeRepository,
     SqlOutboxRepository,
     SqlPersonaRepository,
+    SqlSenderStateRepository,
     SqlStyleExampleRepository,
 )
 from cyrano.db.session import build_engine, build_session_factory
@@ -59,6 +60,7 @@ from cyrano.services.profile_collector import ProfileCollector
 from cyrano.services.prompt_builder import PromptBuilder
 from cyrano.services.reply_generator import ReplyGenerator
 from cyrano.services.send_guard import SendGuard
+from cyrano.services.send_limiter import SendLimiter
 from cyrano.services.style_examples import ExampleSelector
 from cyrano.services.style_import import ExamplesImporter, PersonaImporter
 from cyrano.style_cli import StyleCommands, StyleRequest, add_style_parsers, style_request
@@ -160,6 +162,8 @@ async def run(
     sender = OutboxSender(
         SqlOutboxRepository(session_factory),
         contacts,
+        SqlSenderStateRepository(session_factory),
+        SendLimiter(messages, settings),
         access.transport,
         control_bot.notifier,
         SendGuard(settings),
@@ -297,7 +301,13 @@ async def _run_outbox_command(settings: Settings, request: OutboxRequest) -> int
     session_factory = build_session_factory(engine)
     outbox = SqlOutboxRepository(session_factory)
     service = OutboxService(SqlContactRepository(session_factory), outbox, SendGuard(settings))
-    commands = OutboxCommands(service, outbox, clock=lambda: datetime.now(UTC))
+    commands = OutboxCommands(
+        service,
+        outbox,
+        SqlSenderStateRepository(session_factory),
+        SendLimiter(SqlMessageRepository(session_factory), settings),
+        clock=lambda: datetime.now(UTC),
+    )
     try:
         return await commands.run(request)
     except (SQLAlchemyError, OSError) as exc:

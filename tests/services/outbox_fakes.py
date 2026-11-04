@@ -2,13 +2,14 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import Awaitable, Callable, Sequence
+from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 
 from cyrano.db.repositories import SqlContactRepository, SqlModeRepository
 from cyrano.domain.enums import ContactStatus, OutboxSource, OutboxState
 from cyrano.domain.errors import OutboxRowNotFound, OutboxStateConflict
 from cyrano.domain.models import DEFAULT_MODE_NAME, Contact, ContactCreate
-from cyrano.domain.outbox import ScheduledMessage, SentMessage
+from cyrano.domain.outbox import ScheduledMessage, SenderState, SentMessage
 
 FAKE_NOW = datetime(2025, 3, 4, 5, 6, 7, tzinfo=UTC)
 FIRST_FAKE_TG_MESSAGE_ID = 700100
@@ -35,12 +36,25 @@ class FakeClock:
         self.now += timedelta(seconds=seconds)
 
 
+@dataclass(frozen=True)
+class FakeLimits:
+    send_limit_minute: int = 100_000
+    send_limit_hour: int = 100_000
+    send_limit_day: int = 100_000
+    send_limit_contact_minute: int = 100_000
+    send_limit_contact_hour: int = 100_000
+    send_limit_contact_day: int = 100_000
+
+
 class ScriptedTransport:
-    def __init__(self, script: Sequence[Exception] = ()) -> None:
+    def __init__(
+        self, script: Sequence[Exception] = (), clock: Callable[[], datetime] | None = None
+    ) -> None:
         self.calls: list[tuple[int, str]] = []
         self.max_active = 0
         self.delay = 0.0
         self._script = list(script)
+        self._clock = clock
         self._active = 0
 
     async def send_text(self, tg_id: int, text: str) -> SentMessage:
@@ -53,7 +67,8 @@ class ScriptedTransport:
                 await asyncio.sleep(self.delay)
             if self._script:
                 raise self._script.pop(0)
-            return SentMessage(tg_message_id=FIRST_FAKE_TG_MESSAGE_ID + number, sent_at=FAKE_NOW)
+            sent_at = FAKE_NOW if self._clock is None else self._clock()
+            return SentMessage(tg_message_id=FIRST_FAKE_TG_MESSAGE_ID + number, sent_at=sent_at)
         finally:
             self._active -= 1
 
@@ -84,6 +99,22 @@ class RecordingNotifier:
         self.texts.append(text)
         if self._error is not None:
             raise self._error
+
+
+class HangingNotifier:
+    def __init__(self) -> None:
+        self.calls = 0
+        self.cancelled = 0
+        self.started = asyncio.Event()
+
+    async def notify(self, text: str) -> None:
+        self.calls += 1
+        self.started.set()
+        try:
+            await asyncio.sleep(3600)
+        except asyncio.CancelledError:
+            self.cancelled += 1
+            raise
 
 
 class InMemoryOutbox:
@@ -121,6 +152,7 @@ class InMemoryOutbox:
             text=text,
             source=source,
             send_at=send_at,
+            due_at=send_at,
             state=OutboxState.SCHEDULED,
             error_class=None,
             cancel_reason=None,
@@ -184,6 +216,7 @@ class InMemoryOutbox:
             row_id,
             state=OutboxState.SCHEDULED,
             send_at=send_at,
+            due_at=send_at,
             claimed_at=None,
             error_class=None,
             cancel_reason=None,
@@ -211,6 +244,52 @@ class InMemoryOutbox:
     async def list_rows(self, state: OutboxState | None, limit: int) -> list[ScheduledMessage]:
         rows = [row for row in self.rows.values() if state is None or row.state is state]
         return sorted(rows, key=lambda row: row.id, reverse=True)[:limit]
+
+    async def count_by_state(self) -> dict[OutboxState, int]:
+        return {
+            state: sum(row.state is state for row in self.rows.values()) for state in OutboxState
+        }
+
+
+class InMemorySenderState:
+    def __init__(self) -> None:
+        self.state = SenderState(
+            paused_until=None,
+            pause_reason=None,
+            stopped=False,
+            stop_reason=None,
+            updated_at=FAKE_NOW,
+        )
+
+    async def get(self) -> SenderState:
+        return self.state
+
+    async def pause_until(self, until: datetime, reason: str, *, now: datetime) -> bool:
+        current = self.state.paused_until
+        if current is None or until > current:
+            self.state = self.state.model_copy(
+                update={"paused_until": until, "pause_reason": reason}
+            )
+        return current is None or current <= now
+
+    async def stop(self, reason: str) -> bool:
+        if self.state.stopped:
+            return False
+        self.state = self.state.model_copy(update={"stopped": True, "stop_reason": reason})
+        return True
+
+    async def resume(self, *, keep_stop: bool = False) -> SenderState:
+        before = self.state
+        if not (before.stopped and keep_stop):
+            self.state = before.model_copy(
+                update={
+                    "paused_until": None,
+                    "pause_reason": None,
+                    "stopped": False,
+                    "stop_reason": None,
+                }
+            )
+        return before
 
 
 async def stored_contact(

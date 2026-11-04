@@ -12,11 +12,13 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from cyrano.db.models import (
     PERSONA_ROW_ID,
+    SENDER_STATE_ROW_ID,
     ContactRow,
     MessageRow,
     ModeRow,
     PersonaRow,
     ScheduledMessageRow,
+    SenderStateRow,
     StyleExampleRow,
 )
 from cyrano.db.session import SessionFactory
@@ -30,6 +32,7 @@ from cyrano.domain.errors import (
     OutboxRowInvalid,
     OutboxRowNotFound,
     OutboxStateConflict,
+    SenderStateMissing,
 )
 from cyrano.domain.models import (
     DEFAULT_MODE_NAME,
@@ -41,7 +44,7 @@ from cyrano.domain.models import (
     Mode,
     ModeCreate,
 )
-from cyrano.domain.outbox import ScheduledMessage
+from cyrano.domain.outbox import OutgoingPeak, ScheduledMessage, SenderState
 from cyrano.domain.style import ExamplesAddResult, Persona, StyleExample, StyleExampleCreate
 from cyrano.domain.transitions import transition_needed
 
@@ -193,6 +196,37 @@ class SqlMessageRepository:
                 .limit(limit)
             )
             return [Message.model_validate(row) for row in reversed(rows.all())]
+
+    async def outgoing_times(
+        self, since: datetime, limit: int, contact_id: int | None = None
+    ) -> list[datetime]:
+        if since.utcoffset() is None:
+            msg = "the start of a window must be timezone-aware"
+            raise ValueError(msg)
+        statement = select(MessageRow.created_at).where(
+            MessageRow.direction == MessageDirection.OUTGOING, MessageRow.created_at >= since
+        )
+        if contact_id is not None:
+            statement = statement.where(MessageRow.contact_id == contact_id)
+        statement = statement.order_by(MessageRow.created_at.desc(), MessageRow.id.desc())
+        async with self._session_factory() as session:
+            return list((await session.scalars(statement.limit(limit))).all())
+
+    async def busiest_outgoing_contact(self, after: datetime) -> OutgoingPeak | None:
+        if after.utcoffset() is None:
+            msg = "the start of a window must be timezone-aware"
+            raise ValueError(msg)
+        count = func.count()
+        statement = (
+            select(MessageRow.contact_id, count)
+            .where(MessageRow.direction == MessageDirection.OUTGOING, MessageRow.created_at > after)
+            .group_by(MessageRow.contact_id)
+            .order_by(count.desc(), MessageRow.contact_id)
+            .limit(1)
+        )
+        async with self._session_factory() as session:
+            found = (await session.execute(statement)).first()
+            return None if found is None else OutgoingPeak(contact_id=found[0], count=found[1])
 
 
 class SqlModeRepository:
@@ -362,6 +396,7 @@ class SqlOutboxRepository:
                 text=text,
                 source=source,
                 send_at=send_at,
+                due_at=send_at,
             )
             .on_conflict_do_nothing(
                 index_elements=[
@@ -490,6 +525,7 @@ class SqlOutboxRepository:
             _require_state(row, OutboxState.FAILED)
             row.state = OutboxState.SCHEDULED
             row.send_at = send_at
+            row.due_at = send_at
             row.claimed_at = None
             row.error_class = None
             row.cancel_reason = None
@@ -529,3 +565,65 @@ class SqlOutboxRepository:
         async with self._session_factory() as session:
             rows = await session.scalars(statement)
             return [ScheduledMessage.model_validate(row) for row in rows]
+
+    async def count_by_state(self) -> dict[OutboxState, int]:
+        statement = select(ScheduledMessageRow.state, func.count()).group_by(
+            ScheduledMessageRow.state
+        )
+        async with self._session_factory() as session:
+            found = {state: count for state, count in (await session.execute(statement)).all()}
+        return {state: found.get(state, 0) for state in OutboxState}
+
+
+async def _locked_sender_state(session: AsyncSession) -> SenderStateRow:
+    row = await session.get(SenderStateRow, SENDER_STATE_ROW_ID, with_for_update=True)
+    if row is None:
+        raise SenderStateMissing
+    return row
+
+
+class SqlSenderStateRepository:
+    def __init__(self, session_factory: SessionFactory) -> None:
+        self._session_factory = session_factory
+
+    async def get(self) -> SenderState:
+        async with self._session_factory() as session:
+            row = await session.get(SenderStateRow, SENDER_STATE_ROW_ID)
+            if row is None:
+                raise SenderStateMissing
+            return SenderState.model_validate(row)
+
+    async def pause_until(self, until: datetime, reason: str, *, now: datetime) -> bool:
+        _require_aware(until)
+        _require_aware(now)
+        async with self._session_factory.begin() as session:
+            row = await _locked_sender_state(session)
+            is_new = row.paused_until is None or row.paused_until <= now
+            if row.paused_until is None or until > row.paused_until:
+                row.paused_until = until
+                row.pause_reason = reason
+                await session.flush()
+            return is_new
+
+    async def stop(self, reason: str) -> bool:
+        async with self._session_factory.begin() as session:
+            row = await _locked_sender_state(session)
+            if row.stopped:
+                return False
+            row.stopped = True
+            row.stop_reason = reason
+            await session.flush()
+            return True
+
+    async def resume(self, *, keep_stop: bool = False) -> SenderState:
+        async with self._session_factory.begin() as session:
+            row = await _locked_sender_state(session)
+            before = SenderState.model_validate(row)
+            if before.stopped and keep_stop:
+                return before
+            row.paused_until = None
+            row.pause_reason = None
+            row.stopped = False
+            row.stop_reason = None
+            await session.flush()
+            return before

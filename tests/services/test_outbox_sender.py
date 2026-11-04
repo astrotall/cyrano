@@ -11,12 +11,8 @@ import pytest
 from telethon.errors import (
     FloodWaitError,
     MessageTooLongError,
-    PeerFloodError,
     RPCError,
     ServerError,
-    UserDeactivatedBanError,
-    UserDeactivatedError,
-    UserIsBlockedError,
 )
 
 from cyrano.bot.notifier import OUTBOX_NOTICES
@@ -25,9 +21,16 @@ from cyrano.db.repositories import (
     SqlMessageRepository,
     SqlModeRepository,
     SqlOutboxRepository,
+    SqlSenderStateRepository,
 )
 from cyrano.db.session import SessionFactory
-from cyrano.domain.enums import ContactStatus, MessageDirection, OutboxSource, OutboxState
+from cyrano.domain.enums import (
+    ContactStatus,
+    MessageDirection,
+    OutboxSource,
+    OutboxState,
+    RejectionReason,
+)
 from cyrano.domain.errors import SendFailure, SendFloodWait, SendRejected, SendUncertain
 from cyrano.domain.models import Contact
 from cyrano.domain.outbox import (
@@ -49,6 +52,7 @@ from cyrano.services.outbox_sender import (
 )
 from cyrano.services.owner_notifier import OwnerNotifier
 from cyrano.services.send_guard import SendGuard
+from cyrano.services.send_limiter import SendLimiter
 from cyrano.userbot.adapter import MISSING_RESPONSE, TelethonAdapter
 from tests.privacy import (
     FAKE_OTHER_INTERNAL_ID,
@@ -59,6 +63,7 @@ from tests.services.outbox_fakes import (
     FAKE_NOW,
     FIRST_FAKE_TG_MESSAGE_ID,
     FakeClock,
+    FakeLimits,
     HangingTransport,
     RecordingNotifier,
     ScriptedTransport,
@@ -101,6 +106,11 @@ class Harness:
     clock: FakeClock
     contact: Contact
     notifier: RecordingNotifier
+    state: SqlSenderStateRepository
+
+    @property
+    def limiter(self) -> SendLimiter:
+        return SendLimiter(self.messages, FakeLimits())
 
     def sender(
         self,
@@ -113,6 +123,8 @@ class Harness:
         return OutboxSender(
             self.outbox,
             self.contacts,
+            self.state,
+            self.limiter,
             transport,
             notifier if notifier is not None else self.notifier,
             SendGuard(_Switch(switch)),
@@ -140,6 +152,7 @@ async def harness(
     contacts: SqlContactRepository,
     messages: SqlMessageRepository,
     modes: SqlModeRepository,
+    sender_state: SqlSenderStateRepository,
 ) -> Harness:
     contact = await stored_contact(
         contacts,
@@ -149,7 +162,9 @@ async def harness(
         username=USERNAME,
         display_name=DISPLAY_NAME,
     )
-    return Harness(outbox, contacts, messages, modes, FakeClock(), contact, RecordingNotifier())
+    return Harness(
+        outbox, contacts, messages, modes, FakeClock(), contact, RecordingNotifier(), sender_state
+    )
 
 
 async def test_a_due_row_is_sent_stored_and_marked_sent(harness: Harness) -> None:
@@ -312,9 +327,6 @@ async def _assert_uncertain_once_and_never_again(
         RPCError(request=None, message="FAKE_RPC", code=500),
         ServerError(request=None, message="FAKE_SERVER"),
         ValueError("Request was unsuccessful 3 time(s)"),
-        PeerFloodError(request=None),
-        UserDeactivatedError(request=None),
-        UserDeactivatedBanError(request=None),
     ],
 )
 async def test_every_uncertain_cause_from_telethon_fails_once_and_is_never_sent_again(
@@ -389,6 +401,8 @@ async def test_the_running_loop_never_sends_an_uncertain_row_again(harness: Harn
     sender = OutboxSender(
         harness.outbox,
         harness.contacts,
+        harness.state,
+        harness.limiter,
         transport,
         harness.notifier,
         SendGuard(_Switch(False)),
@@ -435,17 +449,11 @@ async def test_a_storage_failure_while_failing_an_uncertain_row_never_sends_it_a
     assert len(harness.notifier.texts) == 1
 
 
-@pytest.mark.parametrize(
-    "error",
-    [
-        MessageTooLongError(request=None),
-        UserIsBlockedError(request=None),
-    ],
-)
-async def test_a_certain_refusal_from_telethon_fails_with_its_class_and_the_plain_notice(
-    harness: Harness, error: Exception
+async def test_a_content_refusal_from_telethon_fails_with_its_class_and_the_plain_notice(
+    harness: Harness,
 ) -> None:
     row = await harness.row()
+    error = MessageTooLongError(request=None)
     raw = _RawTelethon(error)
 
     await harness.sender(TelethonAdapter(raw)).send_next()
@@ -510,7 +518,7 @@ async def test_a_rejected_send_fails_with_one_notification_and_is_never_retried(
     harness: Harness,
 ) -> None:
     row = await harness.row()
-    transport = ScriptedTransport([SendRejected("FakeBlockedError")])
+    transport = ScriptedTransport([SendRejected("FakeBlockedError", RejectionReason.CONTENT)])
     sender = harness.sender(transport)
 
     await sender.send_next()
@@ -667,6 +675,8 @@ async def test_the_loop_runs_the_stale_check_on_its_interval(harness: Harness) -
     sender = OutboxSender(
         harness.outbox,
         harness.contacts,
+        harness.state,
+        harness.limiter,
         ScriptedTransport(),
         harness.notifier,
         SendGuard(_Switch(False)),
@@ -734,6 +744,7 @@ async def test_two_sender_loops_never_send_a_row_twice(
         harness.clock,
         harness.contact,
         harness.notifier,
+        SqlSenderStateRepository(session_factory),
     )
     tasks = [
         asyncio.create_task(harness.sender(transport, timings=FAST_POLL).poll_forever()),
@@ -821,7 +832,8 @@ async def test_a_send_past_its_deadline_does_not_hold_up_the_next_row(harness: H
 
 
 @pytest.mark.parametrize(
-    "failure", [SendRejected("FakeBlockedError"), SendUncertain("FakeNetworkError")]
+    "failure",
+    [SendRejected("FakeBlockedError", RejectionReason.CONTENT), SendUncertain("FakeNetworkError")],
 )
 async def test_a_failing_notifier_changes_nothing(harness: Harness, failure: SendFailure) -> None:
     row = await harness.row()
@@ -864,7 +876,7 @@ async def test_notifications_and_logs_carry_no_personal_data(
         [
             SendUncertain("FakeNetworkError"),
             SendFloodWait("FakeFloodWait", 3600),
-            SendRejected("FakeBlockedError"),
+            SendRejected("FakeBlockedError", RejectionReason.CONTENT),
             RuntimeError(TEXT),
         ]
     )

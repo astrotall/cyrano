@@ -1,4 +1,4 @@
-.PHONY: install check test fmt up down logs migrate revision db-up login login-docker llm-check persona-import examples-import examples-stats examples-convert reply-preview outbox-enqueue outbox-list outbox-cancel outbox-retry
+.PHONY: install check test fmt up down logs migrate revision db-up login login-docker llm-check persona-import examples-import examples-stats examples-convert reply-preview outbox-enqueue outbox-list outbox-cancel outbox-retry outbox-status outbox-resume
 
 install:
 	uv sync --locked
@@ -62,6 +62,12 @@ outbox-cancel:
 outbox-retry:
 	@test -n "$$ID" || (echo 'usage: make outbox-retry ID=<row id> [IN=<seconds>] [YES=1]' >&2; exit 2)
 	uv run python -m cyrano outbox retry "$$ID" $${IN:+--in-seconds "$$IN"} $${YES:+--yes}
+
+outbox-status:
+	uv run python -m cyrano outbox status
+
+outbox-resume:
+	uv run python -m cyrano outbox resume $${YES:+--yes}
 
 revision:
 	@test -n "$(m)" || (echo 'usage: make revision m="what changed"' >&2; exit 2)

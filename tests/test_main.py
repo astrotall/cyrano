@@ -17,8 +17,8 @@ import pytest
 from cyrano import main as main_module
 from cyrano.bot.errors import BotTokenRejected, PollingFailed
 from cyrano.config import Settings, load_settings
-from cyrano.domain.enums import ContactStatus, OutboxSource, OutboxState
-from cyrano.domain.models import ContactProfile
+from cyrano.domain.enums import ContactStatus, MessageDirection, OutboxSource, OutboxState
+from cyrano.domain.models import ContactProfile, Message
 from cyrano.logging import configure_logging
 from cyrano.main import main, run
 from cyrano.services.card_actions import CardActions
@@ -35,7 +35,7 @@ from tests.conftest import (
 from tests.fake_app import CONNECTING_MARKER, HANGING_CONNECT_SCENARIO
 from tests.privacy import assert_absent
 from tests.services.fakes import FakeCardSender, InMemoryModes
-from tests.services.outbox_fakes import InMemoryOutbox, ScriptedTransport
+from tests.services.outbox_fakes import InMemoryOutbox, InMemorySenderState, ScriptedTransport
 from tests.userbot.fakes import (
     FAKE_SENDER_ID,
     FakeClient,
@@ -67,15 +67,23 @@ class Repositories:
     messages: InMemoryMessages
     modes: InMemoryModes
     outbox: InMemoryOutbox
+    sender_state: InMemorySenderState
 
 
 @pytest.fixture(autouse=True)
 def repositories(monkeypatch: pytest.MonkeyPatch) -> Repositories:
-    stored = Repositories(InMemoryContacts(), InMemoryMessages(), InMemoryModes(), InMemoryOutbox())
+    stored = Repositories(
+        InMemoryContacts(),
+        InMemoryMessages(),
+        InMemoryModes(),
+        InMemoryOutbox(),
+        InMemorySenderState(),
+    )
     monkeypatch.setattr("cyrano.main.SqlContactRepository", lambda _: stored.contacts)
     monkeypatch.setattr("cyrano.main.SqlMessageRepository", lambda _: stored.messages)
     monkeypatch.setattr("cyrano.main.SqlModeRepository", lambda _: stored.modes)
     monkeypatch.setattr("cyrano.main.SqlOutboxRepository", lambda _: stored.outbox)
+    monkeypatch.setattr("cyrano.main.SqlSenderStateRepository", lambda _: stored.sender_state)
     return stored
 
 
@@ -750,6 +758,68 @@ async def test_a_due_autopilot_row_is_cancelled_when_the_switch_is_off(
     await asyncio.wait_for(task, timeout=2)
 
     assert transport.calls == []
+
+
+async def test_the_running_app_honours_a_stored_stop_and_sends_nothing(
+    session_env: dict[str, str], heartbeat_file: Path, repositories: Repositories
+) -> None:
+    contact = await repositories.contacts.seed(FAKE_SENDER_ID, status=ContactStatus.ACTIVE)
+    row = await repositories.outbox.enqueue(
+        contact.id, "fake text", datetime.now(UTC), OutboxSource.MANUAL_TEST
+    )
+    await repositories.sender_state.stop("FakeAccountProblem")
+    transport = ScriptedTransport()
+    stop = asyncio.Event()
+    task = asyncio.create_task(
+        run(load_settings(env_file=None), stop, client_factory=_factory(FakeClient(), transport))
+    )
+
+    await asyncio.sleep(0.05)
+    stop.set()
+    await asyncio.wait_for(task, timeout=2)
+
+    assert transport.calls == []
+    stored = await repositories.outbox.get(row.id)
+    assert stored is not None
+    assert stored.state is OutboxState.SCHEDULED
+
+
+async def test_the_running_app_applies_the_limits_from_the_settings(
+    session_env: dict[str, str],
+    heartbeat_file: Path,
+    repositories: Repositories,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("SEND_LIMIT_CONTACT_MINUTE", "1")
+    contact = await repositories.contacts.seed(FAKE_SENDER_ID, status=ContactStatus.ACTIVE)
+    now = datetime.now(UTC)
+    repositories.messages.stored.append(
+        Message(
+            id=1,
+            contact_id=contact.id,
+            direction=MessageDirection.OUTGOING,
+            text="fake text",
+            tg_message_id=1,
+            created_at=now,
+        )
+    )
+    row = await repositories.outbox.enqueue(contact.id, "fake text", now, OutboxSource.MANUAL_TEST)
+    transport = ScriptedTransport()
+    stop = asyncio.Event()
+    task = asyncio.create_task(
+        run(load_settings(env_file=None), stop, client_factory=_factory(FakeClient(), transport))
+    )
+
+    await _wait_until(lambda: _outbox_row_state_later(repositories, row.id, now))
+    stop.set()
+    await asyncio.wait_for(task, timeout=2)
+
+    assert transport.calls == []
+
+
+async def _outbox_row_state_later(repositories: Repositories, row_id: int, than: datetime) -> bool:
+    row = await repositories.outbox.get(row_id)
+    return row is not None and row.state is OutboxState.SCHEDULED and row.send_at > than
 
 
 async def test_a_row_left_in_sending_is_failed_at_start_with_one_notice_through_the_bot(

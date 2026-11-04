@@ -48,5 +48,37 @@ OUTBOX_UNCERTAIN = (
     "повторите отправку командой: python -m cyrano outbox retry {row_id} --yes"
 )
 OUTBOX_FLOOD_WAIT = (
-    "Telegram просит подождать {seconds} с: сообщение #{row_id} контакту #{contact_id} отложено."
+    "Telegram просит подождать {seconds} с: вся отправка приостановлена, сообщение #{row_id} "
+    "контакту #{contact_id} отложено. Отправка продолжится сама."
+)
+OUTBOX_ACCOUNT_STOPPED = (
+    "Вся отправка остановлена: Telegram сообщил о проблеме с аккаунтом ({kind}). "
+    "Запланированные сообщения ждут в очереди. Сначала проверьте аккаунт вручную, затем снимите "
+    "остановку командой: python -m cyrano outbox resume --yes"
+)
+OUTBOX_CONTACT_PAUSED = (
+    "Контакт #{contact_id} поставлен на паузу: Telegram отказал в отправке ({error}). "
+    "Его запланированные сообщения отменены."
+)
+OUTBOX_LIMIT_NOTE = (
+    "Сообщения отложены до освобождения слота. Всё, что к тому времени будет ждать дольше "
+    "6 часов после запланированного времени, отменяется как устаревшее. "
+    "Счётчики показывает команда: python -m cyrano outbox status"
+)
+OUTBOX_STALE_SUMMARY = (
+    "Отменено как устаревших сообщений: {count}. Они ждали дольше 6 часов после "
+    "запланированного времени и не отправлены. Контакты (до 5): {contact_ids}. "
+    "Список: python -m cyrano outbox list --state cancelled"
+)
+OUTBOX_STOP_REMINDER = (
+    "Вся отправка по-прежнему остановлена ({kind}). Сначала проверьте аккаунт вручную, "
+    "затем снимите остановку командой: python -m cyrano outbox resume --yes"
+)
+OUTBOX_LIMIT_GLOBAL_HOUR = f"Достигнут общий лимит отправки за час. {OUTBOX_LIMIT_NOTE}"
+OUTBOX_LIMIT_GLOBAL_DAY = f"Достигнут общий лимит отправки за сутки. {OUTBOX_LIMIT_NOTE}"
+OUTBOX_LIMIT_CONTACT_HOUR = (
+    f"Достигнут лимит отправки за час для контакта #{{contact_id}}. {OUTBOX_LIMIT_NOTE}"
+)
+OUTBOX_LIMIT_CONTACT_DAY = (
+    f"Достигнут лимит отправки за сутки для контакта #{{contact_id}}. {OUTBOX_LIMIT_NOTE}"
 )

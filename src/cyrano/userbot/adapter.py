@@ -7,23 +7,44 @@ from collections.abc import AsyncIterator, Awaitable
 
 from telethon import TelegramClient
 from telethon.errors import (
+    ActiveUserRequiredError,
+    AuthKeyDuplicatedError,
+    AuthKeyInvalidError,
+    AuthKeyPermEmptyError,
+    AuthKeyUnregisteredError,
     FloodPremiumWaitError,
     FloodTestPhoneWaitError,
     FloodWaitError,
     ForbiddenError,
+    FrozenMethodInvalidError,
     InputUserDeactivatedError,
     MessageTooLongError,
+    PeerFloodError,
     PeerIdInvalidError,
     PeerIdNotSupportedError,
+    SessionExpiredError,
+    SessionPasswordNeededError,
+    SessionRevokedError,
     SlowModeWaitError,
+    UnauthorizedError,
     UserBlockedError,
+    UserDeactivatedBanError,
+    UserDeactivatedError,
     UserIdInvalidError,
     UserIsBlockedError,
+    UserRestrictedError,
     YouBlockedUserError,
 )
 from telethon.tl.functions.users import GetFullUserRequest
 
-from cyrano.domain.errors import SendFailure, SendFloodWait, SendRejected, SendUncertain
+from cyrano.domain.enums import RejectionReason
+from cyrano.domain.errors import (
+    SendAccountBlocked,
+    SendFailure,
+    SendFloodWait,
+    SendRejected,
+    SendUncertain,
+)
 from cyrano.domain.outbox import SentMessage
 from cyrano.userbot.protocols import (
     EventCallback,
@@ -38,10 +59,26 @@ FLOOD_WAITS = (
     FloodTestPhoneWaitError,
     SlowModeWaitError,
 )
-PERMANENT_REFUSALS = (
+ACCOUNT_BLOCKS = (
+    PeerFloodError,
+    UserDeactivatedError,
+    UserDeactivatedBanError,
+    AuthKeyUnregisteredError,
+    AuthKeyInvalidError,
+    SessionRevokedError,
+    SessionExpiredError,
+    UserRestrictedError,
+    FrozenMethodInvalidError,
+    AuthKeyDuplicatedError,
+    AuthKeyPermEmptyError,
+    ActiveUserRequiredError,
+    SessionPasswordNeededError,
+    UnauthorizedError,
+)
+CONTENT_REFUSALS = (MessageTooLongError,)
+RECIPIENT_REFUSALS = (
     ForbiddenError,
     InputUserDeactivatedError,
-    MessageTooLongError,
     PeerIdInvalidError,
     PeerIdNotSupportedError,
     UserBlockedError,
@@ -57,8 +94,12 @@ def classify_failure(error: Exception) -> SendFailure:
     name = type(error).__name__
     if isinstance(error, FLOOD_WAITS):
         return SendFloodWait(name, error.seconds)
-    if isinstance(error, PERMANENT_REFUSALS):
-        return SendRejected(name)
+    if isinstance(error, ACCOUNT_BLOCKS):
+        return SendAccountBlocked(name)
+    if isinstance(error, CONTENT_REFUSALS):
+        return SendRejected(name, RejectionReason.CONTENT)
+    if isinstance(error, RECIPIENT_REFUSALS):
+        return SendRejected(name, RejectionReason.RECIPIENT)
     return SendUncertain(name)
 
 
@@ -129,7 +170,7 @@ class TelethonAdapter:
         try:
             peer = await self._client.get_input_entity(tg_id)
         except ValueError:
-            raise SendRejected(PEER_NOT_FOUND) from None
+            raise SendRejected(PEER_NOT_FOUND, RejectionReason.RECIPIENT) from None
         except Exception as exc:
             raise classify_failure(exc) from None
         try:

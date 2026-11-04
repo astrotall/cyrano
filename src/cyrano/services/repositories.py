@@ -16,7 +16,7 @@ from cyrano.domain.models import (
     Mode,
     ModeCreate,
 )
-from cyrano.domain.outbox import ScheduledMessage
+from cyrano.domain.outbox import OutgoingPeak, ScheduledMessage, SenderState
 from cyrano.domain.style import ExamplesAddResult, Persona, StyleExample, StyleExampleCreate
 
 
@@ -48,6 +48,12 @@ class MessageRepository(Protocol):
     async def append(self, data: MessageCreate) -> Message: ...
 
     async def list_last(self, contact_id: int, limit: int) -> list[Message]: ...
+
+    async def outgoing_times(
+        self, since: datetime, limit: int, contact_id: int | None = None
+    ) -> list[datetime]: ...
+
+    async def busiest_outgoing_contact(self, after: datetime) -> OutgoingPeak | None: ...
 
 
 class ModeRepository(Protocol):
@@ -117,3 +123,15 @@ class OutboxRepository(Protocol):
     async def stale_sending(self, claimed_before: datetime) -> list[ScheduledMessage]: ...
 
     async def list_rows(self, state: OutboxState | None, limit: int) -> list[ScheduledMessage]: ...
+
+    async def count_by_state(self) -> dict[OutboxState, int]: ...
+
+
+class SenderStateRepository(Protocol):
+    async def get(self) -> SenderState: ...
+
+    async def pause_until(self, until: datetime, reason: str, *, now: datetime) -> bool: ...
+
+    async def stop(self, reason: str) -> bool: ...
+
+    async def resume(self, *, keep_stop: bool = False) -> SenderState: ...

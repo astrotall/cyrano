@@ -3,7 +3,7 @@
 **All rules below are planned until their tickets land, except where a rule says it exists.** S1
 and S2 are enforced since CYR-19: one guarded sender is the only way to a contact, and nothing
 writes to the outbox except the owner's explicit test command, so nothing is sent automatically.
-S8 is enforced since CYR-12. S5 is enforced in part: flood waits since CYR-19. The other rules are
+S8 is enforced since CYR-12. S5 is enforced since CYR-22. The other rules are
 not enforced by code yet; they are the contract that the tickets must implement and test. Changing or dropping a rule is a large change (see [CLAUDE.md](../../CLAUDE.md)) and ships
 with the code and the test ([CONTRIBUTING.md](../../CONTRIBUTING.md)). Statuses:
 [contact-lifecycle.md](contact-lifecycle.md).
@@ -39,8 +39,8 @@ only.
   generic request call, so code typed against it cannot send, and the transport has exactly one
   method. Telethon is imported only inside `userbot/`. A send with an unknown outcome is never retried
   automatically, because the contact could receive the message twice: the transport is called once for
-  the row, and the owner checks the chat and decides. Planned in the sender: humanization (CYR-18) and
-  limits (CYR-22).
+  the row, and the owner checks the chat and decides. The limits in the sender exist since CYR-22
+  (see S5). Planned in the sender: humanization (CYR-18).
 - **How it is tested:** exists, as structural tests that fail on a new way out.
   `tests/test_one_sender.py` scans the syntax tree of all of `src`: only the sender module calls
   `send_text`, also through `getattr`; only the adapter and the Protocol define it; outside `bot/` only
@@ -82,13 +82,25 @@ only.
 - **Rule:** sending is rate limited centrally, and Telegram's FloodWait is handled in the sender
   by waiting or giving up cleanly, never by hammering.
 - **Why:** account limits and bans are a main risk.
-- **Enforced where:** flood-wait rescheduling exists (CYR-19): `OutboxSender` puts the row back at
-  now + the wait + 5 s and notifies the owner above 60 s; no other failure is rescheduled. The
-  per-minute and daily limits are planned and come with CYR-22, in the sender.
-- **How it is tested:** exists for flood waits: `tests/services/test_outbox_sender.py` proves on real
-  PostgreSQL that the row is not sent during the wait and is sent after it, and
-  `tests/test_one_sender.py` proves that only the flood-wait handler reschedules. Planned (CYR-22): a
-  reached limit delays or refuses the send.
+- **Enforced where:** `OutboxSender` and `services/send_limiter.py` (CYR-22). Before every send the
+  six limits (global and per contact; minute, hour, day) are counted from the stored outgoing
+  messages; a reached limit puts the row back at the time a slot frees. The limiter itself never drops
+  a row; a row older than 6 h past its originally intended time (`due_at`) is cancelled as `stale`
+  when it is claimed, and the owner is told in one summary notice (the count, at most hourly). A flood
+  wait pauses the whole sender until now + the wait + 5 s, and the pause is stored in `sender_state`,
+  so it survives a restart. An account-level error (the lost or restricted session, a frozen account,
+  a bare `UnauthorizedError` and the like) stops the sender until the owner runs
+  `outbox resume --yes`; while it is stopped the owner gets a reminder every 6 h. Details: [outbox-and-sender.md](outbox-and-sender.md).
+- **How it is tested:** `tests/services/test_send_limiter.py` proves that each limit blocks exactly at
+  its threshold, the boundary, the latest free time over several limits, and that contacts do not mix.
+  `tests/services/test_outbox_sender_safety.py` proves on real PostgreSQL that a limited row is
+  rescheduled and sent once the clock passes, that no row is claimed and the transport is not called
+  during a pause or a stop, that both survive a new sender instance, that a shorter pause never
+  shortens a longer one, and that each notice comes once, the stale summary counts several cancels into
+  one notice and respects its hourly interval, and the stop reminder repeats every 6 h while stopped,
+  never after a resume and never for a mere pause. `tests/test_one_sender.py` proves that only
+  the flood path and the limit path reschedule, only the flood path pauses, only the account path
+  stops and only the owner's command resumes.
 
 ## S6. Humanized pacing and quiet hours
 
@@ -104,8 +116,9 @@ only.
 - **Rule:** proactive messages are limited. After two unanswered proactive messages the contact
   becomes `paused`. They go through the sender like every other message.
 - **Why:** unsolicited messages are the fastest way to complaints and bans.
-- **Enforced where:** proactive messages (CYR-23), the sender (CYR-22). The remaining limits are
-  open questions in [decisions.md](decisions.md).
+- **Enforced where:** proactive messages (CYR-23, planned). The sender's send limits exist since
+  CYR-22 (see S5), and a proactive message will count against them like every other message. The
+  remaining limits are open questions in [decisions.md](decisions.md).
 - **How it is tested:** the second unanswered proactive message pauses the contact; an answer
   resets the counter; a paused contact gets no proactive message.
 
@@ -149,7 +162,7 @@ only.
   command that reads a file and writes a file, never logs or prints a message text, a name, a
   sender id or a number (only counts), and writes the draft only under `data/` unless the owner
   passes `--allow-any-path`.
-  Owner notifications about the outbox (CYR-19) carry internal ids, class names and seconds only.
+  Owner notifications about the outbox (CYR-19, CYR-22) carry internal ids, class names, seconds and counts only.
 - **Why:** the data belongs to real people.
 - **Enforced where:** exists today: `.gitignore` and `.dockerignore` exclude `.env`, `*.session`,
   `media/` and `data/` (profile photos live under `MEDIA_DIR`, `.env.example` and compose put it

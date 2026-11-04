@@ -4,26 +4,43 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 
+from cyrano.domain.enums import ContactStatus, LimitScope, LimitWindow, RejectionReason
 from cyrano.domain.errors import (
+    InvalidStatusTransition,
     OutboxStateConflict,
+    SendAccountBlocked,
     SendFailure,
     SendFloodWait,
     SendRejected,
 )
 from cyrano.domain.outbox import (
+    CANCEL_REASON_SEND_REJECTED,
+    CANCEL_REASON_STALE,
     CAUSE_SEND_DEADLINE,
     ERROR_INTERRUPTED,
+    ERROR_RATE_LIMITED,
     ERROR_UNCERTAIN,
+    LIMIT_NOTICE_INTERVAL_SECONDS,
+    ROW_STALE_AFTER_SECONDS,
+    STALE_NOTICE_CONTACT_IDS_MAX,
+    STALE_NOTICE_INTERVAL_SECONDS,
+    STOP_REMINDER_INTERVAL_SECONDS,
     ScheduledMessage,
+    SenderState,
 )
 from cyrano.services.message_transport import MessageTransport
 from cyrano.services.owner_notifier import OwnerNotifier
-from cyrano.services.repositories import ContactRepository, OutboxRepository
+from cyrano.services.repositories import (
+    ContactRepository,
+    OutboxRepository,
+    SenderStateRepository,
+)
 from cyrano.services.send_guard import SendGuard
+from cyrano.services.send_limiter import LimitDecision, SendLimiter
 
 logger = logging.getLogger("cyrano.services.outbox_sender")
 
@@ -33,6 +50,8 @@ SENDING_STALE_AFTER = 120.0
 SENDER_SEND_DEADLINE = 100.0
 FLOOD_WAIT_MARGIN = 5.0
 FLOOD_WAIT_NOTIFY_ABOVE = 60.0
+OWNER_NOTIFY_DEADLINE = 15.0
+NOTIFIED_LIMIT_WINDOWS = frozenset({LimitWindow.HOUR, LimitWindow.DAY})
 
 
 def _utc_now() -> datetime:
@@ -47,6 +66,11 @@ class SenderTimings:
     send_deadline: float = SENDER_SEND_DEADLINE
     flood_margin: float = FLOOD_WAIT_MARGIN
     flood_notify_above: float = FLOOD_WAIT_NOTIFY_ABOVE
+    row_stale_after: float = ROW_STALE_AFTER_SECONDS
+    limit_notice_interval: float = LIMIT_NOTICE_INTERVAL_SECONDS
+    stale_notice_interval: float = STALE_NOTICE_INTERVAL_SECONDS
+    stop_reminder_interval: float = STOP_REMINDER_INTERVAL_SECONDS
+    notify_deadline: float = OWNER_NOTIFY_DEADLINE
 
 
 @dataclass(frozen=True, slots=True)
@@ -55,6 +79,11 @@ class SenderNotices:
     failed: str
     uncertain: str
     flood_wait: str
+    account_stopped: str
+    contact_paused: str
+    stale_summary: str
+    stop_reminder: str
+    limit_reached: Mapping[tuple[LimitScope, LimitWindow], str]
 
 
 class OutboxSender:
@@ -62,6 +91,8 @@ class OutboxSender:
         self,
         outbox: OutboxRepository,
         contacts: ContactRepository,
+        state: SenderStateRepository,
+        limiter: SendLimiter,
         transport: MessageTransport,
         notifier: OwnerNotifier,
         guard: SendGuard,
@@ -73,6 +104,8 @@ class OutboxSender:
     ) -> None:
         self._outbox = outbox
         self._contacts = contacts
+        self._state = state
+        self._limiter = limiter
         self._transport = transport
         self._notifier = notifier
         self._guard = guard
@@ -80,6 +113,11 @@ class OutboxSender:
         self._clock = clock
         self._timings = timings if timings is not None else SenderTimings()
         self._sleep = sleep
+        self._limit_notified_at: dict[tuple[LimitScope, LimitWindow], datetime] = {}
+        self._stale_unreported = 0
+        self._stale_contact_ids: list[int] = []
+        self._stale_notified_at: datetime | None = None
+        self._stop_noticed_at: datetime | None = None
 
     async def run(self) -> None:
         await self._step(self.sweep_interrupted)
@@ -102,7 +140,13 @@ class OutboxSender:
         await self._fail_interrupted(self._clock() - timedelta(seconds=self._timings.stale_after))
 
     async def send_next(self) -> bool:
-        row = await self._outbox.claim_due(self._clock())
+        now = self._clock()
+        await self._report_stale(now)
+        state = await self._state.get()
+        await self._remind_about_stop(state, now)
+        if state.stopped or state.is_paused(now):
+            return False
+        row = await self._outbox.claim_due(now)
         if row is None:
             return False
         await self._deliver(row)
@@ -130,6 +174,16 @@ class OutboxSender:
             )
 
     async def _deliver(self, row: ScheduledMessage) -> None:
+        now = self._clock()
+        if now - row.due_at > timedelta(seconds=self._timings.row_stale_after):
+            await self._outbox.mark_cancelled(row.id, CANCEL_REASON_STALE)
+            logger.warning(
+                "outbox row is stale and was cancelled",
+                extra={"row_id": row.id, "contact_id": row.contact_id},
+            )
+            self._count_stale(row.contact_id)
+            await self._report_stale(now)
+            return
         contact = await self._contacts.get_by_id(row.contact_id)
         decision = self._guard.check(contact, row.source)
         if contact is None or not decision.allowed:
@@ -138,6 +192,10 @@ class OutboxSender:
                 "outbox row refused by the guard",
                 extra={"row_id": row.id, "contact_id": row.contact_id, "reason": decision.reason},
             )
+            return
+        limits = await self._limiter.check(row.contact_id, now)
+        if limits.free_at is not None:
+            await self._hold_for_limit(row, limits, limits.free_at, now)
             return
         deadline = asyncio.timeout(self._timings.send_deadline)
         try:
@@ -155,29 +213,97 @@ class OutboxSender:
         )
         logger.info("outbox row sent", extra={"row_id": row.id, "contact_id": row.contact_id})
 
+    async def _hold_for_limit(
+        self, row: ScheduledMessage, limits: LimitDecision, free_at: datetime, now: datetime
+    ) -> None:
+        await self._outbox.reschedule(row.id, free_at, ERROR_RATE_LIMITED)
+        logger.info(
+            "outbox row delayed by a send limit",
+            extra={
+                "row_id": row.id,
+                "contact_id": row.contact_id,
+                "limits": [f"{limit.scope}_{limit.window}" for limit in limits.reached],
+            },
+        )
+        for limit in limits.reached:
+            if limit.window in NOTIFIED_LIMIT_WINDOWS:
+                await self._notify_limit(limit.scope, limit.window, row.contact_id, now)
+
+    async def _notify_limit(
+        self, scope: LimitScope, window: LimitWindow, contact_id: int, now: datetime
+    ) -> None:
+        last = self._limit_notified_at.get((scope, window))
+        interval = timedelta(seconds=self._timings.limit_notice_interval)
+        if last is not None and now - last < interval:
+            return
+        self._limit_notified_at[(scope, window)] = now
+        await self._notify(
+            self._notices.limit_reached[(scope, window)].format(contact_id=contact_id)
+        )
+
     async def _handle_failure(self, row: ScheduledMessage, failure: SendFailure) -> None:
         if isinstance(failure, SendFloodWait):
             await self._handle_flood_wait(row, failure)
+        elif isinstance(failure, SendAccountBlocked):
+            await self._stop_for_account(row, failure.kind)
         elif isinstance(failure, SendRejected):
-            await self._fail_rejected(row, failure.error_class)
+            await self._handle_rejected(row, failure)
         else:
             await self._fail_uncertain(row, failure.error_class)
 
     async def _handle_flood_wait(self, row: ScheduledMessage, failure: SendFloodWait) -> None:
-        delay = failure.seconds + self._timings.flood_margin
-        await self._outbox.reschedule(
-            row.id, self._clock() + timedelta(seconds=delay), failure.error_class
-        )
+        now = self._clock()
+        until = now + timedelta(seconds=failure.seconds + self._timings.flood_margin)
+        is_new = await self._state.pause_until(until, failure.error_class, now=now)
+        await self._outbox.reschedule(row.id, until, failure.error_class)
         logger.warning(
-            "outbox row delayed by a flood wait",
+            "the sender is paused by a flood wait",
             extra={"row_id": row.id, "contact_id": row.contact_id, "seconds": failure.seconds},
         )
-        if failure.seconds > self._timings.flood_notify_above:
+        if is_new and failure.seconds > self._timings.flood_notify_above:
             await self._notify(
                 self._notices.flood_wait.format(
                     row_id=row.id, contact_id=row.contact_id, seconds=failure.seconds
                 )
             )
+
+    async def _stop_for_account(self, row: ScheduledMessage, kind: str) -> None:
+        newly_stopped = await self._state.stop(kind)
+        if newly_stopped:
+            self._stop_noticed_at = self._clock()
+        logger.error(
+            "the sender is stopped by an account problem",
+            extra={"row_id": row.id, "contact_id": row.contact_id, "error": kind},
+        )
+        try:
+            await self._outbox.mark_failed(row.id, kind)
+        finally:
+            if newly_stopped:
+                await self._notify(self._notices.account_stopped.format(kind=kind))
+
+    async def _handle_rejected(self, row: ScheduledMessage, failure: SendRejected) -> None:
+        if failure.reason is RejectionReason.RECIPIENT:
+            await self._pause_rejected_contact(row, failure.error_class)
+        else:
+            await self._fail_rejected(row, failure.error_class)
+
+    async def _pause_rejected_contact(self, row: ScheduledMessage, error_class: str) -> None:
+        try:
+            await self._contacts.set_status(row.contact_id, ContactStatus.PAUSED)
+        except InvalidStatusTransition as exc:
+            logger.info(
+                "the rejected contact cannot be paused",
+                extra={"contact_id": row.contact_id, "status": exc.current},
+            )
+        await self._outbox.cancel_pending_for_contact(row.contact_id, CANCEL_REASON_SEND_REJECTED)
+        await self._outbox.mark_failed(row.id, error_class)
+        logger.warning(
+            "outbox row failed and its contact is paused",
+            extra={"row_id": row.id, "contact_id": row.contact_id, "error": error_class},
+        )
+        await self._notify(
+            self._notices.contact_paused.format(contact_id=row.contact_id, error=error_class)
+        )
 
     async def _fail_rejected(self, row: ScheduledMessage, error_class: str) -> None:
         await self._outbox.mark_failed(row.id, error_class)
@@ -197,8 +323,44 @@ class OutboxSender:
         )
         await self._notify(self._notices.uncertain.format(row_id=row.id, contact_id=row.contact_id))
 
+    def _count_stale(self, contact_id: int) -> None:
+        self._stale_unreported += 1
+        if (
+            contact_id not in self._stale_contact_ids
+            and len(self._stale_contact_ids) < STALE_NOTICE_CONTACT_IDS_MAX
+        ):
+            self._stale_contact_ids.append(contact_id)
+
+    async def _report_stale(self, now: datetime) -> None:
+        if self._stale_unreported == 0:
+            return
+        last = self._stale_notified_at
+        if last is not None and now - last < timedelta(seconds=self._timings.stale_notice_interval):
+            return
+        text = self._notices.stale_summary.format(
+            count=self._stale_unreported,
+            contact_ids=", ".join(f"#{contact_id}" for contact_id in self._stale_contact_ids),
+        )
+        self._stale_unreported = 0
+        self._stale_contact_ids = []
+        self._stale_notified_at = now
+        await self._notify(text)
+
+    async def _remind_about_stop(self, state: SenderState, now: datetime) -> None:
+        if not state.stopped:
+            self._stop_noticed_at = None
+            return
+        if self._stop_noticed_at is None:
+            self._stop_noticed_at = now
+            return
+        if now - self._stop_noticed_at < timedelta(seconds=self._timings.stop_reminder_interval):
+            return
+        self._stop_noticed_at = now
+        await self._notify(self._notices.stop_reminder.format(kind=state.stop_reason))
+
     async def _notify(self, text: str) -> None:
         try:
-            await self._notifier.notify(text)
+            async with asyncio.timeout(self._timings.notify_deadline):
+                await self._notifier.notify(text)
         except Exception as exc:
             logger.warning("owner notification failed", extra={"error": type(exc).__name__})

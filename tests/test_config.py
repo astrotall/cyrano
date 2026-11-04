@@ -220,6 +220,12 @@ def test_every_setting_is_either_logged_or_deliberately_withheld() -> None:
         "reply_history_messages",
         "reply_prompt_budget_chars",
         "autopilot_enabled",
+        "send_limit_minute",
+        "send_limit_hour",
+        "send_limit_day",
+        "send_limit_contact_minute",
+        "send_limit_contact_hour",
+        "send_limit_contact_day",
     }
 
     assert set(Settings.model_fields) == set(LOGGED_SETTINGS) | withheld
@@ -393,3 +399,135 @@ def test_a_nonsense_autopilot_value_is_a_readable_error_without_the_value(
 
     assert "AUTOPILOT_ENABLED" in str(raised.value)
     assert "nonsense-marker-zq" not in str(raised.value)
+
+
+SEND_LIMIT_VARIABLES = (
+    "SEND_LIMIT_MINUTE",
+    "SEND_LIMIT_HOUR",
+    "SEND_LIMIT_DAY",
+    "SEND_LIMIT_CONTACT_MINUTE",
+    "SEND_LIMIT_CONTACT_HOUR",
+    "SEND_LIMIT_CONTACT_DAY",
+)
+
+
+def test_the_send_limits_have_conservative_defaults_and_stay_out_of_the_log_line(
+    full_env: dict[str, str],
+) -> None:
+    settings = load_settings(env_file=None)
+
+    assert (
+        settings.send_limit_minute,
+        settings.send_limit_hour,
+        settings.send_limit_day,
+        settings.send_limit_contact_minute,
+        settings.send_limit_contact_hour,
+        settings.send_limit_contact_day,
+    ) == (4, 40, 200, 2, 15, 60)
+    assert not any(name.startswith("send_limit") for name in settings.safe_summary())
+
+
+@pytest.mark.parametrize("name", SEND_LIMIT_VARIABLES)
+@pytest.mark.parametrize("value", ["0", "-7", "many-marker-zq", "2.5"])
+def test_a_send_limit_below_one_or_not_a_number_is_a_readable_error_without_the_value(
+    full_env: dict[str, str], monkeypatch: pytest.MonkeyPatch, name: str, value: str
+) -> None:
+    monkeypatch.setenv(name, value)
+
+    with pytest.raises(ConfigError) as caught:
+        load_settings(env_file=None)
+
+    message = str(caught.value)
+    assert name in message
+    assert value not in message
+
+
+@pytest.mark.parametrize("name", SEND_LIMIT_VARIABLES)
+def test_an_empty_send_limit_counts_as_unset(
+    full_env: dict[str, str], monkeypatch: pytest.MonkeyPatch, name: str
+) -> None:
+    monkeypatch.setenv(name, "")
+
+    assert load_settings(env_file=None).send_limit_day == 200
+
+
+@pytest.mark.parametrize(
+    ("lower", "upper", "lower_value", "upper_value"),
+    [
+        ("SEND_LIMIT_MINUTE", "SEND_LIMIT_HOUR", 77001, 77000),
+        ("SEND_LIMIT_HOUR", "SEND_LIMIT_DAY", 77001, 77000),
+        ("SEND_LIMIT_CONTACT_MINUTE", "SEND_LIMIT_CONTACT_HOUR", 77001, 77000),
+        ("SEND_LIMIT_CONTACT_HOUR", "SEND_LIMIT_CONTACT_DAY", 77001, 77000),
+        ("SEND_LIMIT_CONTACT_MINUTE", "SEND_LIMIT_MINUTE", 77001, 77000),
+        ("SEND_LIMIT_CONTACT_HOUR", "SEND_LIMIT_HOUR", 77001, 77000),
+        ("SEND_LIMIT_CONTACT_DAY", "SEND_LIMIT_DAY", 77001, 77000),
+    ],
+)
+def test_every_ordering_rule_names_the_two_variables_and_never_the_values(
+    full_env: dict[str, str],
+    monkeypatch: pytest.MonkeyPatch,
+    lower: str,
+    upper: str,
+    lower_value: int,
+    upper_value: int,
+) -> None:
+    for name in SEND_LIMIT_VARIABLES:
+        monkeypatch.setenv(name, "90000")
+    monkeypatch.setenv(lower, str(lower_value))
+    monkeypatch.setenv(upper, str(upper_value))
+
+    with pytest.raises(ConfigError) as caught:
+        load_settings(env_file=None)
+
+    message = str(caught.value)
+    assert f"{lower} must not be above {upper}" in message
+    assert str(lower_value) not in message
+    assert str(upper_value) not in message
+    assert "90000" not in message
+
+
+def test_all_broken_ordering_rules_are_listed_at_once(
+    full_env: dict[str, str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("SEND_LIMIT_MINUTE", "500")
+    monkeypatch.setenv("SEND_LIMIT_CONTACT_DAY", "500")
+
+    with pytest.raises(ConfigError) as caught:
+        load_settings(env_file=None)
+
+    message = str(caught.value)
+    assert "SEND_LIMIT_MINUTE must not be above SEND_LIMIT_HOUR" in message
+    assert "SEND_LIMIT_CONTACT_DAY must not be above SEND_LIMIT_DAY" in message
+    assert "500" not in message
+
+
+@pytest.mark.parametrize(
+    "values",
+    [
+        {
+            "SEND_LIMIT_MINUTE": "7",
+            "SEND_LIMIT_HOUR": "7",
+            "SEND_LIMIT_DAY": "7",
+            "SEND_LIMIT_CONTACT_MINUTE": "7",
+            "SEND_LIMIT_CONTACT_HOUR": "7",
+            "SEND_LIMIT_CONTACT_DAY": "7",
+        },
+        {
+            "SEND_LIMIT_MINUTE": "1",
+            "SEND_LIMIT_HOUR": "1",
+            "SEND_LIMIT_DAY": "1",
+            "SEND_LIMIT_CONTACT_MINUTE": "1",
+            "SEND_LIMIT_CONTACT_HOUR": "1",
+            "SEND_LIMIT_CONTACT_DAY": "1",
+        },
+    ],
+)
+def test_equal_values_at_every_boundary_are_accepted(
+    full_env: dict[str, str], monkeypatch: pytest.MonkeyPatch, values: dict[str, str]
+) -> None:
+    for name, value in values.items():
+        monkeypatch.setenv(name, value)
+
+    settings = load_settings(env_file=None)
+
+    assert settings.send_limit_contact_day == int(values["SEND_LIMIT_CONTACT_DAY"])

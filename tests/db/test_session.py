@@ -8,6 +8,7 @@ from cyrano.db.repositories import (
     SqlMessageRepository,
     SqlModeRepository,
     SqlOutboxRepository,
+    SqlSenderStateRepository,
 )
 from cyrano.db.session import SessionFactory, build_engine, build_session_factory
 from cyrano.services.repositories import (
@@ -15,6 +16,7 @@ from cyrano.services.repositories import (
     MessageRepository,
     ModeRepository,
     OutboxRepository,
+    SenderStateRepository,
 )
 from tests.conftest import SECRET_VALUES
 
@@ -50,7 +52,9 @@ def test_repositories_satisfy_the_service_protocols() -> None:
     messages: MessageRepository = SqlMessageRepository(factory)
     modes: ModeRepository = SqlModeRepository(factory)
     outbox: OutboxRepository = SqlOutboxRepository(factory)
+    state: SenderStateRepository = SqlSenderStateRepository(factory)
 
+    assert state is not None
     assert outbox is not None
     assert contacts is not None
     assert messages is not None

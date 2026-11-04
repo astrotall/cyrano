@@ -11,7 +11,7 @@ from cyrano.main import run
 from cyrano.userbot.client import UserbotAccess
 from tests.bot.fakes import fake_control_bot_class
 from tests.services.fakes import InMemoryModes
-from tests.services.outbox_fakes import InMemoryOutbox, ScriptedTransport
+from tests.services.outbox_fakes import InMemoryOutbox, InMemorySenderState, ScriptedTransport
 from tests.userbot.fakes import FakeClient, InMemoryContacts, InMemoryMessages
 
 HANGING_CONNECT_SCENARIO = "hanging-connect"
@@ -51,6 +51,10 @@ def _in_memory_outbox(_: object) -> InMemoryOutbox:
     return InMemoryOutbox()
 
 
+def _in_memory_sender_state(_: object) -> InMemorySenderState:
+    return InMemorySenderState()
+
+
 def main(argv: list[str]) -> int:
     settings = load_settings(env_file=None)
     configure_logging(settings.log_level, settings.library_log_levels)
@@ -60,6 +64,7 @@ def main(argv: list[str]) -> int:
         patch.object(main_module, "SqlMessageRepository", _in_memory_messages),
         patch.object(main_module, "SqlModeRepository", _in_memory_modes),
         patch.object(main_module, "SqlOutboxRepository", _in_memory_outbox),
+        patch.object(main_module, "SqlSenderStateRepository", _in_memory_sender_state),
         patch.object(main_module, "ControlBot", fake_control_bot_class()),
     ):
         asyncio.run(run(settings, client_factory=factory))

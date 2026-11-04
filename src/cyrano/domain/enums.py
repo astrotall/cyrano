@@ -58,3 +58,19 @@ class OutboxState(StrEnum):
 class OutboxSource(StrEnum):
     AUTOPILOT = "autopilot"
     MANUAL_TEST = "manual_test"
+
+
+class RejectionReason(StrEnum):
+    RECIPIENT = "recipient"
+    CONTENT = "content"
+
+
+class LimitScope(StrEnum):
+    GLOBAL = "global"
+    CONTACT = "contact"
+
+
+class LimitWindow(StrEnum):
+    MINUTE = "minute"
+    HOUR = "hour"
+    DAY = "day"

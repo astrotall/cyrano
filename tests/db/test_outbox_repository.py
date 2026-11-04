@@ -61,6 +61,7 @@ async def test_enqueue_stores_a_scheduled_row(
     assert row.text == TEXT
     assert row.source is OutboxSource.AUTOPILOT
     assert row.send_at == LATER
+    assert row.due_at == LATER
     assert row.state is OutboxState.SCHEDULED
     assert (row.error_class, row.cancel_reason, row.claimed_at, row.sent_tg_message_id) == (
         None,
@@ -123,8 +124,9 @@ async def test_the_unique_index_refuses_a_second_row_with_the_same_trigger(
     migrated_url: URL, contact: Contact
 ) -> None:
     insert = (
-        "INSERT INTO scheduled_messages (contact_id, trigger_message_id, text, source, send_at) "  # noqa: S608
-        f"VALUES ({contact.id}, {TRIGGER}, 'x', 'autopilot', now())"
+        "INSERT INTO scheduled_messages "  # noqa: S608
+        "(contact_id, trigger_message_id, text, source, send_at, due_at) "
+        f"VALUES ({contact.id}, {TRIGGER}, 'x', 'autopilot', now(), now())"
     )
     await execute(migrated_url, insert)
 
@@ -145,8 +147,9 @@ async def test_check_constraints_refuse_bad_values(
 ) -> None:
     values = {"text": "'x'", "state": "'scheduled'", "source": "'manual_test'", column: value}
     statement = (
-        "INSERT INTO scheduled_messages (contact_id, text, state, source, send_at) VALUES "  # noqa: S608
-        f"({contact.id}, {values['text']}, {values['state']}, {values['source']}, now())"
+        "INSERT INTO scheduled_messages (contact_id, text, state, source, send_at, due_at) "  # noqa: S608
+        f"VALUES ({contact.id}, {values['text']}, {values['state']}, {values['source']}, "
+        "now(), now())"
     )
 
     with pytest.raises(DBAPIError, match=constraint):
@@ -277,6 +280,42 @@ async def test_reschedule_moves_a_claimed_row_back(
     assert row.send_at == LATER
     assert row.claimed_at is None
     assert row.error_class == "FakeError"
+
+
+async def test_reschedule_never_changes_the_due_time(
+    outbox: SqlOutboxRepository, contact: Contact
+) -> None:
+    row_id = await _enqueue(outbox, contact)
+
+    for later in (LATER, LATER + timedelta(hours=1)):
+        claimed = await outbox.claim_due(later)
+        assert claimed is not None
+        assert claimed.due_at == EARLIER
+        moved = await outbox.reschedule(row_id, later, "FakeError")
+        assert moved.send_at == later
+        assert moved.due_at == EARLIER
+
+
+async def test_a_repeated_enqueue_keeps_the_due_time_of_the_stored_row(
+    outbox: SqlOutboxRepository, contact: Contact
+) -> None:
+    first = await outbox.enqueue(contact.id, TEXT, EARLIER, OutboxSource.AUTOPILOT, TRIGGER)
+
+    repeated = await outbox.enqueue(contact.id, TEXT, LATER, OutboxSource.AUTOPILOT, TRIGGER)
+
+    assert repeated.id == first.id
+    assert (repeated.send_at, repeated.due_at) == (EARLIER, EARLIER)
+
+
+async def test_the_due_time_is_required_by_the_database(
+    migrated_url: URL, contact: Contact
+) -> None:
+    with pytest.raises(DBAPIError, match="due_at"):
+        await execute(
+            migrated_url,
+            "INSERT INTO scheduled_messages (contact_id, text, source, send_at) "  # noqa: S608
+            f"VALUES ({contact.id}, 'x', 'manual_test', now())",
+        )
 
 
 async def test_a_row_failed_as_interrupted_can_never_be_rescheduled(
@@ -473,6 +512,7 @@ async def test_retry_failed_moves_a_failed_row_back_and_clears_its_marks(
     assert row.id == claimed.id
     assert row.state is OutboxState.SCHEDULED
     assert row.send_at == LATER
+    assert row.due_at == LATER
     assert (row.error_class, row.cancel_reason, row.claimed_at) == (None, None, None)
     assert row.text == TEXT
     assert await outbox.claim_due(FAKE_NOW) is None
@@ -590,7 +630,8 @@ async def test_timestamps_are_utc_whatever_zone_came_in(
     )
 
     assert row.send_at == FAKE_NOW
-    for moment in (row.send_at, row.created_at, row.updated_at):
+    assert row.due_at == FAKE_NOW
+    for moment in (row.send_at, row.due_at, row.created_at, row.updated_at):
         assert moment.tzinfo is UTC
     claimed = await outbox.claim_due(FAKE_NOW)
     assert claimed is not None

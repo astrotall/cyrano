@@ -1,10 +1,12 @@
-"""The outbox row, the transport result, the guard decision and their vocabulary."""
+"""The outbox row, the sender state, the send limits and their vocabulary."""
 
 from __future__ import annotations
 
+from datetime import datetime
+
 from pydantic import BaseModel, ConfigDict, Field
 
-from cyrano.domain.enums import OutboxSource, OutboxState
+from cyrano.domain.enums import LimitScope, LimitWindow, OutboxSource, OutboxState
 from cyrano.domain.models import TelegramId, UtcDatetime
 
 MAX_OUTBOX_TEXT_LENGTH = 4096
@@ -19,9 +21,23 @@ REFUSED_AUTOPILOT_DISABLED = "autopilot_disabled"
 REFUSED_TEXT_EMPTY = "text_empty"
 REFUSED_TEXT_TOO_LONG = "text_too_long"
 CANCEL_REASON_OWNER = "cancelled_by_owner"
+CANCEL_REASON_STALE = "stale"
+CANCEL_REASON_SEND_REJECTED = "send_rejected"
 ERROR_INTERRUPTED = "interrupted"
 ERROR_UNCERTAIN = "uncertain"
+ERROR_RATE_LIMITED = "rate_limited"
 CAUSE_SEND_DEADLINE = "SendDeadlinePassed"
+
+ROW_STALE_AFTER_SECONDS = 6 * 3600
+LIMIT_NOTICE_INTERVAL_SECONDS = 3600
+STALE_NOTICE_INTERVAL_SECONDS = 3600
+STALE_NOTICE_CONTACT_IDS_MAX = 5
+STOP_REMINDER_INTERVAL_SECONDS = 6 * 3600
+LIMIT_WINDOW_SECONDS = {
+    LimitWindow.MINUTE: 60,
+    LimitWindow.HOUR: 3600,
+    LimitWindow.DAY: 86400,
+}
 
 
 class ScheduledMessage(BaseModel):
@@ -33,6 +49,7 @@ class ScheduledMessage(BaseModel):
     text: str = Field(repr=False)
     source: OutboxSource
     send_at: UtcDatetime
+    due_at: UtcDatetime
     state: OutboxState
     error_class: str | None
     cancel_reason: str | None
@@ -54,3 +71,31 @@ class GuardDecision(BaseModel):
 
     allowed: bool
     reason: str = GUARD_ALLOWED
+
+
+class SenderState(BaseModel):
+    model_config = ConfigDict(frozen=True, extra="forbid", from_attributes=True)
+
+    paused_until: UtcDatetime | None
+    pause_reason: str | None
+    stopped: bool
+    stop_reason: str | None
+    updated_at: UtcDatetime
+
+    def is_paused(self, now: datetime) -> bool:
+        return self.paused_until is not None and self.paused_until > now
+
+
+class SendLimit(BaseModel):
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    scope: LimitScope
+    window: LimitWindow
+    maximum: int = Field(ge=1)
+
+
+class OutgoingPeak(BaseModel):
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    contact_id: int
+    count: int

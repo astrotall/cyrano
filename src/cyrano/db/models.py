@@ -18,6 +18,7 @@ from sqlalchemy import (
     SmallInteger,
     Text,
     UniqueConstraint,
+    false,
     func,
     text,
     true,
@@ -93,6 +94,7 @@ class MessageRow(Base):
     __table_args__ = (
         UniqueConstraint("contact_id", "tg_message_id"),
         Index(None, "contact_id", "created_at"),
+        Index(None, "direction", "created_at"),
     )
 
     id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
@@ -106,6 +108,7 @@ class MessageRow(Base):
 
 
 PERSONA_ROW_ID = 1
+SENDER_STATE_ROW_ID = 1
 
 
 class PersonaRow(Base):
@@ -163,6 +166,7 @@ class ScheduledMessageRow(Base):
         )
     )
     send_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    due_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
     state: Mapped[OutboxState] = mapped_column(
         Enum(
             OutboxState,
@@ -178,6 +182,20 @@ class ScheduledMessageRow(Base):
     claimed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     sent_tg_message_id: Mapped[int | None] = mapped_column(BigInteger)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
+    )
+
+
+class SenderStateRow(Base):
+    __tablename__ = "sender_state"
+    __table_args__ = (CheckConstraint(f"id = {SENDER_STATE_ROW_ID}", name="single_row"),)
+
+    id: Mapped[int] = mapped_column(SmallInteger, primary_key=True, autoincrement=False)
+    paused_until: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    pause_reason: Mapped[str | None] = mapped_column(Text)
+    stopped: Mapped[bool] = mapped_column(Boolean, server_default=false())
+    stop_reason: Mapped[str | None] = mapped_column(Text)
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
     )

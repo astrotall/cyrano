@@ -8,7 +8,7 @@ from typing import Literal
 from urllib.parse import urlsplit
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
-from pydantic import Field, SecretStr, ValidationError, field_validator
+from pydantic import Field, SecretStr, ValidationError, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 from cyrano.health import default_heartbeat_path
@@ -36,6 +36,22 @@ MAX_REPLY_HISTORY_MESSAGES = 100
 DEFAULT_REPLY_PROMPT_BUDGET_CHARS = 24000
 MIN_REPLY_PROMPT_BUDGET_CHARS = 4000
 MAX_REPLY_PROMPT_BUDGET_CHARS = 200000
+MIN_SEND_LIMIT = 1
+DEFAULT_SEND_LIMIT_MINUTE = 4
+DEFAULT_SEND_LIMIT_HOUR = 40
+DEFAULT_SEND_LIMIT_DAY = 200
+DEFAULT_SEND_LIMIT_CONTACT_MINUTE = 2
+DEFAULT_SEND_LIMIT_CONTACT_HOUR = 15
+DEFAULT_SEND_LIMIT_CONTACT_DAY = 60
+SEND_LIMIT_ORDER = (
+    ("send_limit_minute", "send_limit_hour"),
+    ("send_limit_hour", "send_limit_day"),
+    ("send_limit_contact_minute", "send_limit_contact_hour"),
+    ("send_limit_contact_hour", "send_limit_contact_day"),
+    ("send_limit_contact_minute", "send_limit_minute"),
+    ("send_limit_contact_hour", "send_limit_hour"),
+    ("send_limit_contact_day", "send_limit_day"),
+)
 
 LOGGED_SETTINGS = frozenset(
     {
@@ -109,6 +125,14 @@ class Settings(BaseSettings):
         le=MAX_REPLY_PROMPT_BUDGET_CHARS,
     )
     autopilot_enabled: bool = False
+    send_limit_minute: int = Field(default=DEFAULT_SEND_LIMIT_MINUTE, ge=MIN_SEND_LIMIT)
+    send_limit_hour: int = Field(default=DEFAULT_SEND_LIMIT_HOUR, ge=MIN_SEND_LIMIT)
+    send_limit_day: int = Field(default=DEFAULT_SEND_LIMIT_DAY, ge=MIN_SEND_LIMIT)
+    send_limit_contact_minute: int = Field(
+        default=DEFAULT_SEND_LIMIT_CONTACT_MINUTE, ge=MIN_SEND_LIMIT
+    )
+    send_limit_contact_hour: int = Field(default=DEFAULT_SEND_LIMIT_CONTACT_HOUR, ge=MIN_SEND_LIMIT)
+    send_limit_contact_day: int = Field(default=DEFAULT_SEND_LIMIT_CONTACT_DAY, ge=MIN_SEND_LIMIT)
 
     @field_validator(
         "log_level",
@@ -177,6 +201,17 @@ class Settings(BaseSettings):
             raise ValueError(msg)
         return value
 
+    @model_validator(mode="after")
+    def _check_send_limit_order(self) -> Settings:
+        broken = [
+            f"{lower.upper()} must not be above {upper.upper()}"
+            for lower, upper in SEND_LIMIT_ORDER
+            if getattr(self, lower) > getattr(self, upper)
+        ]
+        if broken:
+            raise ValueError("; ".join(broken))
+        return self
+
     @property
     def reply_model(self) -> str:
         return self.llm_reply_model or self.deepseek_model
@@ -219,7 +254,9 @@ def _format_validation_error(exc: ValidationError) -> str:
         lines.extend(f"  - {name}" for name in sorted(missing))
     if invalid:
         lines.append("Invalid values:")
-        lines.extend(f"  - {name}: {msg}" for name, msg in sorted(invalid))
+        lines.extend(
+            f"  - {name}: {msg}" if name else f"  - {msg}" for name, msg in sorted(invalid)
+        )
     lines.append(
         "The variables are described in the Settings section of README.md; "
         ".env.example is the template to copy to .env."

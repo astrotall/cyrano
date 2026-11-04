@@ -5,7 +5,7 @@ from __future__ import annotations
 from collections.abc import Sequence
 from dataclasses import dataclass
 
-from cyrano.domain.enums import ContactStatus, OutboxState
+from cyrano.domain.enums import ContactStatus, OutboxState, RejectionReason
 
 
 class DomainError(Exception):
@@ -161,6 +161,11 @@ class OutboxStateConflict(DomainError):
         self.state = state
 
 
+class SenderStateMissing(DomainError):
+    def __init__(self) -> None:
+        super().__init__("the sender state row is missing; run the migrations")
+
+
 class SendFailure(DomainError):
     def __init__(self, error_class: str) -> None:
         super().__init__(f"the send failed: {error_class}")
@@ -168,7 +173,15 @@ class SendFailure(DomainError):
 
 
 class SendRejected(SendFailure):
-    pass
+    def __init__(self, error_class: str, reason: RejectionReason) -> None:
+        super().__init__(error_class)
+        self.reason = reason
+
+
+class SendAccountBlocked(SendFailure):
+    def __init__(self, kind: str) -> None:
+        super().__init__(kind)
+        self.kind = kind
 
 
 class SendUncertain(SendFailure):

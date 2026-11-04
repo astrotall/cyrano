@@ -6,7 +6,7 @@ collection of the profile for the owner's card exists too (CYR-11): it fills `pr
 no status. The owner's card exists since CYR-12: delivering it moves `new` to `pending`, and its two
 buttons move `pending` to `active` or `ignored`. The outbox and the guarded sender exist since
 CYR-19 ([outbox-and-sender.md](outbox-and-sender.md)), and only the owner's test command can add a
-row. The other flows that drive the lifecycle are **planned**, each marked with its ticket; nothing
+row. Since CYR-22 a recipient rejection moves an `active` contact to `paused`. The other flows that drive the lifecycle are **planned**, each marked with its ticket; nothing
 replies to an `active` contact automatically yet.
 
 ## Statuses
@@ -18,7 +18,7 @@ replies to an `active` contact automatically yet.
 | `new` | Registered by the userbot from an unknown sender | Never | userbot (CYR-10, exists) |
 | `pending` | A card was delivered to the owner, waiting for a decision | No | card announcer (CYR-12, exists) |
 | `active` | The owner pressed Reply and chose a mode | Yes, via the sender only (the sender exists, CYR-19; the autopilot is CYR-17, so nothing replies automatically yet) | owner (CYR-12 exists, modes CYR-15) |
-| `paused` | Stopped by a stop-trigger, by a manual message of the owner, by two unanswered proactive messages, or by the owner | No | system (CYR-20, CYR-21, CYR-23) or owner |
+| `paused` | Stopped by Telegram refusing to deliver to the contact, by a stop-trigger, by a manual message of the owner, by two unanswered proactive messages, or by the owner | No | sender (CYR-22, exists), system (CYR-20, CYR-21, CYR-23) or owner |
 | `ignored` | The owner pressed Ignore | Never; silence forever | owner (CYR-12, exists) |
 
 Only `active` is allowed to receive an automatic reply. See [S1](safety-rules.md).
@@ -36,6 +36,7 @@ The triggers marked "exists" are implemented; the others are planned. Changing t
 | `new` | `pending` | The card is delivered to the owner (the sender returned success) | card announcer | CYR-12 (exists) |
 | `pending` | `active` | Owner presses Reply and chooses a mode | owner, through the card | CYR-12 (exists), modes CYR-15 |
 | `pending` | `ignored` | Owner presses Ignore | owner, through the card | CYR-12 (exists) |
+| `active` | `paused` | Telegram refused a send because of the recipient (blocked, privacy, deactivated, not found, forbidden) | sender | CYR-22 (exists) |
 | `active` | `paused` | A stop-trigger fires | system | CYR-20 |
 | `active` | `paused` | The owner writes a manual message in the chat | system | CYR-21 |
 | `active` | `paused` | Two proactive messages in a row stay unanswered | system | CYR-23 |
@@ -75,7 +76,7 @@ otherwise the `default` mode. If `default` itself is missing or disabled they ra
 | 7 | Stop-triggers: on a hit the contact becomes `paused`, the owner is notified and no reply is sent | CYR-20 |
 | 8 | The layered prompt is built: persona, mode fragment with few-shot examples, contact summary, last N messages | CYR-14, CYR-15, CYR-16, CYR-25 |
 | 9 | The LLM is called through the LLM interface; the response is validated | CYR-13 |
-| 10 | The reply goes through the sender: status guard and FloodWait handling (exist, see [outbox-and-sender.md](outbox-and-sender.md)), rate limits, humanized delay, typing action, splitting, quiet hours | CYR-19, CYR-22, CYR-18 |
+| 10 | The reply goes through the sender: status guard, FloodWait handling and rate limits (exist, see [outbox-and-sender.md](outbox-and-sender.md)), humanized delay, typing action, splitting, quiet hours | CYR-19, CYR-22, CYR-18 |
 | 11 | Background: contact summaries, proactive messages, reminders for undecided cards | CYR-25, CYR-23, CYR-24 |
 
 How stop-triggers are detected (lists, model output, both) and at which step each one is

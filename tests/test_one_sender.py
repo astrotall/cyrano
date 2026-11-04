@@ -8,6 +8,7 @@ from pathlib import Path
 
 from cyrano.services.message_transport import MessageTransport
 from cyrano.services.owner_notifier import OwnerNotifier
+from cyrano.services.repositories import SenderStateRepository
 from cyrano.userbot.protocols import UserbotClient
 
 SOURCE_ROOT = Path(__file__).resolve().parents[1] / "src" / "cyrano"
@@ -19,6 +20,10 @@ OWNER_CHAT_MODULES = {"bot/sender.py", "bot/notifier.py"}
 TRANSPORT_METHOD = "send_text"
 RESCHEDULE_METHOD = "reschedule"
 FLOOD_WAIT_HANDLER = "_handle_flood_wait"
+LIMIT_HANDLER = "_hold_for_limit"
+PAUSE_METHOD = "pause_until"
+STOP_METHOD = "stop"
+RESUME_METHOD = "resume"
 RETRY_METHOD = "retry_failed"
 OWNER_COMMAND_MODULE = "outbox_cli.py"
 TELETHON_WRITE_METHODS = frozenset(
@@ -112,6 +117,16 @@ def test_the_transport_has_exactly_one_method() -> None:
 
 def test_the_notifier_has_exactly_one_method() -> None:
     assert _members(OwnerNotifier) == {"notify"}
+
+
+def test_the_sender_calls_the_notifier_in_one_place_behind_the_deadline() -> None:
+    source = (SOURCE_ROOT / SENDER_MODULE).read_text()
+
+    assert len(re.findall(r"\.notify\(", source)) == 1
+    assert re.search(
+        r"asyncio\.timeout\(self\._timings\.notify_deadline\):\s+await self\._notifier\.notify\(",
+        source,
+    )
 
 
 def test_the_read_client_protocol_has_no_write_member() -> None:
@@ -248,14 +263,71 @@ def _callers_in_module(tree: ast.AST, attribute: str) -> set[str]:
     }
 
 
-def test_only_a_flood_wait_puts_a_row_back_automatically() -> None:
+def test_only_a_flood_wait_and_a_reached_limit_put_a_row_back_automatically() -> None:
     modules = {
         name: _callers_in_module(tree, RESCHEDULE_METHOD)
         for name, tree in _modules()
         if RESCHEDULE_METHOD in _called_attributes(tree)
     }
 
+    assert modules == {SENDER_MODULE: {FLOOD_WAIT_HANDLER, LIMIT_HANDLER}}
+
+
+def test_the_state_repository_has_exactly_its_four_methods() -> None:
+    assert _members(SenderStateRepository) == {"get", PAUSE_METHOD, STOP_METHOD, RESUME_METHOD}
+
+
+def _calls_with_arguments(tree: ast.AST, attribute: str) -> list[ast.Call]:
+    return [
+        node
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Attribute)
+        and node.func.attr == attribute
+        and (node.args or node.keywords)
+    ]
+
+
+def test_only_the_flood_path_pauses_the_sender() -> None:
+    modules = {
+        name: _callers_in_module(tree, PAUSE_METHOD)
+        for name, tree in _modules()
+        if PAUSE_METHOD in _called_attributes(tree)
+    }
+
     assert modules == {SENDER_MODULE: {FLOOD_WAIT_HANDLER}}
+
+
+def test_only_the_account_path_stops_the_sender() -> None:
+    writers = {name for name, tree in _modules() if _calls_with_arguments(tree, STOP_METHOD)}
+    tree = ast.parse((SOURCE_ROOT / SENDER_MODULE).read_text())
+
+    assert writers == {SENDER_MODULE}
+    assert _callers_in_module(tree, STOP_METHOD) == {"_stop_for_account"}
+
+
+def test_only_the_owner_command_resumes_the_sender() -> None:
+    callers = {name for name, tree in _modules() if RESUME_METHOD in _called_attributes(tree)}
+
+    assert callers == {OWNER_COMMAND_MODULE}
+
+
+def test_the_sender_reads_its_state_before_it_claims_a_row() -> None:
+    tree = ast.parse((SOURCE_ROOT / SENDER_MODULE).read_text())
+    send_next = next(
+        node
+        for node in ast.walk(tree)
+        if isinstance(node, ast.AsyncFunctionDef) and node.name == "send_next"
+    )
+    calls = [
+        node.func.attr
+        for statement in send_next.body
+        for node in ast.walk(statement)
+        if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
+    ]
+
+    assert calls.index("get") < calls.index("claim_due")
+    assert calls.count("claim_due") == 1
 
 
 def test_only_the_owner_command_takes_a_failed_row_back() -> None:
@@ -273,6 +345,9 @@ def test_the_scans_catch_what_they_look_for() -> None:
         "    await getattr(client, 'send_message')(1, 'x')\n"
         "    await transport.send_text(1, 'x')\n"
         "    await client(SendMessageRequest())\n"
+        "    await state.stop('FakeKind')\n"
+        "    await state.pause_until(until, 'FakeKind', now=now)\n"
+        "    await bot.stop()\n"
     )
 
     assert {"send_file", "action", "send_message"} <= _telethon_write_uses(bad)
@@ -280,4 +355,6 @@ def test_the_scans_catch_what_they_look_for() -> None:
     assert "send_file" in _attributes_used(bad)
     assert "send_message" in _names_passed_to_getattr(bad)
     assert TRANSPORT_METHOD in _called_attributes(bad)
+    assert len(_calls_with_arguments(bad, STOP_METHOD)) == 1
+    assert PAUSE_METHOD in _called_attributes(bad)
     assert ("telethon.tl.functions.messages", "SendMessageRequest") in set(_imported(bad))

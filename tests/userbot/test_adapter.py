@@ -1,41 +1,68 @@
 from __future__ import annotations
 
 import asyncio
+import inspect
 import logging
+import re
 import typing
 from collections.abc import AsyncIterator
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta, timezone
 
 import pytest
+from telethon import errors as telethon_errors
 from telethon.errors import (
+    ActiveUserRequiredError,
+    AuthKeyDuplicatedError,
+    AuthKeyInvalidError,
+    AuthKeyPermEmptyError,
     AuthKeyUnregisteredError,
     ChatWriteForbiddenError,
+    FloodError,
     FloodPremiumWaitError,
     FloodTestPhoneWaitError,
     FloodWaitError,
     ForbiddenError,
+    FrozenMethodInvalidError,
     InputUserDeactivatedError,
     MessageTooLongError,
+    NotAllowedError,
     PeerFloodError,
     PeerIdInvalidError,
     PeerIdNotSupportedError,
+    PremiumAccountRequiredError,
     RPCError,
+    SensitiveChangeForbiddenError,
     ServerError,
+    SessionExpiredError,
+    SessionPasswordNeededError,
+    SessionRevokedError,
     SlowModeWaitError,
+    UnauthorizedError,
     UserBlockedError,
     UserDeactivatedBanError,
     UserDeactivatedError,
     UserIdInvalidError,
     UserIsBlockedError,
     UserPrivacyRestrictedError,
+    UserRestrictedError,
     YouBlockedUserError,
 )
 from telethon.tl.functions.users import GetFullUserRequest
 
-from cyrano.domain.errors import SendFloodWait, SendRejected, SendUncertain
+from cyrano.domain.enums import RejectionReason
+from cyrano.domain.errors import SendAccountBlocked, SendFloodWait, SendRejected, SendUncertain
 from cyrano.services.message_transport import MessageTransport
-from cyrano.userbot.adapter import MISSING_RESPONSE, PEER_NOT_FOUND, TelethonAdapter
+from cyrano.userbot.adapter import (
+    ACCOUNT_BLOCKS,
+    CONTENT_REFUSALS,
+    FLOOD_WAITS,
+    MISSING_RESPONSE,
+    PEER_NOT_FOUND,
+    RECIPIENT_REFUSALS,
+    TelethonAdapter,
+    classify_failure,
+)
 from cyrano.userbot.protocols import UserbotClient
 from tests.privacy import FAKE_TELEGRAM_ID, assert_absent
 from tests.userbot.fakes import FakeHistoryMessage, FakeSender
@@ -204,15 +231,213 @@ async def test_a_flood_wait_while_resolving_the_peer_is_a_flood_wait() -> None:
         UserIdInvalidError(request=None),
         ChatWriteForbiddenError(request=None),
         ForbiddenError(request=None, message="FAKE_NEW_REFUSAL"),
-        MessageTooLongError(request=None),
     ],
 )
-async def test_permanent_refusals_are_rejected(error: Exception) -> None:
+async def test_refusals_about_the_recipient_are_rejected_for_the_recipient(
+    error: Exception,
+) -> None:
     with pytest.raises(SendRejected) as raised:
         await TelethonAdapter(_RawTelethon(send_error=error)).send_text(FAKE_TELEGRAM_ID, TEXT)
 
     assert raised.value.error_class == type(error).__name__
+    assert raised.value.reason is RejectionReason.RECIPIENT
     assert raised.value.__suppress_context__ is True
+
+
+async def test_a_text_telegram_finds_too_long_is_rejected_for_its_content() -> None:
+    raw = _RawTelethon(send_error=MessageTooLongError(request=None))
+
+    with pytest.raises(SendRejected) as raised:
+        await TelethonAdapter(raw).send_text(FAKE_TELEGRAM_ID, TEXT)
+
+    assert raised.value.error_class == "MessageTooLongError"
+    assert raised.value.reason is RejectionReason.CONTENT
+    assert raised.value.__suppress_context__ is True
+
+
+ACCOUNT_LEVEL_ERRORS = (
+    PeerFloodError(request=None),
+    UserDeactivatedError(request=None),
+    UserDeactivatedBanError(request=None),
+    AuthKeyUnregisteredError(request=None),
+    AuthKeyInvalidError(request=None),
+    SessionRevokedError(request=None),
+    SessionExpiredError(request=None),
+    UserRestrictedError(request=None),
+    FrozenMethodInvalidError(request=None),
+    AuthKeyDuplicatedError(request=None),
+    AuthKeyPermEmptyError(request=None),
+    ActiveUserRequiredError(request=None),
+    SessionPasswordNeededError(request=None),
+    UnauthorizedError(request=None, message="FAKE_UNAUTHORIZED"),
+)
+
+
+@pytest.mark.parametrize(
+    ("error_class", "parent"),
+    [
+        (AuthKeyInvalidError, UnauthorizedError),
+        (SessionRevokedError, UnauthorizedError),
+        (SessionExpiredError, UnauthorizedError),
+        (UserRestrictedError, ForbiddenError),
+        (UserPrivacyRestrictedError, ForbiddenError),
+        (FrozenMethodInvalidError, FloodError),
+        (AuthKeyPermEmptyError, UnauthorizedError),
+        (ActiveUserRequiredError, UnauthorizedError),
+        (SessionPasswordNeededError, UnauthorizedError),
+        (PremiumAccountRequiredError, ForbiddenError),
+        (SensitiveChangeForbiddenError, ForbiddenError),
+        (NotAllowedError, ForbiddenError),
+    ],
+)
+def test_the_installed_telethon_has_the_parents_the_mapping_relies_on(
+    error_class: type[Exception], parent: type[Exception]
+) -> None:
+    assert issubclass(error_class, parent)
+
+
+def test_user_restricted_is_a_recipient_class_by_inheritance_and_the_account_check_wins() -> None:
+    error = UserRestrictedError(request=None)
+
+    assert isinstance(error, RECIPIENT_REFUSALS)
+    assert isinstance(error, ACCOUNT_BLOCKS)
+    assert isinstance(classify_failure(error), SendAccountBlocked)
+
+
+def test_a_frozen_method_error_is_a_flood_error_but_not_one_the_flood_branch_lists() -> None:
+    error = FrozenMethodInvalidError(request=None)
+
+    assert isinstance(error, FloodError)
+    assert not isinstance(error, FLOOD_WAITS)
+    assert not issubclass(FrozenMethodInvalidError, FLOOD_WAITS)
+    assert FloodError not in FLOOD_WAITS
+
+
+def test_a_frozen_method_error_is_an_account_block_and_never_a_flood_wait() -> None:
+    failure = classify_failure(FrozenMethodInvalidError(request=None))
+
+    assert isinstance(failure, SendAccountBlocked)
+    assert not isinstance(failure, SendFloodWait)
+    assert failure.kind == "FrozenMethodInvalidError"
+
+
+def test_the_flood_branch_lists_specific_classes_and_none_of_the_account_errors() -> None:
+    assert all(error_class is not FloodError for error_class in FLOOD_WAITS)
+    assert not any(issubclass(error_class, FLOOD_WAITS) for error_class in ACCOUNT_BLOCKS)
+
+
+def test_a_real_flood_wait_still_wins_over_the_account_blocks() -> None:
+    failure = classify_failure(FloodWaitError(request=None, capture=7))
+
+    assert isinstance(failure, SendFloodWait)
+    assert failure.seconds == 7
+
+
+def test_the_bare_unauthorized_error_is_listed_after_every_subclass_that_is_mapped() -> None:
+    position = ACCOUNT_BLOCKS.index(UnauthorizedError)
+    subclasses = [
+        error_class
+        for error_class in ACCOUNT_BLOCKS
+        if error_class is not UnauthorizedError and issubclass(error_class, UnauthorizedError)
+    ]
+
+    assert subclasses
+    assert all(ACCOUNT_BLOCKS.index(error_class) < position for error_class in subclasses)
+
+
+def test_the_bare_unauthorized_error_blocks_under_its_own_name() -> None:
+    failure = classify_failure(UnauthorizedError(request=None, message="FAKE_UNAUTHORIZED"))
+
+    assert isinstance(failure, SendAccountBlocked)
+    assert failure.kind == "UnauthorizedError"
+
+
+@pytest.mark.parametrize("error", ACCOUNT_LEVEL_ERRORS, ids=lambda error: type(error).__name__)
+def test_an_account_error_keeps_its_own_class_name_as_the_kind(error: Exception) -> None:
+    failure = classify_failure(error)
+
+    assert isinstance(failure, SendAccountBlocked)
+    assert failure.kind == type(error).__name__
+
+
+def test_every_installed_unauthorized_subclass_is_an_account_block() -> None:
+    unauthorized = [
+        error_class
+        for error_class in vars(telethon_errors).values()
+        if isinstance(error_class, type) and issubclass(error_class, UnauthorizedError)
+    ]
+
+    assert len(unauthorized) > 1
+    assert all(issubclass(error_class, ACCOUNT_BLOCKS) for error_class in unauthorized)
+
+
+@pytest.mark.parametrize(
+    "error",
+    [
+        PremiumAccountRequiredError(request=None),
+        SensitiveChangeForbiddenError(request=None),
+        NotAllowedError(request=None),
+    ],
+    ids=lambda error: type(error).__name__,
+)
+def test_the_three_unmapped_forbidden_subclasses_stay_recipient_level(error: Exception) -> None:
+    failure = classify_failure(error)
+
+    assert isinstance(failure, SendRejected)
+    assert failure.reason is RejectionReason.RECIPIENT
+
+
+def test_the_account_check_comes_before_the_refusal_checks() -> None:
+    checked = re.findall(r"isinstance\(error, (\w+)\)", inspect.getsource(classify_failure))
+
+    assert checked == ["FLOOD_WAITS", "ACCOUNT_BLOCKS", "CONTENT_REFUSALS", "RECIPIENT_REFUSALS"]
+
+
+def test_only_user_restricted_of_the_account_errors_is_also_a_refusal() -> None:
+    overlapping = {
+        error_class
+        for error_class in ACCOUNT_BLOCKS
+        if issubclass(error_class, RECIPIENT_REFUSALS + CONTENT_REFUSALS + FLOOD_WAITS)
+    }
+
+    assert overlapping == {UserRestrictedError}
+
+
+@pytest.mark.parametrize(
+    "error",
+    [
+        UserPrivacyRestrictedError(request=None),
+        ChatWriteForbiddenError(request=None),
+        UserIsBlockedError(request=None),
+    ],
+)
+def test_an_ordinary_refusal_stays_about_the_recipient(error: Exception) -> None:
+    failure = classify_failure(error)
+
+    assert isinstance(failure, SendRejected)
+    assert failure.reason is RejectionReason.RECIPIENT
+
+
+@pytest.mark.parametrize("error", ACCOUNT_LEVEL_ERRORS)
+async def test_account_level_errors_block_with_their_kind(error: Exception) -> None:
+    with pytest.raises(SendAccountBlocked) as raised:
+        await TelethonAdapter(_RawTelethon(send_error=error)).send_text(FAKE_TELEGRAM_ID, TEXT)
+
+    assert raised.value.kind == type(error).__name__
+    assert raised.value.error_class == type(error).__name__
+    assert raised.value.__suppress_context__ is True
+
+
+@pytest.mark.parametrize("error", ACCOUNT_LEVEL_ERRORS)
+async def test_an_account_level_error_while_resolving_the_peer_blocks_and_nothing_is_sent(
+    error: Exception,
+) -> None:
+    raw = _RawTelethon(peer_error=error)
+
+    with pytest.raises(SendAccountBlocked):
+        await TelethonAdapter(raw).send_text(FAKE_TELEGRAM_ID, TEXT)
+
+    assert raw.send_calls == []
 
 
 async def test_a_peer_that_cannot_be_resolved_is_rejected_and_nothing_is_sent() -> None:
@@ -222,6 +447,7 @@ async def test_a_peer_that_cannot_be_resolved_is_rejected_and_nothing_is_sent() 
         await TelethonAdapter(raw).send_text(FAKE_TELEGRAM_ID, TEXT)
 
     assert raised.value.error_class == PEER_NOT_FOUND
+    assert raised.value.reason is RejectionReason.RECIPIENT
     assert raw.send_calls == []
     assert_absent(FAKE_TELEGRAM_ID, str(raised.value))
 
@@ -235,10 +461,6 @@ async def test_a_peer_that_cannot_be_resolved_is_rejected_and_nothing_is_sent() 
         ValueError("Request was unsuccessful 3 time(s)"),
         RPCError(request=None, message="FAKE_RPC", code=500),
         ServerError(request=None, message="FAKE_SERVER"),
-        PeerFloodError(request=None),
-        AuthKeyUnregisteredError(request=None),
-        UserDeactivatedError(request=None),
-        UserDeactivatedBanError(request=None),
         RuntimeError("fake detail"),
     ],
 )

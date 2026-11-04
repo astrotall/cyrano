@@ -26,7 +26,8 @@ collection (CYR-11), the control bot with the contact card (CYR-12), the LLM cli
 used by the app yet), the persona and style examples import (CYR-14, not used by the app yet) and
 the layered reply prompt with the reply generator and the `reply-preview` command (CYR-16, not
 wired into the app) and the outbox with the one sender and the status guard (CYR-19; only the
-owner's test command writes rows, nothing is sent automatically) exist. Everything
+owner's test command writes rows, nothing is sent automatically) with its limits, flood-wait pause
+and account-level stop (CYR-22) exist. Everything
 else is planned and marked with its ticket key.
 Never describe planned behaviour as existing.
 
@@ -72,7 +73,7 @@ Changing any of these is a large change (see Workflow expectations). Reasons:
 .
 ├── CLAUDE.md, CONTRIBUTING.md, README.md
 ├── pyproject.toml, uv.lock, .python-version
-├── Makefile                      includes login, login-docker, llm-check, persona-import, examples-import, examples-stats, examples-convert, reply-preview, outbox-enqueue, outbox-list, outbox-cancel and outbox-retry
+├── Makefile                      includes login, login-docker, llm-check, persona-import, examples-import, examples-stats, examples-convert, reply-preview, outbox-enqueue, outbox-list, outbox-cancel, outbox-retry, outbox-status and outbox-resume
 ├── Dockerfile, docker-compose.yml, docker-compose.override.yml
 ├── .env.example, .dockerignore, .gitignore
 ├── alembic.ini
@@ -85,7 +86,7 @@ Changing any of these is a large change (see Workflow expectations). Reasons:
 │   ├── style_cli.py              the persona and examples commands
 │   ├── convert_cli.py            the examples convert command (chat export to a draft)
 │   ├── reply_cli.py              the reply-preview command
-│   ├── outbox_cli.py             the outbox enqueue, list, cancel and retry commands
+│   ├── outbox_cli.py             the outbox enqueue, list, cancel, retry, status and resume commands
 │   ├── config.py                 Settings, load_settings, ConfigError
 │   ├── logging.py                JSON-lines logging
 │   ├── health.py                 heartbeat file and the app healthcheck
@@ -96,7 +97,7 @@ Changing any of these is a large change (see Workflow expectations). Reasons:
 │   │                             card_actions, llm_client, llm_check, style_files, style_import, persona_service,
 │   │                             style_examples, chat_export_reader, chat_redaction, chat_dialogues,
 │   │                             chat_export_converter, contact_facts, prompt_builder,
-│   │                             reply_postprocess, reply_generator, send_guard, outbox_service, outbox_sender,
+│   │                             reply_postprocess, reply_generator, send_guard, send_limiter, outbox_service, outbox_sender,
 │   │                             message_transport, owner_notifier; the rest is planned
 │   ├── userbot/                  Telethon: protocols, filters, handler, client, adapter, login, runner, errors,
 │   │                             profile_source, leomatch_source, leomatch_match
@@ -171,6 +172,23 @@ and reads), `UserbotAccess` and `build_access` instead of `build_client`, `get_f
 instead of the generic request call on `UserbotClient`, `bot/notifier.py`, `outbox_cli.py` with the
 `outbox` commands and their Makefile targets, and the tests, with the structural scans in
 `tests/test_one_sender.py`.
+CYR-22 added the limits, the pause and the stop of the sender: the six optional `SEND_LIMIT_*`
+settings with their ordering rules, migration `0004` (`sender_state`, one row, and the index on
+`messages (direction, created_at)`), the `SenderState`, `SendLimit` and `OutgoingPeak` models,
+`SendAccountBlocked`, `SenderStateMissing`, the `RejectionReason` carried by `SendRejected`, the
+`SenderStateRepository` Protocol with `SqlSenderStateRepository`, `outgoing_times`,
+`busiest_outgoing_contact` and `count_by_state`, `services/send_limiter.py`, the new steps of
+`OutboxSender` (state read, stale rows, limits, sender-wide flood pause, account stop, contact paused
+after a recipient rejection), the new owner notices, the `outbox status` and `outbox resume` commands
+and their Makefile targets, and the tests, in `tests/services/test_send_limiter.py`,
+`tests/services/test_outbox_sender_safety.py` and `tests/db/test_sender_state_repository.py`. Later in
+the same ticket: migration `0005` (`due_at` on `scheduled_messages`, the originally intended send
+time the 6 h stale rule counts from, unchanged by a reschedule), `OWNER_NOTIFY_DEADLINE` (every owner
+notice of the sender has a 15 s deadline), the account-level errors extended to `FrozenMethodInvalidError`,
+`AuthKeyDuplicatedError`, `AuthKeyPermEmptyError`, `ActiveUserRequiredError`,
+`SessionPasswordNeededError` and a bare `UnauthorizedError`, the stale summary notice (one notice with
+the count of rows cancelled as stale, at most hourly) and the stop reminder (every 6 h while the
+sender is stopped).
 
 ## Detailed guides
 

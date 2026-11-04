@@ -8,6 +8,7 @@ from aiogram import Bot
 from aiogram.exceptions import TelegramAPIError
 
 from cyrano.bot import messages
+from cyrano.domain.enums import LimitScope, LimitWindow
 from cyrano.services.outbox_sender import SenderNotices
 
 logger = logging.getLogger("cyrano.bot.notifier")
@@ -17,6 +18,16 @@ OUTBOX_NOTICES = SenderNotices(
     failed=messages.OUTBOX_FAILED,
     uncertain=messages.OUTBOX_UNCERTAIN,
     flood_wait=messages.OUTBOX_FLOOD_WAIT,
+    account_stopped=messages.OUTBOX_ACCOUNT_STOPPED,
+    contact_paused=messages.OUTBOX_CONTACT_PAUSED,
+    stale_summary=messages.OUTBOX_STALE_SUMMARY,
+    stop_reminder=messages.OUTBOX_STOP_REMINDER,
+    limit_reached={
+        (LimitScope.GLOBAL, LimitWindow.HOUR): messages.OUTBOX_LIMIT_GLOBAL_HOUR,
+        (LimitScope.GLOBAL, LimitWindow.DAY): messages.OUTBOX_LIMIT_GLOBAL_DAY,
+        (LimitScope.CONTACT, LimitWindow.HOUR): messages.OUTBOX_LIMIT_CONTACT_HOUR,
+        (LimitScope.CONTACT, LimitWindow.DAY): messages.OUTBOX_LIMIT_CONTACT_DAY,
+    },
 )
 
 

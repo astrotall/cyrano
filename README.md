@@ -41,8 +41,8 @@ Key principles:
 > (CYR-13), the import of the owner persona and style examples (CYR-14), the converter of a chat
 > export into draft examples (CYR-34) and the layered reply prompt with the reply generator (CYR-16)
 > exist; these last four are not used by the running app, only by the `llm-check`, `persona`,
-> `examples` and `reply-preview` commands. The outbox with the one guarded sender (CYR-19) exists too,
-> and only the owner's test command can add a message to it: nothing is sent automatically. The flow
+> `examples` and `reply-preview` commands. The outbox with the one guarded sender (CYR-19) and its
+> limits, pause and stop (CYR-22) exist too, and only the owner's test command can add a message to it: nothing is sent automatically. The flow
 > below is the plan.
 
 ## Architecture diagram
@@ -180,17 +180,21 @@ Every message to a contact goes through one table and one sender. A message is a
 (`scheduled_messages`). The sender, a background task of the app, takes one due row at a time,
 re-reads the contact, checks that it is still `active`, and only then sends. A row that may or may
 not have reached Telegram is never sent again: it is marked failed and the owner is told, because a
-duplicate message to a person cannot be taken back. Only a flood wait is rescheduled automatically;
-the sender calls Telegram once for a row whatever else goes wrong. Notifications to the owner carry
+duplicate message to a person cannot be taken back. Only a flood wait and a reached send limit put a
+row back automatically; the sender calls Telegram once for a row whatever else goes wrong. The sender
+also keeps conservative limits per minute, hour and day, pauses as a whole during a flood wait, and
+stops completely on a problem with the account itself. Notifications to the owner carry
 internal ids and error class names only.
 The autopilot does not exist yet, so the owner's commands are the only source of rows. States,
 errors and rules: [.claude/docs/outbox-and-sender.md](.claude/docs/outbox-and-sender.md).
 
 ```sh
 make outbox-enqueue CONTACT=<contact id> TEXT="..." [IN=<seconds>]   # default 5 seconds
-make outbox-list [STATE=<state>] [LIMIT=<n>]                         # never prints a text
+make outbox-list [STATE=<state>] [LIMIT=<n>]                         # ids, states, send_at, due_at, error, cancel_reason; never a text
 make outbox-cancel ID=<row id>                                       # scheduled rows only
 make outbox-retry ID=<row id> [IN=<seconds>] YES=1                   # failed rows only; check the chat first
+make outbox-status                                                   # sender state, counters against limits, rows per state
+make outbox-resume [YES=1]                                           # clears a pause; a stop needs YES=1
 ```
 
 **After a notification that the outcome is unknown.** The send failed in a way that does not tell
@@ -203,6 +207,27 @@ no longer `active` gets nothing.
 The commands run on the host like `make migrate`: they need a complete `.env` and the database up. A
 refusal or any other error prints one line and exits with 1 (the `make` target reports that as its
 own failure). The contact must be `active`; `AUTOPILOT_ENABLED` does not apply to these commands.
+
+**After a pause notice.** Telegram asked to wait, so nothing goes out to anyone until that time, and
+sending then goes on by itself, also after a restart. Usually do nothing; `make outbox-status` shows
+the time. `make outbox-resume` ends the pause early, at the risk of another flood wait.
+
+**After a stop notice.** Telegram refused because of the account itself (for example `PeerFloodError`,
+a lost session or a frozen account). Nothing goes out until you act, also after a restart. While
+the sender stays stopped, a short reminder comes every 6 hours. Check the account in
+Telegram; if the session is gone, run `make login` and restart the app. Then run
+`make outbox-resume YES=1`. Without `YES=1` the command only prints a reminder and exits with 1.
+Rows more than 6 hours past their original due time when sending resumes are cancelled as `stale`,
+not sent late; `make outbox-list` shows the reason, and one notice tells you how many were cancelled.
+
+**After a limit notice.** An hourly or daily limit is reached, and rows are postponed until a slot
+frees up. A row that ends up more than 6 hours past its original due time is cancelled as `stale`
+instead of going out late, and you get one summary notice with the count (at most once an hour). Usually do nothing; `make outbox-status` shows the counters. The limits are the
+`SEND_LIMIT_*` settings.
+
+**After a notice that a contact was paused.** Telegram refused the message because of this contact
+(blocked, privacy settings, deactivated). The contact is `paused`, and its other planned rows are
+cancelled. The control bot has no Resume yet (CYR-26). A text that is too long fails only its own row.
 
 **Verifying the sender live.** With the app running and a contact you control approved through its
 card, run `make outbox-enqueue CONTACT=<id> TEXT="test" IN=10`, then `make outbox-list`: the row moves
@@ -267,7 +292,7 @@ What exists now:
 ├── pyproject.toml                # dependencies, Ruff, mypy, pytest config
 ├── uv.lock
 ├── .python-version               # 3.14
-├── Makefile                      # install, check, test, fmt, up, down, logs, migrate, revision, db-up, login, login-docker, llm-check, persona-import, examples-import, examples-stats, examples-convert, reply-preview, outbox-enqueue, outbox-list, outbox-cancel, outbox-retry
+├── Makefile                      # install, check, test, fmt, up, down, logs, migrate, revision, db-up, login, login-docker, llm-check, persona-import, examples-import, examples-stats, examples-convert, reply-preview, outbox-enqueue, outbox-list, outbox-cancel, outbox-retry, outbox-status, outbox-resume
 ├── Dockerfile                    # multi-stage, non-root runtime
 ├── docker-compose.yml            # app, worker, one-shot migrate, postgres, redis
 ├── docker-compose.override.yml   # dev: Postgres and Redis on 127.0.0.1, media in ./data/media
@@ -284,7 +309,7 @@ What exists now:
 │   ├── contact-lifecycle.md      # statuses, transitions, message flow
 │   ├── persona-and-examples.md   # persona and style examples: formats, limits, commands, privacy
 │   ├── reply-generation.md       # the layered prompt, the budget, the reply cleaning, reply-preview
-│   ├── outbox-and-sender.md      # the outbox, the one sender, the guard, errors, owner commands
+│   ├── outbox-and-sender.md      # the outbox, the one sender, the guard, limits, pause and stop, errors, owner commands
 │   ├── safety-rules.md           # S1..S10
 │   └── decisions.md              # decided and open
 ├── .github/
@@ -296,7 +321,7 @@ What exists now:
 │   ├── style_cli.py              # the persona and examples commands
 │   ├── convert_cli.py            # examples convert: Telegram Desktop export to a draft examples file
 │   ├── reply_cli.py              # reply-preview: generate one reply for a stored conversation
-│   ├── outbox_cli.py             # outbox enqueue, list, cancel, retry: the owner's commands
+│   ├── outbox_cli.py             # outbox enqueue, list, cancel, retry, status, resume: the owner's commands
 │   ├── config.py                 # Settings, load_settings, ConfigError
 │   ├── logging.py                # JSON-lines logging
 │   ├── health.py                 # heartbeat file and the app healthcheck
@@ -334,6 +359,7 @@ What exists now:
 │   │   ├── card_actions.py       # CardActions: Reply (pending -> active) and Ignore
 │   │   ├── send_guard.py         # the status and source check, at enqueue and before sending
 │   │   ├── outbox_service.py     # OutboxService: text validation, guard, row
+│   │   ├── send_limiter.py       # the six send limits, counted from stored messages
 │   │   ├── outbox_sender.py      # OutboxSender: the only caller of send_text
 │   │   ├── message_transport.py  # MessageTransport Protocol: send_text
 │   │   └── owner_notifier.py     # OwnerNotifier Protocol: notify
@@ -511,7 +537,7 @@ The app connects to Telegram as the userbot and polls the control bot, and conne
 | `make persona-import FILE=...`, `make examples-import FILE=...`, `make examples-stats` | Import the persona text, import style examples from JSON, print counts per tag (see [Persona and style examples](#persona-and-style-examples)) |
 | `make examples-convert INPUT=... ME=... \| ME_ID=... [OUT=...]` | Convert a Telegram Desktop JSON chat export into a draft examples file; give exactly one of `ME` and `ME_ID`; needs no `.env` and no database |
 | `make reply-preview CONTACT=... [MODE=...]` | Generate one reply for a stored conversation and print it with a stats line; sends nothing, writes nothing (see [Previewing a reply](#previewing-a-reply)) |
-| `make outbox-enqueue CONTACT=... TEXT="..." [IN=...]`, `make outbox-list [STATE=...] [LIMIT=...]`, `make outbox-cancel ID=...`, `make outbox-retry ID=... [IN=...] [YES=1]` | The owner's commands for the outbox (see [The outbox and the sender](#the-outbox-and-the-sender)) |
+| `make outbox-enqueue CONTACT=... TEXT="..." [IN=...]`, `make outbox-list [STATE=...] [LIMIT=...]`, `make outbox-cancel ID=...`, `make outbox-retry ID=... [IN=...] [YES=1]`, `make outbox-status`, `make outbox-resume [YES=1]` | The owner's commands for the outbox (see [The outbox and the sender](#the-outbox-and-the-sender)) |
 | `make llm-check` | Send one tiny request to DeepSeek with the `reply` settings and print the result (see [Checking the LLM key](#checking-the-llm-key)) |
 
 ### Checking the LLM key
@@ -636,6 +662,12 @@ the default applies.
 | `REPLY_HISTORY_MESSAGES` | no | `20` | How many last messages of a contact go into the reply prompt, from 1 to 100 |
 | `REPLY_PROMPT_BUDGET_CHARS` | no | `24000` | Character budget of the whole reply prompt, from 4000 to 200000; over it, examples and then the oldest messages are dropped |
 | `AUTOPILOT_ENABLED` | no | `false` | `true` allows outbox rows from the autopilot to be sent. The autopilot does not exist yet, and the owner's test commands do not consult this switch; the status check applies to both |
+| `SEND_LIMIT_MINUTE` | no | `4` | Most outgoing messages per minute, all contacts together; at least 1, not above `SEND_LIMIT_HOUR` |
+| `SEND_LIMIT_HOUR` | no | `40` | Most outgoing messages per hour, all contacts together; at least 1, not above `SEND_LIMIT_DAY` |
+| `SEND_LIMIT_DAY` | no | `200` | Most outgoing messages per day, all contacts together; at least 1 |
+| `SEND_LIMIT_CONTACT_MINUTE` | no | `2` | Most outgoing messages per minute to one contact; at least 1, not above `SEND_LIMIT_CONTACT_HOUR` or `SEND_LIMIT_MINUTE` |
+| `SEND_LIMIT_CONTACT_HOUR` | no | `15` | Most outgoing messages per hour to one contact; at least 1, not above `SEND_LIMIT_CONTACT_DAY` or `SEND_LIMIT_HOUR` |
+| `SEND_LIMIT_CONTACT_DAY` | no | `60` | Most outgoing messages per day to one contact; at least 1, not above `SEND_LIMIT_DAY` |
 | `HEARTBEAT_PATH` | no | `<tmpdir>/cyrano-heartbeat` | Liveness file touched by the app and read by the app healthcheck |
 | `LEOMATCH_BOT_USERNAME` | no | `leomatchbot` | Username of the matching bot whose chat is searched for a new contact's profile text; a leading `@` is allowed. The default is an assumption: check the bot's real username in Telegram |
 | `POSTGRES_USER`, `POSTGRES_PASSWORD`, `POSTGRES_DB` | for Docker | | Credentials and database name of the compose Postgres; see [Variables](#variables) |
@@ -665,7 +697,7 @@ startup logic, the login flow, the intake on real PostgreSQL, the profile collec
 check, matching-bot lookup, collector, `update_identity` on real PostgreSQL) and the check that the
 userbot's read client cannot send, and for the control bot: owner-only access, the card rendering, the card sender,
 the handlers driven through the real dispatcher, the announcer and the Reply and Ignore actions on
-real PostgreSQL, and for the LLM client: the request and reply shapes, JSON validation with retries, the retry and deadline rules, the per-step settings and the logs, all against `httpx.MockTransport`, and for the persona and style examples: the file validation, the import and the replace on real PostgreSQL, the selection, the commands, migration `0002` and the sample files, and for the outbox: the repository, the guard and the sender on real PostgreSQL, the adapter, the notifier, the commands and the structural check that only one module can send. Telegram and DeepSeek are always faked: no test connects to either. All tests use fake values only.
+real PostgreSQL, and for the LLM client: the request and reply shapes, JSON validation with retries, the retry and deadline rules, the per-step settings and the logs, all against `httpx.MockTransport`, and for the persona and style examples: the file validation, the import and the replace on real PostgreSQL, the selection, the commands, migration `0002` and the sample files, and for the outbox: the repository, the guard and the sender on real PostgreSQL, the limits, the pause and the stop, the adapter, the notifier, the commands and the structural check that only one module can send. Telegram and DeepSeek are always faked: no test connects to either. All tests use fake values only.
 
 Database tests run against real PostgreSQL, never SQLite, because JSONB and native enums must be
 tested for real. `TEST_DATABASE_URL` (from the environment or `.env`; the template value targets

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import itertools
+from collections import Counter
 from collections.abc import AsyncIterator, Awaitable, Sequence
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
@@ -9,7 +10,7 @@ from pathlib import Path
 
 from telethon.errors import SessionPasswordNeededError
 
-from cyrano.domain.enums import ContactStatus
+from cyrano.domain.enums import ContactStatus, MessageDirection
 from cyrano.domain.errors import ContactNotFound
 from cyrano.domain.models import (
     Contact,
@@ -19,6 +20,7 @@ from cyrano.domain.models import (
     Message,
     MessageCreate,
 )
+from cyrano.domain.outbox import OutgoingPeak
 from cyrano.domain.transitions import transition_needed
 from cyrano.services.intake import IntakeResult
 from cyrano.userbot.protocols import (
@@ -397,6 +399,29 @@ class InMemoryMessages:
 
     async def list_last(self, contact_id: int, limit: int) -> list[Message]:
         return [m for m in self.stored if m.contact_id == contact_id][-limit:]
+
+    async def outgoing_times(
+        self, since: datetime, limit: int, contact_id: int | None = None
+    ) -> list[datetime]:
+        times = [
+            m.created_at
+            for m in self.stored
+            if m.direction is MessageDirection.OUTGOING
+            and m.created_at >= since
+            and (contact_id is None or m.contact_id == contact_id)
+        ]
+        return sorted(times, reverse=True)[:limit]
+
+    async def busiest_outgoing_contact(self, after: datetime) -> OutgoingPeak | None:
+        counts = Counter(
+            m.contact_id
+            for m in self.stored
+            if m.direction is MessageDirection.OUTGOING and m.created_at > after
+        )
+        if not counts:
+            return None
+        contact_id, count = min(counts.items(), key=lambda item: (-item[1], item[0]))
+        return OutgoingPeak(contact_id=contact_id, count=count)
 
 
 class RecordingSleep:

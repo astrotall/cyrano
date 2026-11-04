@@ -73,13 +73,14 @@ Changing any of these is a large change (see Workflow expectations). Reasons:
 .
 ├── CLAUDE.md, CONTRIBUTING.md, README.md
 ├── pyproject.toml, uv.lock, .python-version
-├── Makefile                      includes login, login-docker, llm-check, persona-import, examples-import, examples-stats, examples-convert, reply-preview, outbox-enqueue, outbox-list, outbox-cancel, outbox-retry, outbox-status and outbox-resume
+├── Makefile                      includes login, login-docker, llm-check, persona-import, examples-import, examples-stats, examples-convert, reply-preview, outbox-enqueue, outbox-list, outbox-cancel, outbox-retry, outbox-status, outbox-resume and setup-hooks
 ├── Dockerfile, docker-compose.yml, docker-compose.override.yml
 ├── .env.example, .dockerignore, .gitignore
 ├── alembic.ini
 ├── migrations/                   async env.py, versions/
 ├── examples/                     invented sample persona and style examples (real files go to data/)
 ├── .claude/docs/                 architecture, contact-lifecycle, safety-rules, decisions, persona-and-examples, reply-generation, outbox-and-sender
+├── .githooks/                    pre-commit (runs make check and make test; enabled by make setup-hooks)
 ├── .github/                      dependabot.yml, workflows/ci.yml
 ├── src/cyrano/
 │   ├── __main__.py, main.py      entrypoint (composition root), login, llm-check, persona and examples subcommands, signals, heartbeat

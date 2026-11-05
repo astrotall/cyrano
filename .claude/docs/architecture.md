@@ -1,9 +1,9 @@
 # Architecture
 
-State as of CYR-18: the skeleton, the storage layer, the userbot intake, the profile collection, the
+State as of CYR-21: the skeleton, the storage layer, the userbot intake, the profile collection, the
 control bot with the contact card, the LLM client, the persona with the style examples, the
 layered reply prompt with the reply generator and the outbox with the one sender, its limits, its
-pause, its stop and its pre-send part exist, and so does the send time planner. The sender runs in the app, but only the owner's test command writes to the outbox. The LLM client, the persona, the examples and
+pause, its stop and its pre-send part exist, and so does the send time planner. The sender runs in the app, but only the owner's test command writes to the outbox. Since CYR-21 a message the owner writes by hand from the second account pauses the contact, and the owner can resume it from the notice. The LLM client, the persona, the examples and
 the reply generator have no consumer in the running app: only the `llm-check` and `reply-preview`
 commands use them. Anything else is marked **planned** with its ticket.
 Product and decisions: [CLAUDE.md](../../CLAUDE.md). Reasons: [decisions.md](decisions.md).
@@ -14,11 +14,11 @@ Source lives in `src/cyrano/`.
 
 | Package or module | Role | State |
 | --- | --- | --- |
-| `userbot/` | The only package that imports Telethon: client, session and login, event filters, the incoming-message handler, the listener lifecycle. Receives private messages on the second account and converts events into plain objects. Also holds the read-only adapters of the profile collection: `profile_source.py` (bio, names, photo) and `leomatch_source.py` with `leomatch_match.py` (the matching-bot chat). `adapter.py` (`TelethonAdapter`, CYR-19) wraps the Telethon client: the read Protocol, and the one Telegram send behind the sender | exists for listening and registration (CYR-10), for reading profiles (CYR-11) and for the send (CYR-19); only the adapter can send, and only `OutboxSender` calls it |
-| `bot/` | The only package that imports aiogram: the owner-only control bot. `app.py` (`ControlBot`: bot, dispatcher, polling, stop), `middleware.py` (owner-only), `handlers.py` (`/start`, the card buttons), `rendering.py` (pure card text, keyboard, decision), `callbacks.py` (callback data), `sender.py` (`TelegramCardSender`), `notifier.py` (`TelegramOwnerNotifier`, CYR-19), `messages.py` (every Russian text), `errors.py` (readable fatal errors). Planned: notifications of stop-triggers and the rest of the panel (CYR-20, CYR-26) | exists for the card and its two buttons (CYR-12) and for outbox notifications (CYR-19) |
+| `userbot/` | The only package that imports Telethon: client, session and login, event filters, the incoming-message handler, the outgoing-message handler (CYR-21), the listener lifecycle. Receives private messages on the second account and converts events into plain objects. Also holds the read-only adapters of the profile collection: `profile_source.py` (bio, names, photo) and `leomatch_source.py` with `leomatch_match.py` (the matching-bot chat). `adapter.py` (`TelethonAdapter`, CYR-19) wraps the Telethon client: the read Protocol, and the one Telegram send behind the sender | exists for listening and registration (CYR-10), for reading profiles (CYR-11) and for the send (CYR-19); only the adapter can send, and only `OutboxSender` calls it |
+| `bot/` | The only package that imports aiogram: the owner-only control bot. `app.py` (`ControlBot`: bot, dispatcher, polling, stop), `middleware.py` (owner-only), `handlers.py` (`/start`, the card buttons, the resume button of the manual-pause notice), `rendering.py` (pure card text, keyboard, decision), `callbacks.py` (callback data), `sender.py` (`TelegramCardSender`), `notifier.py` (`TelegramOwnerNotifier`, CYR-19, and `TelegramManualPauseNotifier`, CYR-21), `messages.py` (every Russian text), `errors.py` (readable fatal errors). Planned: notifications of stop-triggers and the rest of the panel (CYR-20, CYR-26) | exists for the card and its two buttons (CYR-12) and for outbox notifications (CYR-19) |
 | `llm/` | The only package that imports httpx and the only one that knows the provider: `deepseek.py` (`DeepSeekClient`, `StepConfig`), `transport.py` (`RetryingTransport`), `factory.py` (`LLMClientFactory`), `wire.py` (the response fields it reads), `json_reply.py` (JSON extraction and validation problems), `prompts.py` (the texts it adds for JSON), `constants.py` (every number and string). See [LLM client](#llm-client-cyr-13) | exists (CYR-13); not wired into `main.py` yet, the first consumers are CYR-16, CYR-17 and CYR-25 |
-| `db/` | SQLAlchemy models (`models.py`), engine and session factory (`session.py`), repositories (`repositories.py`; CYR-14 added `SqlPersonaRepository` and `SqlStyleExampleRepository`; CYR-19 added `SqlOutboxRepository`; CYR-22 added `SqlSenderStateRepository`) | exists; called by the intake (CYR-10), by the import commands (CYR-14) and by the sender (CYR-19) |
-| `services/` | Business logic shared by userbot, bot and worker: contact lifecycle, sender, reply pipeline. CYR-18 added `humanization.py` (the pure planner functions, `ScheduleService`, `HumanizationPlanner`) and `schedule_files.py` (`parse_schedule`, `ScheduleImporter`). `repositories.py` holds the repository Protocols, `intake.py` the `IntakeService`, `sanitize.py` the NUL-byte removal, `contact_events.py` the generic `ContactEventPublisher[T]` and `ContactEventSubscriber[T]` Protocols and the in-memory queue; CYR-11 added `profile_source.py` (the `ProfileSource` and `LeomatchSource` Protocols and `ProfileSourceError`), `leomatch.py` (the card parser) and `profile_collector.py` (`ProfileCollector`); CYR-12 added `card_sender.py` (the `CardSender` Protocol), `card_builder.py` (assembles the `ContactCard`), `card_announcer.py` (`CardAnnouncer`) and `card_actions.py` (`CardActions`); CYR-13 added `llm_client.py` (the `LLMClient` Protocol) and `llm_check.py` (`check_llm`, the request behind `llm-check`); CYR-14 added `style_files.py` (reading and validating the two import files), `style_import.py` (`PersonaImporter`, `ExamplesImporter`), `persona_service.py` (`PersonaService`) and `style_examples.py` (`ExampleSelector`, `collect_example_stats`), and the `PersonaRepository` and `StyleExampleRepository` Protocols in `repositories.py`; CYR-16 added `contact_facts.py` (`build_contact_facts`), `prompt_builder.py` (`PromptBuilder`), `reply_postprocess.py` (`clean_reply`) and `reply_generator.py` (`ReplyGenerator`); see [Reply generation](#reply-generation-cyr-16); CYR-19 added `send_guard.py` (`check`, `SendGuard`), `outbox_service.py` (`OutboxService`), `outbox_sender.py` (`OutboxSender`), `message_transport.py` (the `MessageTransport` Protocol), `owner_notifier.py` (the `OwnerNotifier` Protocol) and the `OutboxRepository` Protocol in `repositories.py`; CYR-22 added `send_limiter.py` (`SendLimiter` and its pure rules) and the `SenderStateRepository` Protocol; see [Outbox and sender](#outbox-and-sender-cyr-19) | Protocols, intake, sanitization, events (CYR-10), the profile collector (CYR-11), the card announcer and actions (CYR-12), the LLM Protocol (CYR-13) and the persona and example services (CYR-14) the prompt builder and reply generator (CYR-16) and the outbox with the sender (CYR-19) exist; the rest is planned from CYR-15 on |
+| `db/` | SQLAlchemy models (`models.py`), engine and session factory (`session.py`), repositories (`repositories.py`; CYR-14 added `SqlPersonaRepository` and `SqlStyleExampleRepository`; CYR-19 added `SqlOutboxRepository`; CYR-22 added `SqlSenderStateRepository`; CYR-21 added `pause_reason` on the contact row, `MessageRepository.exists` and `OutboxRepository.has_sending_row`) | exists; called by the intake (CYR-10), by the import commands (CYR-14) and by the sender (CYR-19) |
+| `services/` | Business logic shared by userbot, bot and worker: contact lifecycle, sender, reply pipeline. CYR-18 added `humanization.py` (the pure planner functions, `ScheduleService`, `HumanizationPlanner`) and `schedule_files.py` (`parse_schedule`, `ScheduleImporter`). `repositories.py` holds the repository Protocols, `intake.py` the `IntakeService`, `sanitize.py` the NUL-byte removal, `contact_events.py` the generic `ContactEventPublisher[T]` and `ContactEventSubscriber[T]` Protocols and the in-memory queue; CYR-11 added `profile_source.py` (the `ProfileSource` and `LeomatchSource` Protocols and `ProfileSourceError`), `leomatch.py` (the card parser) and `profile_collector.py` (`ProfileCollector`); CYR-12 added `card_sender.py` (the `CardSender` Protocol), `card_builder.py` (assembles the `ContactCard`), `card_announcer.py` (`CardAnnouncer`) and `card_actions.py` (`CardActions`); CYR-13 added `llm_client.py` (the `LLMClient` Protocol) and `llm_check.py` (`check_llm`, the request behind `llm-check`); CYR-14 added `style_files.py` (reading and validating the two import files), `style_import.py` (`PersonaImporter`, `ExamplesImporter`), `persona_service.py` (`PersonaService`) and `style_examples.py` (`ExampleSelector`, `collect_example_stats`), and the `PersonaRepository` and `StyleExampleRepository` Protocols in `repositories.py`; CYR-16 added `contact_facts.py` (`build_contact_facts`), `prompt_builder.py` (`PromptBuilder`), `reply_postprocess.py` (`clean_reply`) and `reply_generator.py` (`ReplyGenerator`); see [Reply generation](#reply-generation-cyr-16); CYR-19 added `send_guard.py` (`check`, `SendGuard`), `outbox_service.py` (`OutboxService`), `outbox_sender.py` (`OutboxSender`), `message_transport.py` (the `MessageTransport` Protocol), `owner_notifier.py` (the `OwnerNotifier` Protocol) and the `OutboxRepository` Protocol in `repositories.py`; CYR-22 added `send_limiter.py` (`SendLimiter` and its pure rules) and the `SenderStateRepository` Protocol; CYR-21 added `manual_intervention.py` (`ManualMessageDetector`), `manual_pause_notifier.py` (the one-method `ManualPauseNotifier` Protocol) and `pause_actions.py` (`PauseActions`, resume of a paused contact); see [Manual intervention](#manual-intervention-cyr-21); see [Outbox and sender](#outbox-and-sender-cyr-19) | Protocols, intake, sanitization, events (CYR-10), the profile collector (CYR-11), the card announcer and actions (CYR-12), the LLM Protocol (CYR-13) and the persona and example services (CYR-14) the prompt builder and reply generator (CYR-16) and the outbox with the sender (CYR-19) exist; the rest is planned from CYR-15 on |
 | `worker/` | Arq worker: `settings.py` holds `WorkerSettings`, `startup`, `shutdown`, a placeholder `noop` job (Arq refuses to start a worker with no registered functions) | skeleton works; real jobs planned CYR-17 |
 | `config.py` | `Settings` (pydantic-settings), `load_settings`, `ConfigError` | exists |
 | `logging.py` | JSON-lines formatter, `build_log_config`, `configure_logging` | exists |
@@ -120,7 +120,7 @@ Two Python processes, two stores, one external API each for Telegram and the LLM
 - **app**: `python -m cyrano`. It loads config, starts JSON logging and requires the session file
   (see [Userbot](#userbot-cyr-10)). Then it builds the database engine (which opens no connection
   until something uses it), the repositories, the `IntakeService` and the two in-memory event queues,
-  touches the heartbeat file, connects the userbot, registers the handler, catches up, then starts the
+  touches the heartbeat file, connects the userbot, registers the two handlers, catches up, then starts the
   profile collector, the card announcer, the control bot's polling and then the outbox sender as
   background tasks (only once the userbot is connected, because the collector reads through the same
   client and the announcer would otherwise show cards before the intake runs) and waits for SIGTERM
@@ -130,7 +130,7 @@ Two Python processes, two stores, one external API each for Telegram and the LLM
   error, and the restart policy starts it again; so does a control bot that stops polling (see
   [Control bot](#control-bot-cyr-12)). A sender that crashes is logged once with the class name and
   does not stop the intake. On shutdown it cancels the sender first, then the card announcer, stops polling and
-  closes the bot session, cancels the collector, removes the handler, disconnects the userbot, stops
+  closes the bot session, cancels the collector, removes the two handlers, disconnects the userbot, stops
   the heartbeat, removes the file and disposes the engine; planned: close the Redis connections there.
   It has the `userbot_session` volume.
 - **login**: `python -m cyrano login`, run on demand (`make login`, `make login-docker`). It is the
@@ -170,11 +170,12 @@ one module, `adapter.py`, also sends, and only on behalf of `OutboxSender`. No o
 | Module | Role |
 | --- | --- |
 | `protocols.py` | The small surface of Telethon that the code uses, as Protocols: `SenderLike`, `IncomingEvent`, `UserbotClient`, `LoginClient`. `UserbotClient` has `connect`, `disconnect`, `is_user_authorized`, `catch_up`, `add_event_handler`, `remove_event_handler`, `disconnected` and, since CYR-11, only the read members `get_entity`, `get_full_user`, `download_profile_photo`, `download_media` and `iter_messages`; no write method and no generic request call; a test enforces that list |
-| `filters.py` | Pure functions: `event_rejection(event)` and `sender_rejection(sender)` return a `Rejection` or `None` |
+| `filters.py` | Pure functions: `event_rejection(event)`, `sender_rejection(sender)` and, since CYR-21, `outgoing_event_rejection(event)` return a `Rejection` or `None` |
 | `handler.py` | `IncomingHandler`: registers one `events.NewMessage(incoming=True)` handler, converts an event into `IncomingMessage`, calls the intake, catches and counts failures |
+| `outgoing_handler.py` | `OutgoingHandler` (CYR-21): registers one `events.NewMessage(outgoing=True)` handler, filters, converts an event into `OutgoingMessage`, calls the `ManualMessageDetector`, catches and counts failures; see [Manual intervention](#manual-intervention-cyr-21) |
 | `adapter.py` | `TelethonAdapter`, since CYR-19 the only module that touches the Telethon client directly: delegates the `UserbotClient` members, builds the one request (`GetFullUserRequest`) and implements `MessageTransport` (`send_text`, and since CYR-18 `show_typing` and `mark_read`, the only uses of `action` and `send_read_acknowledge`), mapping Telegram failures to the send errors with one function. Logs nothing. See [Outbox and sender](#outbox-and-sender-cyr-19) |
 | `client.py` | `build_access` returns a `UserbotAccess` (the read client and the transport, both the adapter) from `Settings`; session file naming and mode, `connect_authorized` with the timeout, `disconnect_client` |
-| `runner.py` | `Userbot`: start, run until stopped or disconnected, stop |
+| `runner.py` | `Userbot`: start (registers the incoming and the outgoing handler), run until stopped or disconnected, stop (removes both) |
 | `login.py` | The interactive login flow with injected prompts |
 | `errors.py` | `UserbotError` and subclasses; their messages are meant to be read by the owner |
 | `profile_source.py` | `TelethonProfileSource`, the `ProfileSource` adapter: the user from the session cache (`get_entity`), the bio from `get_full_user`, the big current profile photo. Every Telethon failure becomes `ProfileSourceError` carrying the class name; it never sleeps on a flood wait |
@@ -209,7 +210,7 @@ one module, `adapter.py`, also sends, and only on behalf of `OutboxSender`. No o
   docker-ignored.
 - **Startup** (in this order, in `main.run`): the session file must exist, otherwise the app exits
   with code 1 and the message "run `make login`" before any client exists, so before any network
-  call. Then the handler is registered (before connecting, so no update can arrive without a
+  call. Then both handlers are registered (before connecting, so no update can arrive without a
   handler), the client connects within `CONNECT_TIMEOUT_SECONDS` (30 s; a timeout and a refused
   connection are readable fatal errors), a session that is not authorized is the same kind of
   error, and then `catch_up()` is called. Normal startup never prompts for input.
@@ -218,12 +219,12 @@ one module, `adapter.py`, also sends, and only on behalf of `OutboxSender`. No o
   The signal handlers are installed before the client is built, so a signal at any point of the
   start counts. On a signal the pending call is cancelled, `start` returns without the "listening"
   line, `run_until` returns at once because the event is set, and the normal shutdown runs: remove
-  the handler, disconnect (bounded), stop the heartbeat, dispose the engine, exit 0 without a
+  the handlers, disconnect (bounded), stop the heartbeat, dispose the engine, exit 0 without a
   traceback. This matters because `CONNECT_TIMEOUT_SECONDS` (30 s) is longer than Docker's 10 s
   grace period. The 30 s timeout stays for the case where no signal comes, and still ends the
   start with the readable `ConnectTimedOut` error.
 - **Run and shutdown.** The app waits for SIGTERM/SIGINT or for the client's `disconnected` future.
-  A disconnect nobody asked for is an error exit. Shutdown removes the handler, disconnects (bounded
+  A disconnect nobody asked for is an error exit. Shutdown removes both handlers, disconnects (bounded
   by a timeout) and only then lets the engine be disposed.
 - **Login command.** `python -m cyrano login` asks for the phone before anything touches the
   network, then connects, requests the code, signs in and asks for the two-step password only if
@@ -235,6 +236,32 @@ one module, `adapter.py`, also sends, and only on behalf of `OutboxSender`. No o
 - **Logging.** No message text, names, usernames, phone numbers or Telegram ids at INFO or above.
   Rejections are DEBUG with a reason and a counter. Handler failures are ERROR with the class name and
   counters. `telethon` follows `TELETHON_LOG_LEVEL`.
+
+- **Outgoing handler (CYR-21).** A second handler, `events.NewMessage(outgoing=True)`, registered and
+  removed together with the incoming one. `outgoing_event_rejection` accepts only a private chat with
+  a user whose id is usable; groups, channels, bots, the service account, deleted accounts, the
+  account itself and an event without a peer are DEBUG counters. `IncomingEvent` gained the read
+  members `chat_id` and `get_chat()` (the allowlist in `test_never_sends.py` knows them). The
+  handler retries the detection 3 times in all (1 s, then 2 s) for a failure before the pause only;
+  the detector never raises once the contact is paused, so a retry never repeats a pause or a notice.
+  `IntakeService` and the incoming handler are unchanged.
+
+## Manual intervention (CYR-21)
+
+| Module | Role |
+| --- | --- |
+| `services/manual_intervention.py` | `ManualMessageDetector.handle(outgoing)`: classification, pause, cancel, store, notify; `SETTLE_DELAYS_SECONDS`; the sleep and the notice deadline are constructor parameters |
+| `services/manual_pause_notifier.py` | `ManualPauseNotifier`, a single-method Protocol, `notify_manual_pause(contact_id)`; implemented only by `bot/notifier.py` |
+| `services/pause_actions.py` | `PauseActions.resume(contact_id)`, one at a time under a lock |
+| `userbot/outgoing_handler.py` | `OutgoingHandler`, see [Userbot](#userbot-cyr-10) |
+| `bot/notifier.py`, `bot/handlers.py`, `bot/callbacks.py` | The notice with the Resume button, the callback handler, `PauseCallback` |
+
+The import direction is unchanged: the detector depends on repository and notifier Protocols and on
+`domain`; the userbot depends on the detector through a one-method `OutgoingProcessor` Protocol; the
+bot implements the notifier and calls `PauseActions`. `main.py` is the only place that knows all of
+them: it builds the control bot first (the notifier comes from it), then the detector, then the
+userbot with both handlers. The classification, the order of the steps and the resume rules are in
+[contact-lifecycle.md](contact-lifecycle.md#manual-intervention-cyr-21).
 
 ## Intake and contact events (CYR-10)
 
@@ -292,11 +319,11 @@ the userbot, by long polling.
 
 | Module | Role |
 | --- | --- |
-| `app.py` | `build_dispatcher(owner_id, actions)` and `ControlBot`: builds the `Bot` from `BOT_TOKEN` (HTML parse mode, link previews off), the dispatcher, and the `TelegramCardSender`; `poll()` runs `start_polling(handle_signals=False, close_bot_session=False)`; `stop()` stops polling (bounded) and closes the session |
+| `app.py` | `build_dispatcher(owner_id, actions, pause_actions)` and `ControlBot`: builds the `Bot` from `BOT_TOKEN` (HTML parse mode, link previews off), the dispatcher, and the `TelegramCardSender`; `poll()` runs `start_polling(handle_signals=False, close_bot_session=False)`; `stop()` stops polling (bounded) and closes the session |
 | `middleware.py` | `OwnerOnlyMiddleware`, an outer middleware on every update: a user other than `OWNER_TELEGRAM_ID`, or no user at all, is dropped silently. No reply, no database access, only a counter (DEBUG, no ids) |
-| `handlers.py` | `build_router(actions)`: `/start` (private chat only) and the card button handler |
+| `handlers.py` | `build_router(actions, pause_actions)`: `/start` (private chat only), the card button handler and, since CYR-21, the resume button handler |
 | `rendering.py` | Pure functions: `render_card`, `card_keyboard`, `append_decision`, `alert_text`. The matching-bot section comes only from the card text (a short line when it was not found; a fallback name from the match message is shown as the name). Text is HTML-escaped; the card is assembled from sections within `CARD_TEXT_BUDGET` (3500) so it stays below Telegram's 4096 whatever the input |
-| `callbacks.py` | `CardCallback` (`card:<action>:<contact id>:<mode id>`, a few bytes against Telegram's 64) |
+| `callbacks.py` | `CardCallback` (`card:<action>:<contact id>:<mode id>`, a few bytes against Telegram's 64) and, since CYR-21, `PauseCallback` (`pause:<action>:<contact id>`) |
 | `sender.py` | `TelegramCardSender`, the `CardSender` implementation. The owner id is a constructor argument taken from `Settings` and the only public method is `send_card`, so no caller can address another chat |
 | `notifier.py` | `TelegramOwnerNotifier`, the `OwnerNotifier` implementation (CYR-19): one plain message to the owner chat, one attempt; the owner id comes from `Settings` and the only public method is `notify`. Also `OUTBOX_NOTICES`, the templates passed to the sender |
 | `messages.py` | Every Russian text the owner sees. Texts and constants live here, not in the handlers |
@@ -579,7 +606,9 @@ the profile from the start.
   (JSONB `tags` and `turns`, unique `content_hash`); see
   [persona-and-examples.md](persona-and-examples.md). Since CYR-19 also `scheduled_messages`, the
   outbox (with `due_at` since migration `0005`), and since CYR-22 `sender_state` (one row, `id` fixed to 1 by a check constraint); see
-  [outbox-and-sender.md](outbox-and-sender.md). Since CYR-18 also `schedule_profile` (at most one row,
+  [outbox-and-sender.md](outbox-and-sender.md). Since CYR-21 `contacts.pause_reason` (migration `0007`, a
+  nullable string column with a check constraint on `manual_message`, `send_rejected` and `owner`, no
+  backfill). Since CYR-18 also `schedule_profile` (at most one row,
   `id` fixed to 1 by a check constraint, JSONB `data`, no seed: no row means the default profile); see
   [humanization.md](humanization.md).
 - **Names**: table names and enum type names live in `db/models.py`, enum values in
@@ -825,6 +854,15 @@ and the sender `cyrano.services.outbox_sender` (internal ids, reasons, counters 
   failures, a flood wait and an account problem before the send, the deadline, cancellation, the status
   changing during the pre-send part, the stale relation); the adapter's two new writes; the commands, also
   through `main`; and the updated scans in `tests/test_one_sender.py`.
+  CYR-21 added: migration `0007`; `tests/db/test_contact_repository.py` (the reason stored and cleared,
+  refused with other statuses, the `changed` flag, simultaneous pauses), `test_message_repository.py`
+  (`exists`, `created_at`, `last_message_at` unchanged), `test_outbox_repository.py` (`has_sending_row`),
+  `test_migrations.py` (0007 and its check constraint); `tests/services/test_manual_intervention.py` and
+  `tests/services/test_pause_actions.py` on real PostgreSQL with an injected sleep, including the
+  integration with a real `OutboxSender`; `tests/userbot/test_outgoing_handler.py`, the new cases in
+  `test_filters.py` and `test_runner.py`; the resume cases in `tests/bot/test_handlers.py` and
+  `test_notifier.py`; `tests/test_main.py` (both handlers wired); the new scans in
+  `tests/test_one_sender.py`.
 - Failure cases to cover for new behaviour:
   empty input, malformed Telegram event, invalid LLM JSON, status changed between scheduling and
   sending, FloodWait.

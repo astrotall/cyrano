@@ -8,6 +8,7 @@ from pathlib import Path
 
 import pytest
 
+from cyrano.services.manual_pause_notifier import ManualPauseNotifier
 from cyrano.services.message_transport import MessageTransport
 from cyrano.services.owner_notifier import OwnerNotifier
 from cyrano.services.repositories import SenderStateRepository
@@ -19,6 +20,13 @@ ADAPTER_MODULE = "userbot/adapter.py"
 USERBOT_PACKAGE = "userbot"
 BOT_PACKAGE = "bot"
 OWNER_CHAT_MODULES = {"bot/sender.py", "bot/notifier.py"}
+DETECTOR_MODULE = "services/manual_intervention.py"
+MANUAL_PAUSE_METHOD = "notify_manual_pause"
+MANUAL_PAUSE_PROTOCOL_MODULE = "services/manual_pause_notifier.py"
+MANUAL_PAUSE_NOTIFIER_MODULE = "bot/notifier.py"
+RESUME_PAUSE_METHOD = "resume"
+PAUSE_HANDLER_MODULE = "bot/handlers.py"
+PAUSE_ACTIONS_NAME = "pause_actions"
 TRANSPORT_METHOD = "send_text"
 TYPING_METHOD = "show_typing"
 READ_METHOD = "mark_read"
@@ -124,6 +132,82 @@ def test_the_transport_has_exactly_three_methods() -> None:
 
 def test_the_notifier_has_exactly_one_method() -> None:
     assert _members(OwnerNotifier) == {"notify"}
+
+
+def test_the_manual_pause_notifier_has_exactly_one_method() -> None:
+    assert _members(ManualPauseNotifier) == {MANUAL_PAUSE_METHOD}
+
+
+def test_the_manual_pause_notifier_is_implemented_only_in_the_bot_package() -> None:
+    definers = {
+        name
+        for name, tree in _modules()
+        if any(
+            isinstance(node, ast.AsyncFunctionDef | ast.FunctionDef)
+            and node.name == MANUAL_PAUSE_METHOD
+            for node in ast.walk(tree)
+        )
+    }
+
+    assert definers == {MANUAL_PAUSE_PROTOCOL_MODULE, MANUAL_PAUSE_NOTIFIER_MODULE}
+
+
+def test_only_the_detector_calls_the_manual_pause_notifier_and_only_behind_the_deadline() -> None:
+    callers = {name for name, tree in _modules() if MANUAL_PAUSE_METHOD in _called_attributes(tree)}
+    source = (SOURCE_ROOT / DETECTOR_MODULE).read_text()
+
+    assert callers == {DETECTOR_MODULE}
+    assert len(re.findall(r"\.notify_manual_pause\(", source)) == 1
+    assert re.search(
+        r"asyncio\.timeout\(self\._notify_deadline\):\s+"
+        r"await self\._notifier\.notify_manual_pause\(",
+        source,
+    )
+
+
+def _calls_named(tree: ast.AST, attribute: str) -> list[ast.Call]:
+    return [
+        node
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Attribute)
+        and node.func.attr == attribute
+    ]
+
+
+def _resume_calls_on(tree: ast.AST, receiver: str) -> int:
+    return sum(
+        1
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Attribute)
+        and node.func.attr == RESUME_PAUSE_METHOD
+        and isinstance(node.func.value, ast.Name)
+        and node.func.value.id == receiver
+    )
+
+
+def test_only_the_bot_handlers_resume_a_paused_contact() -> None:
+    callers = {name for name, tree in _modules() if _resume_calls_on(tree, PAUSE_ACTIONS_NAME)}
+
+    assert callers == {PAUSE_HANDLER_MODULE}
+
+
+def test_the_detector_never_touches_the_transport() -> None:
+    tree = ast.parse((SOURCE_ROOT / DETECTOR_MODULE).read_text())
+
+    assert _called_attributes(tree).isdisjoint(TRANSPORT_METHODS | TELETHON_WRITE_METHODS)
+    assert _attributes_used(tree).isdisjoint(TRANSPORT_METHODS | TELETHON_WRITE_METHODS)
+
+
+def test_the_manual_pause_reason_is_set_only_by_the_detector() -> None:
+    users = {
+        name
+        for name, tree in _modules()
+        if "MANUAL_MESSAGE" in _attributes_used(tree) and name != "domain/enums.py"
+    }
+
+    assert users == {DETECTOR_MODULE}
 
 
 def test_the_sender_calls_the_notifier_in_one_place_behind_the_deadline() -> None:
@@ -338,7 +422,11 @@ def test_only_the_account_path_stops_the_sender() -> None:
 
 
 def test_only_the_owner_command_resumes_the_sender() -> None:
-    callers = {name for name, tree in _modules() if RESUME_METHOD in _called_attributes(tree)}
+    callers = {
+        name
+        for name, tree in _modules()
+        if len(_calls_named(tree, RESUME_METHOD)) > _resume_calls_on(tree, PAUSE_ACTIONS_NAME)
+    }
 
     assert callers == {OWNER_COMMAND_MODULE}
 

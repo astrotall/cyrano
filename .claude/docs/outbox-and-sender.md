@@ -42,7 +42,7 @@ with a known trigger returns the row already stored, also when two calls race.
 | --- | --- | --- | --- |
 | (none) | `scheduled` | `OutboxService.enqueue` | Text and guard passed |
 | `scheduled` | `sending` | `claim_due` in the sender | The row is due |
-| `scheduled` | `cancelled` | `cancel_scheduled` (the owner's command), `cancel_pending_for_contact` (the sender after a recipient rejection, reason `send_rejected`; later CYR-20, CYR-21) | |
+| `scheduled` | `cancelled` | `cancel_scheduled` (the owner's command), `cancel_pending_for_contact` (the sender after a recipient rejection, reason `send_rejected`; the manual-message detector, reason `manual_message`, CYR-21; later CYR-20) | |
 | `sending` | `sent` | `complete_send` in the sender | Telegram accepted the message |
 | `sending` | `scheduled` | `reschedule` in the sender | Flood wait, a reached limit or an autopilot row inside a window, and nothing else |
 | `sending` | `failed` | `mark_failed` in the sender | Certain refusal, account problem, unknown outcome, or `interrupted` |
@@ -84,6 +84,17 @@ and in the sender, on a contact it has just re-read: once after the claim, so a 
 never marked as read, and once more after the pre-send part, right before `send_text`, because that
 part can take over a minute. A refusal at send time cancels the row with the reason as
 `cancel_reason`, and nothing is sent. A row the owner retried goes through the same check.
+
+**Relation to a manual message (CYR-21).** When the owner writes to a contact by hand, the manual-message
+detector pauses the contact and cancels its `scheduled` rows with the reason `manual_message`
+(`cancel_pending_for_contact`). It cannot touch a row in state `sending`: the claim and the send call
+belong to the sender. That row is stopped by the second guard check above, which re-reads the contact
+and refuses it with `contact_not_active` because the contact is `paused` now. The detector also uses
+the `sending` state to tell the sender's own echo from a manual message: if the contact has a
+`sending` row and the message id is not stored yet, it waits (0.25 to 8 s, with early exit) for the
+sender's `complete_send` to store the id. The sender and the detector share nothing else; the
+detector never calls the transport. A message the owner wrote by hand is stored as an outgoing
+message and so counts toward the send limits.
 
 ## The sender
 
@@ -436,7 +447,8 @@ and its internal id, because the command takes no contact argument.
 | Stop reminder | The sender is still stopped; sent every 6 h | The same as for the stop notice |
 | Stale summary | Rows were cancelled as `stale` instead of being sent hours late; the notice gives the count and up to 5 contact ids | Nothing is needed. `outbox list --state cancelled` shows them; enqueue again only what you still want sent |
 | Hourly or daily limit | Rows are postponed until a slot frees up; a row more than 6 h past its `due_at` is cancelled as `stale` when it comes back | Usually nothing. `outbox status` shows the counters. Raise the setting only if you mean it |
-| Contact paused after a rejection | This contact cannot be written to; the contact's queue is cancelled | Nothing is needed. The contact stays `paused`: the control bot has no Resume yet (CYR-26) |
+| Contact paused after a rejection | This contact cannot be written to; the contact's queue is cancelled | Nothing is needed. The contact is stored as `paused` with the reason `send_rejected` (CYR-21); the Resume button exists only on the manual-pause notice, so the contact stays paused until the owner decides, and a general Resume is CYR-26 |
+| Contact paused by a manual message | You wrote to this contact by hand; the contact's scheduled rows are cancelled with the reason `manual_message` | Press «Возобновить автоответы» on the notice when you want automatic replies again. Nothing is sent before that |
 
 Any error prints one readable line and exits with 1, a bad command line included; an invalid
 configuration exits with 2 like every command. A text that starts with `-` goes after `--`. The text
@@ -456,4 +468,3 @@ its message, because PostgreSQL can quote row values in it.
 | The autopilot: generating replies, asking the planner for the time and writing `autopilot` rows | CYR-17 |
 | Splitting a reply into several messages | CYR-36 |
 | Stop-triggers, which will use `cancel_pending_for_contact` | CYR-20 |
-| Manual pause from the owner's own messages | CYR-21 |

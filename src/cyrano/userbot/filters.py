@@ -19,6 +19,8 @@ class Rejection(StrEnum):
     SELF = "self"
     BOT = "bot"
     DELETED = "deleted"
+    NOT_OUTGOING = "not_outgoing"
+    NO_PEER = "no_peer"
 
 
 def event_rejection(event: IncomingEvent) -> Rejection | None:
@@ -44,4 +46,20 @@ def sender_rejection(sender: SenderLike) -> Rejection | None:
         return Rejection.BOT
     if sender.deleted:
         return Rejection.DELETED
+    return None
+
+
+def outgoing_event_rejection(event: IncomingEvent) -> Rejection | None:
+    if not event.out:
+        return Rejection.NOT_OUTGOING
+    if event.is_group:
+        return Rejection.GROUP
+    if event.is_channel:
+        return Rejection.CHANNEL
+    if not event.is_private:
+        return Rejection.NOT_PRIVATE
+    if event.chat_id is None or event.chat_id <= 0:
+        return Rejection.NO_PEER
+    if event.chat_id == TELEGRAM_SERVICE_ACCOUNT_ID:
+        return Rejection.SERVICE_ACCOUNT
     return None

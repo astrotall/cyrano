@@ -70,6 +70,7 @@ def make_contact(profile: dict[str, object] | None = None, **overrides: object) 
         "username": FAKE_USERNAME,
         "display_name": "Contactfirst Contactlast",
         "status": ContactStatus.ACTIVE,
+        "pause_reason": None,
         "mode_id": 1,
         "profile": profile if profile is not None else {},
         "summary": {},

@@ -1,4 +1,4 @@
-"""Handlers of the control bot: /start and the card buttons."""
+"""Handlers of the control bot: /start, the card buttons and the resume button."""
 
 from __future__ import annotations
 
@@ -11,15 +11,17 @@ from aiogram.filters import CommandStart
 from aiogram.types import CallbackQuery, Message
 
 from cyrano.bot import messages
-from cyrano.bot.callbacks import CardAction, CardCallback
+from cyrano.bot.callbacks import CardAction, CardCallback, PauseCallback
 from cyrano.bot.rendering import alert_text, append_decision
-from cyrano.domain.enums import CardOutcome, ContactStatus
+from cyrano.domain.enums import CardOutcome, ContactStatus, ResumeOutcome
 from cyrano.domain.models import CardActionResult
 from cyrano.services.card_actions import CardActions
+from cyrano.services.pause_actions import PauseActions
 
 logger = logging.getLogger("cyrano.bot.handlers")
 
 DECIDED_OUTCOMES = frozenset({CardOutcome.APPLIED, CardOutcome.ALREADY_APPLIED})
+RESUMED_OUTCOMES = frozenset({ResumeOutcome.APPLIED, ResumeOutcome.ALREADY_APPLIED})
 
 
 async def _apply(actions: CardActions, data: CardCallback) -> CardActionResult:
@@ -55,7 +57,26 @@ async def _answer(query: CallbackQuery, alert: str | None) -> None:
         logger.debug("callback was not answered", extra={"error": type(exc).__name__})
 
 
-def build_router(actions: CardActions) -> Router:
+async def _show_resumed(query: CallbackQuery, contact_id: int) -> None:
+    if not isinstance(query.message, Message):
+        return
+    try:
+        await query.message.edit_text(
+            text=messages.RESUMED_TEXT.format(contact_id=contact_id), reply_markup=None
+        )
+    except TelegramAPIError as exc:
+        logger.debug("pause notice was not edited", extra={"error": type(exc).__name__})
+
+
+def _resume_alert(outcome: ResumeOutcome) -> str | None:
+    if outcome in RESUMED_OUTCOMES:
+        return None
+    if outcome is ResumeOutcome.NOT_FOUND:
+        return messages.ALERT_NOT_FOUND
+    return messages.ALERT_RESUME_REFUSED
+
+
+def build_router(actions: CardActions, pause_actions: PauseActions) -> Router:
     router = Router(name="control")
 
     @router.message(CommandStart(), F.chat.type == ChatType.PRIVATE)
@@ -78,6 +99,28 @@ def build_router(actions: CardActions) -> Router:
                     "contact_id": callback_data.contact_id,
                     "action": callback_data.action.value,
                     "outcome": result.outcome.value,
+                },
+            )
+        await _answer(query, alert)
+
+    @router.callback_query(PauseCallback.filter())
+    async def on_pause_button(query: CallbackQuery, callback_data: PauseCallback) -> None:
+        alert: str | None
+        try:
+            outcome = await pause_actions.resume(callback_data.contact_id)
+            if outcome in RESUMED_OUTCOMES:
+                await _show_resumed(query, callback_data.contact_id)
+            alert = _resume_alert(outcome)
+        except Exception as exc:
+            logger.warning("pause button failed", extra={"error": type(exc).__name__})
+            alert = messages.ALERT_FAILED
+        else:
+            logger.info(
+                "pause button handled",
+                extra={
+                    "contact_id": callback_data.contact_id,
+                    "action": callback_data.action.value,
+                    "outcome": outcome.value,
                 },
             )
         await _answer(query, alert)

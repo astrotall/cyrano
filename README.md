@@ -26,6 +26,8 @@ Key principles:
 - **Only active contacts get automatic replies, checked at the sender.** The status is checked
   when a reply is scheduled and again right before it is sent. Every outgoing message goes
   through one guarded sender; no other code path sends.
+- **The owner can always take over.** If you write to a contact by hand from the second account,
+  automatic replies to that contact stop at once (see [When you write by hand](#when-you-write-by-hand)).
 - **Pacing and limits are central.** The read mark, typing, quiet hours, rate limits and FloodWait
   handling live in the sender, not in callers. The delayed send time comes from one planner. Message
   splitting will join them (CYR-36).
@@ -43,8 +45,8 @@ Key principles:
 > export into draft examples (CYR-34) and the layered reply prompt with the reply generator (CYR-16)
 > exist; these last four are not used by the running app, only by the `llm-check`, `persona`,
 > `examples` and `reply-preview` commands. The outbox with the one guarded sender (CYR-19) and its
-> limits, pause and stop (CYR-22) exist too, and only the owner's test command can add a message to it: nothing is sent automatically. The flow
-> below is the plan.
+> limits, pause and stop (CYR-22) exist too, and only the owner's test command can add a message to it: nothing is sent automatically. The pause
+> on a message the owner writes by hand (CYR-21) exists. The flow below is the plan.
 
 ## Architecture diagram
 
@@ -109,14 +111,16 @@ Does:
 - processes messages that arrived while the app was down (catch-up on start); a redelivered message
   is stored once.
 - reads the profile of a new contact (username, name, bio, photo, the matching-bot text) for the
-  owner's card, read-only and one contact at a time.
+  owner's card, read-only and one contact at a time;
+- watches the messages you send by hand to a contact from this account, to pause automatic replies
+  to that contact (CYR-21). It reads them; it never answers them.
 
 Does not:
 
 - send anything by itself, mark messages as read or answer anyone, unknown senders included. The
   one way out is the guarded sender, and only the owner's test command gives it something to send;
-- react to groups, channels, bots, deleted accounts, Telegram's service account or its own
-  messages;
+- react to groups, channels, bots, deleted accounts or Telegram's service account; a message it sent
+  itself through the sender is recognised and ignored;
 - change a status. The step from `new` to `pending` happens in the card announcer, after the card
   is delivered to the owner.
 
@@ -175,6 +179,34 @@ Reply moves the contact from `pending` to `active` with that mode, Ignore from `
 old card never changes a contact that is no longer waiting for a decision: it shows a short alert
 instead. Nothing replies to an `active` contact automatically yet (the autopilot is CYR-17).
 
+### When you write by hand
+
+If you write to a contact yourself from the second account, the assistant must not talk over you.
+When a contact in status `active` gets a message from you:
+
+- the contact becomes `paused` (the reason is stored as `manual_message`) and its planned messages
+  are cancelled, so nothing is sent to it automatically from then on;
+- you get **one** message in the control bot: «Вы написали контакту #<id> сами: автоответы для него приостановлены, запланированные
+  ответы отменены…», with the button **Возобновить автоответы**. It names the contact by the internal
+  number only, never by name or text;
+- your message is stored in the history like the others. It does not count as a message from the
+  contact.
+
+To go back to automatic replies press the button. The contact becomes `active` again with the mode it
+had, and the notice is edited to say so. A second press does nothing. Until you press it, nothing is
+sent to that contact. Writing again to a paused contact changes nothing and sends no second notice.
+
+Good to know:
+
+- a message sent from another device logged in to the same account looks the same and pauses too;
+- if the assistant was just sending a message while you wrote, it waits up to about 16 seconds to be
+  sure which of the two it saw, and a message that was already on its way is stopped before it is sent;
+- only a sent message counts. Reading the chat or typing does not pause anything;
+- a contact that is not `active` (new, waiting for your decision, ignored or already paused) is
+  not changed by your messages and you get no notice.
+
+Details: [.claude/docs/contact-lifecycle.md](.claude/docs/contact-lifecycle.md#manual-intervention-cyr-21).
+
 ### The outbox and the sender
 
 Every message to a contact goes through one table and one sender. A message is a row in the outbox
@@ -229,7 +261,7 @@ instead of going out late, and you get one summary notice with the count (at mos
 
 **After a notice that a contact was paused.** Telegram refused the message because of this contact
 (blocked, privacy settings, deactivated). The contact is `paused`, and its other planned rows are
-cancelled. The control bot has no Resume yet (CYR-26). A text that is too long fails only its own row.
+cancelled. The notice has no Resume button; a general Resume is CYR-26. A text that is too long fails only its own row.
 
 **Verifying the sender live.** With the app running and a contact you control approved through its
 card, run `make outbox-enqueue CONTACT=<id> TEXT="test" IN=10`, then `make outbox-list`: the row moves
@@ -328,7 +360,7 @@ What exists now:
 ├── alembic.ini                   # points at migrations/; no URL, it comes from Settings
 ├── migrations/
 │   ├── env.py                    # async environment, URL from Settings
-│   └── versions/                 # 0001 creates the tables and seeds the default mode; 0002 adds persona and style_examples; 0003 adds scheduled_messages; 0004 adds sender_state; 0005 adds due_at; 0006 adds schedule_profile
+│   └── versions/                 # 0001 creates the tables and seeds the default mode; 0002 adds persona and style_examples; 0003 adds scheduled_messages; 0004 adds sender_state; 0005 adds due_at; 0006 adds schedule_profile; 0007 adds contacts.pause_reason
 ├── examples/                     # invented sample persona, style examples and schedule (the real files go to data/, never to git)
 ├── .dockerignore
 ├── .gitignore
@@ -394,7 +426,10 @@ What exists now:
 │   │   ├── humanization.py       # the send time planner, ScheduleService, HumanizationPlanner
 │   │   ├── schedule_files.py     # validating and importing the schedule file
 │   │   ├── message_transport.py  # MessageTransport Protocol: send_text, show_typing, mark_read
-│   │   └── owner_notifier.py     # OwnerNotifier Protocol: notify
+│   │   ├── owner_notifier.py     # OwnerNotifier Protocol: notify
+│   │   ├── manual_intervention.py # ManualMessageDetector: a manual message pauses an active contact
+│   │   ├── manual_pause_notifier.py # ManualPauseNotifier Protocol: notify_manual_pause
+│   │   └── pause_actions.py      # PauseActions: Resume of a paused contact
 │   └── worker/
 │       └── settings.py           # Arq WorkerSettings, placeholder job
 └── tests/                        # mirrors src/cyrano; database tests need a real PostgreSQL

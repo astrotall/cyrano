@@ -15,6 +15,7 @@ from cyrano.domain.enums import (
     LimitScope,
     LimitWindow,
     OutboxSource,
+    PauseReason,
     RejectionReason,
 )
 from cyrano.domain.errors import (
@@ -466,7 +467,9 @@ class OutboxSender:
 
     async def _pause_rejected_contact(self, row: ScheduledMessage, error_class: str) -> None:
         try:
-            await self._contacts.set_status(row.contact_id, ContactStatus.PAUSED)
+            await self._contacts.set_status(
+                row.contact_id, ContactStatus.PAUSED, pause_reason=PauseReason.SEND_REJECTED
+            )
         except InvalidStatusTransition as exc:
             logger.info(
                 "the rejected contact cannot be paused",

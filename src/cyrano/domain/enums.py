@@ -13,6 +13,12 @@ class ContactStatus(StrEnum):
     IGNORED = "ignored"
 
 
+class PauseReason(StrEnum):
+    MANUAL_MESSAGE = "manual_message"
+    SEND_REJECTED = "send_rejected"
+    OWNER = "owner"
+
+
 class MessageDirection(StrEnum):
     INCOMING = "incoming"
     OUTGOING = "outgoing"
@@ -29,6 +35,20 @@ class CardOutcome(StrEnum):
     REFUSED = "refused"
     NOT_FOUND = "not_found"
     MODE_UNAVAILABLE = "mode_unavailable"
+
+
+class ResumeOutcome(StrEnum):
+    APPLIED = "applied"
+    ALREADY_APPLIED = "already_applied"
+    REFUSED = "refused"
+    NOT_FOUND = "not_found"
+
+
+class ManualMessageOutcome(StrEnum):
+    UNKNOWN_PEER = "unknown_peer"
+    OWN_MESSAGE = "own_message"
+    STORED = "stored"
+    PAUSED = "paused"
 
 
 class Role(StrEnum):

@@ -10,6 +10,7 @@ from cyrano.bot.app import ControlBot
 from cyrano.bot.errors import BotTokenRejected, PollingFailed
 from cyrano.config import load_settings
 from cyrano.services.card_actions import CardActions
+from cyrano.services.pause_actions import PauseActions
 from tests.bot.fakes import FAKE_BOT_TOKEN, OWNER_ID, RecordingSession
 from tests.services.fakes import InMemoryModes
 from tests.userbot.fakes import InMemoryContacts
@@ -28,7 +29,10 @@ def _control_bot(
     for name, value in {**OWNER_ENV, "BOT_TOKEN": token}.items():
         monkeypatch.setenv(name, value)
     settings = load_settings(env_file=None)
-    return ControlBot(settings, CardActions(InMemoryContacts(), InMemoryModes()), session=session)
+    contacts = InMemoryContacts()
+    return ControlBot(
+        settings, CardActions(contacts, InMemoryModes()), PauseActions(contacts), session=session
+    )
 
 
 def test_a_malformed_token_is_a_readable_error_without_the_token(

@@ -1,0 +1,228 @@
+from __future__ import annotations
+
+import asyncio
+from datetime import timedelta
+
+import pytest
+from sqlalchemy import update
+
+from cyrano.bot.notifier import OUTBOX_NOTICES
+from cyrano.db.models import ContactRow
+from cyrano.db.repositories import (
+    SqlContactRepository,
+    SqlMessageRepository,
+    SqlModeRepository,
+    SqlOutboxRepository,
+    SqlSenderStateRepository,
+)
+from cyrano.db.session import SessionFactory
+from cyrano.domain.enums import ContactStatus, OutboxSource, OutboxState, PauseReason, ResumeOutcome
+from cyrano.domain.errors import InvalidStatusTransition
+from cyrano.domain.models import Contact, StatusChange
+from cyrano.domain.outbox import REFUSED_CONTACT_NOT_ACTIVE
+from cyrano.services.outbox_sender import OutboxSender
+from cyrano.services.pause_actions import PauseActions
+from cyrano.services.send_guard import SendGuard
+from cyrano.services.send_limiter import SendLimiter
+from tests.privacy import FAKE_TELEGRAM_ID
+from tests.services.outbox_fakes import (
+    FakeClock,
+    FakeLimits,
+    RecordingNotifier,
+    ScriptedTransport,
+    free_schedule,
+    stored_contact,
+)
+
+MISSING_ID = 999_999
+QUEUED_TEXT = "resume-text-marker-zq"
+
+
+class _Switch:
+    autopilot_enabled = False
+
+
+@pytest.fixture
+def actions(contacts: SqlContactRepository) -> PauseActions:
+    return PauseActions(contacts)
+
+
+async def _contact(
+    contacts: SqlContactRepository, modes: SqlModeRepository, status: ContactStatus
+) -> Contact:
+    created = await stored_contact(contacts, modes, status, tg_id=FAKE_TELEGRAM_ID)
+    found = await contacts.get_by_id(created.id)
+    assert found is not None
+    return found
+
+
+async def _paused_by_manual_message(
+    contacts: SqlContactRepository, modes: SqlModeRepository
+) -> Contact:
+    contact = await _contact(contacts, modes, ContactStatus.ACTIVE)
+    await contacts.set_status(
+        contact.id, ContactStatus.PAUSED, pause_reason=PauseReason.MANUAL_MESSAGE
+    )
+    found = await contacts.get_by_id(contact.id)
+    assert found is not None
+    return found
+
+
+async def test_resume_activates_the_contact_keeps_the_mode_and_clears_the_reason(
+    actions: PauseActions, contacts: SqlContactRepository, modes: SqlModeRepository
+) -> None:
+    paused = await _paused_by_manual_message(contacts, modes)
+
+    outcome = await actions.resume(paused.id)
+
+    assert outcome is ResumeOutcome.APPLIED
+    resumed = await contacts.get_by_id(paused.id)
+    assert resumed is not None
+    assert (resumed.status, resumed.mode_id, resumed.pause_reason) == (
+        ContactStatus.ACTIVE,
+        paused.mode_id,
+        None,
+    )
+
+
+async def test_a_second_click_is_already_applied_and_changes_nothing(
+    actions: PauseActions, contacts: SqlContactRepository, modes: SqlModeRepository
+) -> None:
+    paused = await _paused_by_manual_message(contacts, modes)
+    await actions.resume(paused.id)
+    after_first = await contacts.get_by_id(paused.id)
+
+    outcome = await actions.resume(paused.id)
+
+    assert outcome is ResumeOutcome.ALREADY_APPLIED
+    assert await contacts.get_by_id(paused.id) == after_first
+
+
+async def test_a_contact_paused_by_a_rejection_can_be_resumed_too(
+    actions: PauseActions, contacts: SqlContactRepository, modes: SqlModeRepository
+) -> None:
+    contact = await _contact(contacts, modes, ContactStatus.ACTIVE)
+    await contacts.set_status(
+        contact.id, ContactStatus.PAUSED, pause_reason=PauseReason.SEND_REJECTED
+    )
+
+    assert await actions.resume(contact.id) is ResumeOutcome.APPLIED
+
+
+@pytest.mark.parametrize(
+    "status", [ContactStatus.NEW, ContactStatus.PENDING, ContactStatus.IGNORED]
+)
+async def test_resume_is_refused_for_a_contact_that_was_never_paused_or_is_ignored(
+    status: ContactStatus,
+    actions: PauseActions,
+    contacts: SqlContactRepository,
+    modes: SqlModeRepository,
+) -> None:
+    contact = await _contact(contacts, modes, status)
+
+    outcome = await actions.resume(contact.id)
+
+    assert outcome is ResumeOutcome.REFUSED
+    assert await contacts.get_by_id(contact.id) == contact
+
+
+async def test_resume_of_a_missing_contact_is_not_found(actions: PauseActions) -> None:
+    assert await actions.resume(MISSING_ID) is ResumeOutcome.NOT_FOUND
+
+
+async def test_a_paused_contact_without_a_mode_is_refused_and_stays_paused(
+    actions: PauseActions,
+    contacts: SqlContactRepository,
+    modes: SqlModeRepository,
+    session_factory: SessionFactory,
+) -> None:
+    paused = await _paused_by_manual_message(contacts, modes)
+    async with session_factory.begin() as session:
+        await session.execute(
+            update(ContactRow).where(ContactRow.id == paused.id).values(mode_id=None)
+        )
+    without_mode = await contacts.get_by_id(paused.id)
+
+    outcome = await actions.resume(paused.id)
+
+    assert outcome is ResumeOutcome.REFUSED
+    assert await contacts.get_by_id(paused.id) == without_mode
+
+
+async def test_a_refused_transition_during_the_resume_is_refused(
+    contacts: SqlContactRepository, modes: SqlModeRepository
+) -> None:
+    paused = await _paused_by_manual_message(contacts, modes)
+
+    class _Raced(SqlContactRepository):
+        async def set_status(
+            self,
+            contact_id: int,
+            status: ContactStatus,
+            *,
+            mode_id: int | None = None,
+            pause_reason: PauseReason | None = None,
+        ) -> StatusChange:
+            raise InvalidStatusTransition(ContactStatus.IGNORED, status)
+
+    raced = _Raced(contacts._session_factory)
+
+    assert await PauseActions(raced).resume(paused.id) is ResumeOutcome.REFUSED
+
+
+async def test_simultaneous_clicks_apply_once(
+    actions: PauseActions, contacts: SqlContactRepository, modes: SqlModeRepository
+) -> None:
+    paused = await _paused_by_manual_message(contacts, modes)
+
+    outcomes = await asyncio.gather(*(actions.resume(paused.id) for _ in range(5)))
+
+    assert sorted(outcomes) == [ResumeOutcome.ALREADY_APPLIED] * 4 + [ResumeOutcome.APPLIED]
+
+
+async def test_after_a_resume_the_sender_guard_allows_sending_again(
+    actions: PauseActions,
+    contacts: SqlContactRepository,
+    modes: SqlModeRepository,
+    messages: SqlMessageRepository,
+    outbox: SqlOutboxRepository,
+    sender_state: SqlSenderStateRepository,
+) -> None:
+    paused = await _paused_by_manual_message(contacts, modes)
+    clock = FakeClock()
+    transport = ScriptedTransport(clock=clock)
+    sender = OutboxSender(
+        outbox,
+        contacts,
+        sender_state,
+        SendLimiter(messages, FakeLimits()),
+        free_schedule(),
+        transport,
+        RecordingNotifier(),
+        SendGuard(_Switch()),
+        OUTBOX_NOTICES,
+        clock=clock,
+    )
+    blocked = await outbox.enqueue(paused.id, QUEUED_TEXT, clock(), OutboxSource.MANUAL_TEST)
+
+    await sender.send_next()
+
+    cancelled = await outbox.get(blocked.id)
+    assert cancelled is not None
+    assert (cancelled.state, cancelled.cancel_reason) == (
+        OutboxState.CANCELLED,
+        REFUSED_CONTACT_NOT_ACTIVE,
+    )
+    assert transport.calls == []
+
+    assert await actions.resume(paused.id) is ResumeOutcome.APPLIED
+    allowed = await outbox.enqueue(
+        paused.id, QUEUED_TEXT, clock() + timedelta(seconds=1), OutboxSource.MANUAL_TEST
+    )
+    clock.advance(2)
+    await sender.send_next()
+
+    sent = await outbox.get(allowed.id)
+    assert sent is not None
+    assert sent.state is OutboxState.SENT
+    assert transport.calls == [(paused.tg_id, QUEUED_TEXT)]

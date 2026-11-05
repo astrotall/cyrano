@@ -6,8 +6,10 @@ import logging
 
 from aiogram import Bot
 from aiogram.exceptions import TelegramAPIError
+from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 
 from cyrano.bot import messages
+from cyrano.bot.callbacks import PauseAction, PauseCallback
 from cyrano.domain.enums import LimitScope, LimitWindow
 from cyrano.services.outbox_sender import SenderNotices
 
@@ -41,3 +43,24 @@ class TelegramOwnerNotifier:
             await self._bot.send_message(chat_id=self._owner_id, text=text, parse_mode=None)
         except TelegramAPIError as exc:
             logger.warning("owner notification was not sent", extra={"error": type(exc).__name__})
+
+
+class TelegramManualPauseNotifier:
+    def __init__(self, bot: Bot, owner_id: int) -> None:
+        self._bot = bot
+        self._owner_id = owner_id
+
+    async def notify_manual_pause(self, contact_id: int) -> None:
+        button = InlineKeyboardButton(
+            text=messages.RESUME_BUTTON,
+            callback_data=PauseCallback(action=PauseAction.RESUME, contact_id=contact_id).pack(),
+        )
+        try:
+            await self._bot.send_message(
+                chat_id=self._owner_id,
+                text=messages.MANUAL_PAUSE_NOTICE.format(contact_id=contact_id),
+                parse_mode=None,
+                reply_markup=InlineKeyboardMarkup(inline_keyboard=[[button]]),
+            )
+        except TelegramAPIError as exc:
+            logger.warning("manual pause notice was not sent", extra={"error": type(exc).__name__})

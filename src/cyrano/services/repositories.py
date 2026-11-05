@@ -6,7 +6,7 @@ from collections.abc import Sequence
 from datetime import datetime
 from typing import Protocol
 
-from cyrano.domain.enums import ContactStatus, OutboxSource, OutboxState
+from cyrano.domain.enums import ContactStatus, OutboxSource, OutboxState, PauseReason
 from cyrano.domain.models import (
     Contact,
     ContactCreate,
@@ -15,6 +15,7 @@ from cyrano.domain.models import (
     MessageCreate,
     Mode,
     ModeCreate,
+    StatusChange,
 )
 from cyrano.domain.outbox import OutgoingPeak, ScheduledMessage, SenderState
 from cyrano.domain.schedule import ScheduleProfile
@@ -29,8 +30,13 @@ class ContactRepository(Protocol):
     async def create(self, data: ContactCreate) -> Contact: ...
 
     async def set_status(
-        self, contact_id: int, status: ContactStatus, *, mode_id: int | None = None
-    ) -> Contact: ...
+        self,
+        contact_id: int,
+        status: ContactStatus,
+        *,
+        mode_id: int | None = None,
+        pause_reason: PauseReason | None = None,
+    ) -> StatusChange: ...
 
     async def set_mode(self, contact_id: int, mode_id: int) -> Contact: ...
 
@@ -47,6 +53,8 @@ class ContactRepository(Protocol):
 
 class MessageRepository(Protocol):
     async def append(self, data: MessageCreate) -> Message: ...
+
+    async def exists(self, contact_id: int, tg_message_id: int) -> bool: ...
 
     async def list_last(self, contact_id: int, limit: int) -> list[Message]: ...
 
@@ -120,6 +128,8 @@ class OutboxRepository(Protocol):
     async def retry_failed(self, row_id: int, send_at: datetime) -> ScheduledMessage: ...
 
     async def cancel_pending_for_contact(self, contact_id: int, reason: str) -> int: ...
+
+    async def has_sending_row(self, contact_id: int) -> bool: ...
 
     async def stale_sending(self, claimed_before: datetime) -> list[ScheduledMessage]: ...
 

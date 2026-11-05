@@ -3,7 +3,7 @@
 **All rules below are planned until their tickets land, except where a rule says it exists.** S1
 and S2 are enforced since CYR-19: one guarded sender is the only way to a contact, and nothing
 writes to the outbox except the owner's explicit test command, so nothing is sent automatically.
-S8 is enforced since CYR-12. S5 is enforced since CYR-22. S6 is enforced since CYR-18, except the
+S8 is enforced since CYR-12. S5 is enforced since CYR-22. S4 is enforced since CYR-21. S6 is enforced since CYR-18, except the
 splitting (CYR-36). The other rules are
 not enforced by code yet; they are the contract that the tickets must implement and test. Changing or dropping a rule is a large change (see [CLAUDE.md](../../CLAUDE.md)) and ships
 with the code and the test ([CONTRIBUTING.md](../../CONTRIBUTING.md)). Statuses:
@@ -77,9 +77,33 @@ only.
 - **Rule:** if the owner writes in the chat by hand from the second account, the contact becomes
   `paused`.
 - **Why:** the owner has taken over; the assistant must not talk over them.
-- **Enforced where:** auto-pause on manual messages (CYR-21).
-- **How it is tested:** an outgoing message that was not sent by the sender pauses the contact; a
-  message sent by the sender does not; a job scheduled before the manual message sends nothing.
+- **Enforced where:** exists (CYR-21). A second Telethon handler (`userbot/outgoing_handler.py`)
+  passes every outgoing private message to a user to `ManualMessageDetector`
+  (`services/manual_intervention.py`). A message whose id is already stored is the sender's own and is
+  ignored; when the contact has a row in state `sending` the detector first waits, with early exit,
+  for the sender to store the id (0.25, 0.5, 1, 2, 4 and 8 s). A message that is not the sender's own
+  pauses an `active` contact with `pause_reason = manual_message`; only a real status change
+  cancels the scheduled rows (reason `manual_message`) and sends the owner one notice with a Resume
+  button. A contact in any other status only gets the message stored. A row already `sending` cannot
+  be cancelled by the detector; the sender's second guard, right before the send call, refuses it
+  because the contact is no longer `active`. A failure of the notice never undoes the pause. Resume
+  is `PauseActions.resume`, reachable only from the owner-only control bot (S8). Details:
+  [contact-lifecycle.md](contact-lifecycle.md#manual-intervention-cyr-21).
+- **How it is tested:** exists. `tests/services/test_manual_intervention.py`, on real PostgreSQL with
+  an injected sleep: a manual message to an `active` contact pauses it with the reason, cancels only
+  its scheduled rows, stores the message with Telegram's time without moving `last_message_at` and
+  notifies once; every other status is only stored; an unknown peer changes nothing; the same event
+  twice pauses and notifies once; the sender's own echo is ignored, also when it arrives before the
+  id is stored (each delay position); a manual message during a `sending` row waits every delay and
+  pauses; a manual message during the typing action of a real `OutboxSender` makes the second guard
+  cancel the row with `contact_not_active` and the transport sends nothing; a failing or hanging
+  notifier keeps the pause; the privacy test captures all logs at DEBUG. `tests/userbot/` covers the
+  filter, the handler (retry, no retry after a pause, group, channel, bot and service rejections) and
+  that both handlers are registered before connecting and removed on shutdown;
+  `tests/services/test_pause_actions.py` and `tests/bot/` cover resume and the notice;
+  `tests/test_one_sender.py` proves that `ManualPauseNotifier` has one method, is implemented only in
+  `bot/`, is called only by the detector behind the deadline, and that the detector touches no
+  transport method.
 
 ## S5. Rate limits and FloodWait
 
@@ -178,6 +202,7 @@ only.
   sender id or a number (only counts), and writes the draft only under `data/` unless the owner
   passes `--allow-any-path`.
   Owner notifications about the outbox (CYR-19, CYR-22) carry internal ids, class names, seconds and counts only.
+  The manual-pause notice (CYR-21) carries the internal contact id only.
 - **Why:** the data belongs to real people.
 - **Enforced where:** exists today: `.gitignore` and `.dockerignore` exclude `.env`, `*.session`,
   `media/` and `data/` (profile photos live under `MEDIA_DIR`, `.env.example` and compose put it

@@ -327,3 +327,104 @@ async def test_the_busiest_contact_breaks_a_tie_by_the_lower_id(
 
     assert peak is not None
     assert peak.contact_id == min(contact.id, other.id)
+
+
+async def test_exists_is_false_for_an_unknown_message(
+    messages: SqlMessageRepository, contact: Contact
+) -> None:
+    assert await messages.exists(contact.id, 1) is False
+
+
+@pytest.mark.parametrize("direction", list(MessageDirection))
+async def test_exists_finds_a_message_of_either_direction(
+    direction: MessageDirection, messages: SqlMessageRepository, contact: Contact
+) -> None:
+    await messages.append(
+        MessageCreate(contact_id=contact.id, direction=direction, text="fake", tg_message_id=7)
+    )
+
+    assert await messages.exists(contact.id, 7) is True
+    assert await messages.exists(contact.id, 8) is False
+
+
+async def test_exists_does_not_mix_contacts(
+    messages: SqlMessageRepository, contact: Contact, other: Contact
+) -> None:
+    await messages.append(_input(contact.id, 7))
+
+    assert await messages.exists(other.id, 7) is False
+    assert await messages.exists(contact.id, 7) is True
+
+
+async def test_append_keeps_a_given_creation_time(
+    messages: SqlMessageRepository, contact: Contact
+) -> None:
+    sent_at = datetime(2025, 3, 4, 5, 6, 7, tzinfo=UTC)
+
+    message = await messages.append(
+        MessageCreate(
+            contact_id=contact.id,
+            direction=MessageDirection.OUTGOING,
+            text="",
+            tg_message_id=9,
+            created_at=sent_at,
+        )
+    )
+
+    assert message.created_at == sent_at
+    assert message.text == ""
+
+
+async def test_append_without_a_creation_time_uses_the_database_clock(
+    messages: SqlMessageRepository, contact: Contact
+) -> None:
+    before = datetime.now(UTC) - timedelta(minutes=1)
+
+    message = await messages.append(_input(contact.id, 9))
+
+    assert message.created_at > before
+
+
+async def test_a_message_with_a_given_time_is_not_overwritten_by_a_repeat(
+    messages: SqlMessageRepository, contact: Contact
+) -> None:
+    sent_at = datetime(2025, 3, 4, 5, 6, 7, tzinfo=UTC)
+    first = await messages.append(
+        MessageCreate(
+            contact_id=contact.id,
+            direction=MessageDirection.OUTGOING,
+            text="first",
+            tg_message_id=9,
+            created_at=sent_at,
+        )
+    )
+
+    second = await messages.append(
+        MessageCreate(
+            contact_id=contact.id,
+            direction=MessageDirection.OUTGOING,
+            text="repeat",
+            tg_message_id=9,
+            created_at=sent_at + timedelta(hours=1),
+        )
+    )
+
+    assert second == first
+
+
+async def test_storing_a_message_does_not_move_the_last_message_time(
+    messages: SqlMessageRepository, contacts: SqlContactRepository, contact: Contact
+) -> None:
+    await messages.append(
+        MessageCreate(
+            contact_id=contact.id,
+            direction=MessageDirection.OUTGOING,
+            text="fake",
+            tg_message_id=9,
+            created_at=datetime(2025, 3, 4, 5, 6, 7, tzinfo=UTC),
+        )
+    )
+
+    stored = await contacts.get_by_id(contact.id)
+    assert stored is not None
+    assert stored.last_message_at is None

@@ -10,6 +10,7 @@ from collections.abc import Coroutine
 from cyrano.userbot.client import connect_authorized, disconnect_client
 from cyrano.userbot.errors import Disconnected
 from cyrano.userbot.handler import IncomingHandler, IncomingProcessor
+from cyrano.userbot.outgoing_handler import OutgoingHandler, OutgoingProcessor
 from cyrano.userbot.protocols import UserbotClient
 
 logger = logging.getLogger("cyrano.userbot")
@@ -39,12 +40,16 @@ async def _until_stopped[T](work: Coroutine[object, object, T], stop: asyncio.Ev
 
 
 class Userbot:
-    def __init__(self, client: UserbotClient, intake: IncomingProcessor) -> None:
+    def __init__(
+        self, client: UserbotClient, intake: IncomingProcessor, detector: OutgoingProcessor
+    ) -> None:
         self._client = client
         self._handler = IncomingHandler(intake)
+        self._outgoing_handler = OutgoingHandler(detector)
 
     async def start(self, stop: asyncio.Event) -> None:
         self._handler.register(self._client)
+        self._outgoing_handler.register(self._client)
         try:
             await _until_stopped(connect_authorized(self._client), stop)
             await _until_stopped(self._client.catch_up(), stop)
@@ -68,6 +73,7 @@ class Userbot:
 
     async def stop(self) -> None:
         self._handler.unregister(self._client)
+        self._outgoing_handler.unregister(self._client)
         await disconnect_client(self._client)
         logger.info(
             "userbot stopped",
@@ -75,5 +81,8 @@ class Userbot:
                 "handled": self._handler.handled,
                 "rejected": self._handler.rejected,
                 "failed": self._handler.failed,
+                "outgoing_handled": self._outgoing_handler.handled,
+                "outgoing_rejected": self._outgoing_handler.rejected,
+                "outgoing_failed": self._outgoing_handler.failed,
             },
         )

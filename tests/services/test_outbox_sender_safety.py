@@ -47,6 +47,7 @@ from cyrano.domain.enums import (
     LimitWindow,
     OutboxSource,
     OutboxState,
+    PauseReason,
     RejectionReason,
 )
 from cyrano.domain.errors import (
@@ -56,7 +57,7 @@ from cyrano.domain.errors import (
     SendRejected,
     SendUncertain,
 )
-from cyrano.domain.models import Contact
+from cyrano.domain.models import Contact, StatusChange
 from cyrano.domain.outbox import (
     CANCEL_REASON_SEND_REJECTED,
     CANCEL_REASON_STALE,
@@ -1263,6 +1264,9 @@ async def test_a_recipient_rejection_fails_the_row_pauses_the_contact_and_cancel
     stored = await rig.stored(hit.id)
     assert (stored.state, stored.error_class) == (OutboxState.FAILED, failure.error_class)
     assert await rig.status() is ContactStatus.PAUSED
+    paused = await rig.contacts.get_by_id(rig.contact.id)
+    assert paused is not None
+    assert paused.pause_reason is PauseReason.SEND_REJECTED
     cancelled = await rig.stored(pending.id)
     assert (cancelled.state, cancelled.cancel_reason) == (
         OutboxState.CANCELLED,
@@ -1350,8 +1354,13 @@ async def test_a_storage_failure_while_pausing_leaves_the_row_for_the_stale_chec
 
     class _BrokenStatus(SqlContactRepository):
         async def set_status(
-            self, contact_id: int, status: ContactStatus, *, mode_id: int | None = None
-        ) -> Contact:
+            self,
+            contact_id: int,
+            status: ContactStatus,
+            *,
+            mode_id: int | None = None,
+            pause_reason: PauseReason | None = None,
+        ) -> StatusChange:
             raise RuntimeError("fake storage failure")
 
     contacts = rig.contacts

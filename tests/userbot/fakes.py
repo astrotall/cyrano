@@ -10,7 +10,7 @@ from pathlib import Path
 
 from telethon.errors import SessionPasswordNeededError
 
-from cyrano.domain.enums import ContactStatus, MessageDirection
+from cyrano.domain.enums import ContactStatus, ManualMessageOutcome, MessageDirection, PauseReason
 from cyrano.domain.errors import ContactNotFound
 from cyrano.domain.models import (
     Contact,
@@ -19,6 +19,8 @@ from cyrano.domain.models import (
     IncomingMessage,
     Message,
     MessageCreate,
+    OutgoingMessage,
+    StatusChange,
 )
 from cyrano.domain.outbox import OutgoingPeak
 from cyrano.domain.transitions import transition_needed
@@ -81,12 +83,20 @@ class FakeEvent:
     is_group: bool | None = False
     is_channel: bool | None = False
     sender_id: int | None = FAKE_SENDER_ID
+    chat_id: int | None = FAKE_SENDER_ID
     raw_text: str | None = FAKE_TEXT
     sender: SenderLike | None = field(default_factory=FakeSender)
+    chat: SenderLike | None = field(default_factory=FakeSender)
+    chat_error: Exception | None = None
     write_attempts: list[str] = field(default_factory=list)
 
     async def get_sender(self) -> SenderLike | None:
         return self.sender
+
+    async def get_chat(self) -> SenderLike | None:
+        if self.chat_error is not None:
+            raise self.chat_error
+        return self.chat
 
     async def reply(self, *args: object, **kwargs: object) -> None:
         self.write_attempts.append("reply")
@@ -114,6 +124,27 @@ class FakeIntake:
             raise self._error
         self.received.append(incoming)
         return IntakeResult(contact_id=1, message_id=1, contact_created=True)
+
+
+class FakeDetector:
+    def __init__(
+        self,
+        outcome: ManualMessageOutcome = ManualMessageOutcome.STORED,
+        error: BaseException | None = None,
+        failures: int | None = None,
+    ) -> None:
+        self.received: list[OutgoingMessage] = []
+        self.calls = 0
+        self._outcome = outcome
+        self._error = error
+        self._failures = failures
+
+    async def handle(self, outgoing: OutgoingMessage) -> ManualMessageOutcome:
+        self.calls += 1
+        if self._error is not None and (self._failures is None or self.calls <= self._failures):
+            raise self._error
+        self.received.append(outgoing)
+        return self._outcome
 
 
 class FakeClient:
@@ -290,6 +321,7 @@ class InMemoryContacts:
             username=data.username,
             display_name=data.display_name,
             status=ContactStatus.NEW,
+            pause_reason=None,
             mode_id=None,
             profile=data.profile,
             summary={},
@@ -301,22 +333,27 @@ class InMemoryContacts:
         return contact
 
     async def set_status(
-        self, contact_id: int, status: ContactStatus, *, mode_id: int | None = None
-    ) -> Contact:
+        self,
+        contact_id: int,
+        status: ContactStatus,
+        *,
+        mode_id: int | None = None,
+        pause_reason: PauseReason | None = None,
+    ) -> StatusChange:
         contact = await self.get_by_id(contact_id)
         if contact is None:
             raise ContactNotFound(contact_id)
         mode_on_activation = mode_id if status is ContactStatus.ACTIVE else None
         has_mode = mode_on_activation is not None or contact.mode_id is not None
         if not transition_needed(contact.status, status, has_mode=has_mode):
-            return contact
-        changes: dict[str, object] = {"status": status}
+            return StatusChange.model_validate({**contact.model_dump(), "changed": False})
+        changes: dict[str, object] = {"status": status, "pause_reason": pause_reason}
         if mode_on_activation is not None:
             changes["mode_id"] = mode_on_activation
         changed = contact.model_copy(update=changes)
         self.stored[contact.tg_id] = changed
         self.status_changes.append((contact_id, status))
-        return changed
+        return StatusChange.model_validate({**changed.model_dump(), "changed": True})
 
     async def set_mode(self, contact_id: int, mode_id: int) -> Contact:
         raise NotImplementedError
@@ -352,6 +389,7 @@ class InMemoryContacts:
         profile: dict[str, object] | None = None,
         created_at: datetime = FAKE_SENT_AT,
         mode_id: int | None = None,
+        pause_reason: PauseReason | None = None,
     ) -> Contact:
         created = await self.create(
             ContactCreate(
@@ -359,7 +397,12 @@ class InMemoryContacts:
             )
         )
         seeded = created.model_copy(
-            update={"status": status, "created_at": created_at, "mode_id": mode_id}
+            update={
+                "status": status,
+                "created_at": created_at,
+                "mode_id": mode_id,
+                "pause_reason": pause_reason,
+            }
         )
         self.stored[tg_id] = seeded
         return seeded
@@ -379,6 +422,11 @@ class InMemoryMessages:
     def __init__(self) -> None:
         self.stored: list[Message] = []
 
+    async def exists(self, contact_id: int, tg_message_id: int) -> bool:
+        return any(
+            (m.contact_id, m.tg_message_id) == (contact_id, tg_message_id) for m in self.stored
+        )
+
     async def append(self, data: MessageCreate) -> Message:
         for existing in self.stored:
             if (existing.contact_id, existing.tg_message_id) == (
@@ -392,7 +440,7 @@ class InMemoryMessages:
             direction=data.direction,
             text=data.text,
             tg_message_id=data.tg_message_id,
-            created_at=FAKE_SENT_AT,
+            created_at=data.created_at if data.created_at is not None else FAKE_SENT_AT,
         )
         self.stored.append(message)
         return message

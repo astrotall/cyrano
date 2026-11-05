@@ -40,6 +40,7 @@ def _contact(status: ContactStatus) -> Contact:
         username=None,
         display_name=None,
         status=status,
+        pause_reason=None,
         mode_id=None,
         profile={},
         summary={},

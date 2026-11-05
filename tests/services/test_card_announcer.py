@@ -9,7 +9,7 @@ from datetime import UTC, datetime, timedelta
 
 import pytest
 
-from cyrano.domain.enums import ContactStatus, MessageDirection
+from cyrano.domain.enums import ContactStatus, MessageDirection, PauseReason
 from cyrano.domain.models import (
     CARD_MESSAGES_LIMIT,
     Contact,
@@ -17,6 +17,7 @@ from cyrano.domain.models import (
     ContactReadyEvent,
     MessageCreate,
     ModeCreate,
+    StatusChange,
 )
 from cyrano.services.card_announcer import (
     CARD_SWEEP_INTERVAL,
@@ -209,12 +210,19 @@ async def test_a_failed_status_write_after_delivery_leaves_the_contact_new_for_t
         failures = 1
 
         async def set_status(
-            self, contact_id: int, status: ContactStatus, *, mode_id: int | None = None
-        ) -> Contact:
+            self,
+            contact_id: int,
+            status: ContactStatus,
+            *,
+            mode_id: int | None = None,
+            pause_reason: PauseReason | None = None,
+        ) -> StatusChange:
             if self.failures:
                 self.failures -= 1
                 raise ConnectionError("fake database failure")
-            return await super().set_status(contact_id, status, mode_id=mode_id)
+            return await super().set_status(
+                contact_id, status, mode_id=mode_id, pause_reason=pause_reason
+            )
 
     rig = await _rig(contacts=_FailOnce(), sweep_interval=SHORT_INTERVAL)
     contact = await _seed(rig, 1, profile=COLLECTED)

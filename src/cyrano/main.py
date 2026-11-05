@@ -63,8 +63,10 @@ from cyrano.services.humanization import HumanizationPlanner, ScheduleService
 from cyrano.services.intake import IntakeService
 from cyrano.services.llm_check import check_llm
 from cyrano.services.llm_client import LLMClient
+from cyrano.services.manual_intervention import ManualMessageDetector
 from cyrano.services.outbox_sender import OutboxSender
 from cyrano.services.outbox_service import OutboxService
+from cyrano.services.pause_actions import PauseActions
 from cyrano.services.persona_service import PersonaService
 from cyrano.services.profile_collector import ProfileCollector
 from cyrano.services.prompt_builder import PromptBuilder
@@ -157,10 +159,13 @@ async def run(
     modes = SqlModeRepository(session_factory)
     new_contacts = InMemoryContactEvents[NewContactEvent]()
     ready_contacts = InMemoryContactEvents[ContactReadyEvent]()
+    outbox = SqlOutboxRepository(session_factory)
     intake = IntakeService(contacts, messages, new_contacts)
+    control_bot = ControlBot(settings, CardActions(contacts, modes), PauseActions(contacts))
+    detector = ManualMessageDetector(contacts, messages, outbox, control_bot.manual_pause_notifier)
     access = client_factory(settings)
     client = access.client
-    userbot = Userbot(client, intake)
+    userbot = Userbot(client, intake, detector)
     collector = ProfileCollector(
         contacts,
         TelethonProfileSource(client),
@@ -169,10 +174,9 @@ async def run(
         ready_contacts,
         settings.media_dir,
     )
-    control_bot = ControlBot(settings, CardActions(contacts, modes))
     announcer = CardAnnouncer(contacts, messages, modes, control_bot.sender, ready_contacts)
     sender = OutboxSender(
-        SqlOutboxRepository(session_factory),
+        outbox,
         contacts,
         SqlSenderStateRepository(session_factory),
         SendLimiter(messages, settings),

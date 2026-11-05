@@ -38,6 +38,7 @@ from cyrano.domain.outbox import (
     SentMessage,
 )
 from cyrano.domain.schedule import MAX_READ_PAUSE_SECONDS, MAX_TYPING_SECONDS, ScheduleProfile
+from cyrano.logging import JsonFormatter
 from cyrano.services.humanization import ScheduleService, typing_seconds
 from cyrano.services.outbox_sender import (
     FLOOD_WAIT_MARGIN,
@@ -46,8 +47,11 @@ from cyrano.services.outbox_sender import (
     SENDER_SEND_DEADLINE,
     SENDING_STALE_AFTER,
     SENDING_STALE_MARGIN,
+    STEP_DURATION_UNIT,
+    STEP_LOG_MESSAGE,
     OutboxSender,
     SenderTimings,
+    SendStep,
 )
 from cyrano.services.send_guard import SendGuard
 from cyrano.services.send_limiter import SendLimiter
@@ -92,6 +96,21 @@ NEARLY_MINUS_ONE = -0.95
 TIGHT_PROFILE = profile_with(
     typing={"chars_per_second": 5, "min_seconds": 0, "max_seconds": 0},
 )
+SENDER_LOGGER = "cyrano.services.outbox_sender"
+SENT_LOG_MESSAGE = "outbox row sent"
+STEP_FIELDS = (
+    "step",
+    "outcome",
+    "error_class",
+    "duration_ms",
+    "row_id",
+    "contact_id",
+    "planned_seconds",
+)
+READ_TOOK = 0.25
+SEND_TOOK = 0.5
+DETAIL_MARKER = "cosmetic-detail-marker-zq"
+LOG_STEPS = [SendStep.MARK_READ, SendStep.PAUSE, SendStep.TYPING, SendStep.SEND]
 
 
 @dataclass(frozen=True)
@@ -170,6 +189,80 @@ class _PausesDuringTyping(ScriptedTransport):
     async def show_typing(self, tg_id: int, seconds: float) -> None:
         await super().show_typing(tg_id, seconds)
         await self._contacts.set_status(self._contact_id, ContactStatus.PAUSED)
+
+
+class _Timed(ScriptedTransport):
+    def __init__(
+        self,
+        clock: FakeClock,
+        script: list[Exception] | None = None,
+        *,
+        read_errors: list[BaseException] | None = None,
+        typing_errors: list[BaseException] | None = None,
+    ) -> None:
+        super().__init__(
+            script or [],
+            clock=clock,
+            read_errors=read_errors or [],
+            typing_errors=typing_errors or [],
+        )
+        self.fake_clock = clock
+
+    async def mark_read(self, tg_id: int) -> None:
+        self.fake_clock.advance(READ_TOOK)
+        await super().mark_read(tg_id)
+
+    async def show_typing(self, tg_id: int, seconds: float) -> None:
+        self.fake_clock.advance(seconds)
+        await super().show_typing(tg_id, seconds)
+
+    async def send_text(self, tg_id: int, text: str) -> SentMessage:
+        self.fake_clock.advance(SEND_TOOK)
+        return await super().send_text(tg_id, text)
+
+
+class _TimedSleep(_RecordingSleep):
+    def __init__(self, transport: ScriptedTransport, clock: FakeClock) -> None:
+        super().__init__(transport)
+        self._fake_clock = clock
+
+    async def __call__(self, seconds: float) -> None:
+        self._fake_clock.advance(seconds)
+        await super().__call__(seconds)
+
+
+class _HangingSend(ScriptedTransport):
+    async def send_text(self, tg_id: int, text: str) -> SentMessage:
+        self.steps.append(SEND_TEXT_STEP)
+        await asyncio.sleep(3600)
+        raise AssertionError
+
+
+def _sender_records(caplog: pytest.LogCaptureFixture) -> list[logging.LogRecord]:
+    return [record for record in caplog.records if record.name == SENDER_LOGGER]
+
+
+def _step_lines(caplog: pytest.LogCaptureFixture) -> list[dict[str, object]]:
+    return [
+        {key: getattr(record, key) for key in STEP_FIELDS if hasattr(record, key)}
+        for record in _sender_records(caplog)
+        if record.getMessage() == STEP_LOG_MESSAGE
+    ]
+
+
+def _outcomes(caplog: pytest.LogCaptureFixture) -> list[tuple[object, object, object]]:
+    return [
+        (line["step"], line["outcome"], line.get("error_class")) for line in _step_lines(caplog)
+    ]
+
+
+def _ms(seconds: float) -> int:
+    return round(timedelta(seconds=seconds) / STEP_DURATION_UNIT)
+
+
+def _json_output(caplog: pytest.LogCaptureFixture) -> str:
+    formatter = JsonFormatter()
+    return "\n".join(formatter.format(record) for record in caplog.records)
 
 
 class _FixedUniform(random.Random):
@@ -834,3 +927,308 @@ async def test_no_path_leaks_a_text_a_name_or_a_telegram_id(
     combined = caplog.text + "\n".join(rig.notifier.texts)
     for marker in (TEXT, USERNAME, DISPLAY_NAME, FAKE_TELEGRAM_ID):
         assert_absent(marker, combined)
+
+
+@pytest.mark.parametrize("source", list(OutboxSource))
+async def test_a_normal_send_logs_each_step_in_order_with_durations_from_the_clock(
+    rig: Rig, source: OutboxSource, caplog: pytest.LogCaptureFixture
+) -> None:
+    caplog.set_level(logging.INFO)
+    transport = _Timed(rig.clock)
+    sender = rig.sender(transport, sleep=_TimedSleep(transport, rig.clock))
+    row = await rig.row(source)
+    pause = random.Random(SEED).uniform(1, 3)
+    typing = typing_seconds(TEXT, PROFILE)
+    ids = {"row_id": row.id, "contact_id": rig.contact.id}
+
+    await sender.send_next()
+
+    assert _step_lines(caplog) == [
+        {"step": "mark_read", "outcome": "ok", "duration_ms": _ms(READ_TOOK), **ids},
+        {
+            "step": "pause",
+            "outcome": "ok",
+            "duration_ms": _ms(pause),
+            "planned_seconds": pause,
+            **ids,
+        },
+        {
+            "step": "typing",
+            "outcome": "ok",
+            "duration_ms": _ms(typing),
+            "planned_seconds": typing,
+            **ids,
+        },
+        {"step": "send", "outcome": "ok", "duration_ms": _ms(SEND_TOOK), **ids},
+    ]
+    messages = [record.getMessage() for record in _sender_records(caplog)]
+    assert messages == [*[STEP_LOG_MESSAGE] * len(LOG_STEPS), SENT_LOG_MESSAGE]
+    step_records = [
+        record for record in _sender_records(caplog) if record.getMessage() == STEP_LOG_MESSAGE
+    ]
+    assert {record.levelno for record in step_records} == {logging.INFO}
+    assert all(isinstance(line["duration_ms"], int) for line in _step_lines(caplog))
+
+
+@pytest.mark.parametrize("error", COSMETIC_ERRORS, ids=lambda error: type(error).__name__)
+async def test_a_failed_read_mark_is_logged_as_failed_and_the_other_steps_still_run(
+    rig: Rig, error: Exception, caplog: pytest.LogCaptureFixture
+) -> None:
+    caplog.set_level(logging.INFO)
+    transport = _Timed(rig.clock, read_errors=[error])
+    sender = rig.sender(transport, sleep=_TimedSleep(transport, rig.clock))
+    row = await rig.row()
+
+    await sender.send_next()
+
+    assert _outcomes(caplog) == [
+        ("mark_read", "failed", type(error).__name__),
+        ("pause", "ok", None),
+        ("typing", "ok", None),
+        ("send", "ok", None),
+    ]
+    assert _step_lines(caplog)[0]["duration_ms"] == _ms(READ_TOOK)
+    assert (await rig.stored(row.id)).state is OutboxState.SENT
+    assert_absent(DETAIL_MARKER, _json_output(caplog))
+
+
+@pytest.mark.parametrize("error", COSMETIC_ERRORS, ids=lambda error: type(error).__name__)
+async def test_a_failed_typing_is_logged_as_failed_and_the_send_still_runs(
+    rig: Rig, error: Exception, caplog: pytest.LogCaptureFixture
+) -> None:
+    caplog.set_level(logging.INFO)
+    transport = _Timed(rig.clock, typing_errors=[error])
+    sender = rig.sender(transport, sleep=_TimedSleep(transport, rig.clock))
+    row = await rig.row()
+
+    await sender.send_next()
+
+    assert _outcomes(caplog) == [
+        ("mark_read", "ok", None),
+        ("pause", "ok", None),
+        ("typing", "failed", type(error).__name__),
+        ("send", "ok", None),
+    ]
+    assert (await rig.stored(row.id)).state is OutboxState.SENT
+    assert_absent(DETAIL_MARKER, _json_output(caplog))
+
+
+@pytest.mark.parametrize(
+    ("hang", "expected"),
+    [
+        (
+            "read",
+            [
+                ("mark_read", "timeout", None),
+                ("pause", "skipped", None),
+                ("typing", "skipped", None),
+                ("send", "ok", None),
+            ],
+        ),
+        (
+            "pause",
+            [
+                ("mark_read", "ok", None),
+                ("pause", "timeout", None),
+                ("typing", "skipped", None),
+                ("send", "ok", None),
+            ],
+        ),
+        (
+            "typing",
+            [
+                ("mark_read", "ok", None),
+                ("pause", "ok", None),
+                ("typing", "timeout", None),
+                ("send", "ok", None),
+            ],
+        ),
+    ],
+    ids=["in_read", "in_pause", "in_typing"],
+)
+async def test_a_deadline_overrun_logs_timeout_for_that_step_and_skipped_for_the_rest(
+    rig: Rig,
+    hang: str,
+    expected: list[tuple[str, str, None]],
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    caplog.set_level(logging.INFO)
+    transport: ScriptedTransport
+    if hang == "pause":
+        transport = ScriptedTransport(clock=rig.clock)
+        sender = rig.sender(
+            transport,
+            profile=TIGHT_PROFILE,
+            timings=SenderTimings(pre_send_margin=TIGHT_DEADLINE),
+            sleep=asyncio.sleep,
+            rng=_FixedUniform(3600.0),
+        )
+    else:
+        transport = _Hanging(hang_read=hang == "read", hang_typing=hang == "typing")
+        sender = rig.sender(
+            transport,
+            profile=TIGHT_PROFILE,
+            timings=SenderTimings(pre_send_margin=TIGHT_DEADLINE),
+        )
+    row = await rig.row()
+
+    await sender.send_next()
+
+    assert _outcomes(caplog) == expected
+    skipped = [line for line in _step_lines(caplog) if line["outcome"] == "skipped"]
+    assert all(line["duration_ms"] == 0 for line in skipped)
+    assert (await rig.stored(row.id)).state is OutboxState.SENT
+
+
+@pytest.mark.parametrize(
+    ("where", "error", "expected"),
+    [
+        (
+            "typing",
+            SendFloodWait("FakeFloodWait", FLOOD_SHORT),
+            [
+                ("mark_read", "ok", None),
+                ("pause", "ok", None),
+                ("typing", "failed", "SendFloodWait"),
+                ("send", "skipped", None),
+            ],
+        ),
+        (
+            "read",
+            SendFloodWait("FakeFloodWait", FLOOD_SHORT),
+            [
+                ("mark_read", "failed", "SendFloodWait"),
+                ("pause", "skipped", None),
+                ("typing", "skipped", None),
+                ("send", "skipped", None),
+            ],
+        ),
+        (
+            "typing",
+            SendAccountBlocked("FakeKind"),
+            [
+                ("mark_read", "ok", None),
+                ("pause", "ok", None),
+                ("typing", "failed", "SendAccountBlocked"),
+                ("send", "skipped", None),
+            ],
+        ),
+    ],
+    ids=["flood_in_typing", "flood_in_read_mark", "block_in_typing"],
+)
+async def test_a_flood_wait_or_an_account_error_before_the_send_is_logged_as_failed(
+    rig: Rig,
+    where: str,
+    error: Exception,
+    expected: list[tuple[str, str, str | None]],
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    caplog.set_level(logging.INFO)
+    transport = _Timed(
+        rig.clock,
+        read_errors=[error] if where == "read" else [],
+        typing_errors=[error] if where == "typing" else [],
+    )
+    sender = rig.sender(transport, sleep=_TimedSleep(transport, rig.clock))
+    row = await rig.row()
+
+    await sender.send_next()
+
+    assert _outcomes(caplog) == expected
+    assert transport.calls == []
+    stored = await rig.stored(row.id)
+    if isinstance(error, SendFloodWait):
+        assert stored.state is OutboxState.SCHEDULED
+        assert stored.error_class == "FakeFloodWait"
+    else:
+        assert stored.state is OutboxState.FAILED
+        assert stored.error_class == "FakeKind"
+    messages = [record.getMessage() for record in _sender_records(caplog)]
+    assert messages[: len(LOG_STEPS)] == [STEP_LOG_MESSAGE] * len(LOG_STEPS)
+    assert SENT_LOG_MESSAGE not in messages
+
+
+async def test_a_failed_send_is_logged_as_failed_with_its_class(
+    rig: Rig, caplog: pytest.LogCaptureFixture
+) -> None:
+    caplog.set_level(logging.INFO)
+    transport = _Timed(rig.clock, [SendUncertain("FakeNetworkError")])
+    sender = rig.sender(transport, sleep=_TimedSleep(transport, rig.clock))
+    row = await rig.row()
+
+    await sender.send_next()
+
+    assert _outcomes(caplog)[-1] == ("send", "failed", "SendUncertain")
+    assert _step_lines(caplog)[-1]["duration_ms"] == _ms(SEND_TOOK)
+    assert (await rig.stored(row.id)).state is OutboxState.FAILED
+    assert SENT_LOG_MESSAGE not in [record.getMessage() for record in _sender_records(caplog)]
+
+
+async def test_a_send_past_its_deadline_is_logged_as_timeout(
+    rig: Rig, caplog: pytest.LogCaptureFixture
+) -> None:
+    caplog.set_level(logging.INFO)
+    transport = _HangingSend(clock=rig.clock)
+    sender = rig.sender(transport, timings=SenderTimings(send_deadline=TIGHT_DEADLINE))
+    row = await rig.row()
+
+    await sender.send_next()
+
+    assert _outcomes(caplog)[-1] == ("send", "timeout", None)
+    assert (await rig.stored(row.id)).state is OutboxState.FAILED
+
+
+async def test_a_refusal_after_the_pre_send_part_logs_the_send_as_skipped(
+    rig: Rig, caplog: pytest.LogCaptureFixture
+) -> None:
+    caplog.set_level(logging.INFO)
+    transport = _PausesDuringTyping(rig.contacts, rig.contact.id)
+    sender = rig.sender(transport)
+    row = await rig.row()
+
+    await sender.send_next()
+
+    assert _outcomes(caplog) == [
+        ("mark_read", "ok", None),
+        ("pause", "ok", None),
+        ("typing", "ok", None),
+        ("send", "skipped", None),
+    ]
+    assert (await rig.stored(row.id)).state is OutboxState.CANCELLED
+
+
+async def test_a_row_that_never_reaches_the_pre_send_part_logs_no_step_lines(
+    rig: Rig, caplog: pytest.LogCaptureFixture
+) -> None:
+    caplog.set_level(logging.INFO)
+    rig.clock.now = AT_NIGHT
+    sender = rig.sender(ScriptedTransport(clock=rig.clock))
+    await rig.row()
+
+    await sender.send_next()
+
+    assert _step_lines(caplog) == []
+
+
+async def test_the_step_lines_carry_no_text_name_or_telegram_id(
+    rig: Rig, caplog: pytest.LogCaptureFixture
+) -> None:
+    caplog.set_level(logging.DEBUG)
+    scripts: list[ScriptedTransport] = [
+        _Timed(rig.clock),
+        _Timed(rig.clock, read_errors=[RuntimeError(TEXT)]),
+        _Timed(rig.clock, typing_errors=[RuntimeError(DETAIL_MARKER)]),
+        _Timed(rig.clock, [RuntimeError(TEXT)]),
+        _Timed(rig.clock, typing_errors=[SendFloodWait("FakeFlood", FLOOD_SHORT)]),
+    ]
+    for source in OutboxSource:
+        for transport in scripts:
+            await rig.state.resume()
+            sender = rig.sender(transport)
+            await rig.row(source)
+            await sender.send_next()
+
+    output = _json_output(caplog)
+    assert STEP_LOG_MESSAGE in output
+    for marker in (TEXT, USERNAME, DISPLAY_NAME, DETAIL_MARKER, FAKE_TELEGRAM_ID):
+        assert_absent(marker, output)

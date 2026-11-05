@@ -509,6 +509,8 @@ make down    # stop everything (named volumes are kept)
 - **Volumes.** `postgres_data`, `redis_data`, `userbot_session` (app and the login command),
   `media` (app and worker; the dev override replaces it with the `./data/media` bind mount, see
   below). `down` keeps them.
+- **Logs.** `make logs` shows JSON lines; how to read the sender's read mark, pause, typing and send
+  steps from them is in [Reading the logs](.claude/docs/outbox-and-sender.md#reading-the-logs).
 
 ### Postgres and Redis from the host
 

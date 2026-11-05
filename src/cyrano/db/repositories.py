@@ -25,7 +25,13 @@ from cyrano.db.models import (
     StyleExampleRow,
 )
 from cyrano.db.session import SessionFactory
-from cyrano.domain.enums import ContactStatus, MessageDirection, OutboxSource, OutboxState
+from cyrano.domain.enums import (
+    ContactStatus,
+    MessageDirection,
+    OutboxSource,
+    OutboxState,
+    PauseReason,
+)
 from cyrano.domain.errors import (
     ContactAlreadyExists,
     ContactNotFound,
@@ -35,6 +41,7 @@ from cyrano.domain.errors import (
     OutboxRowInvalid,
     OutboxRowNotFound,
     OutboxStateConflict,
+    PauseReasonRefused,
     SenderStateMissing,
     StoredScheduleInvalid,
 )
@@ -47,6 +54,7 @@ from cyrano.domain.models import (
     MessageCreate,
     Mode,
     ModeCreate,
+    StatusChange,
 )
 from cyrano.domain.outbox import OutgoingPeak, ScheduledMessage, SenderState
 from cyrano.domain.schedule import ScheduleProfile
@@ -64,6 +72,11 @@ async def _locked_contact(session: AsyncSession, contact_id: int) -> ContactRow:
 async def _ensure_mode_exists(session: AsyncSession, mode_id: int) -> None:
     if await session.get(ModeRow, mode_id) is None:
         raise ModeNotFound(mode_id)
+
+
+def _status_change(row: ContactRow, *, changed: bool) -> StatusChange:
+    contact = Contact.model_validate(row)
+    return StatusChange.model_validate({**contact.model_dump(), "changed": changed})
 
 
 class SqlContactRepository:
@@ -98,19 +111,28 @@ class SqlContactRepository:
             raise ContactAlreadyExists from None
 
     async def set_status(
-        self, contact_id: int, status: ContactStatus, *, mode_id: int | None = None
-    ) -> Contact:
+        self,
+        contact_id: int,
+        status: ContactStatus,
+        *,
+        mode_id: int | None = None,
+        pause_reason: PauseReason | None = None,
+    ) -> StatusChange:
+        if pause_reason is not None and status is not ContactStatus.PAUSED:
+            raise PauseReasonRefused(status)
         async with self._session_factory.begin() as session:
             row = await _locked_contact(session, contact_id)
             mode_on_activation = mode_id if status is ContactStatus.ACTIVE else None
             has_mode = mode_on_activation is not None or row.mode_id is not None
-            if transition_needed(row.status, status, has_mode=has_mode):
+            changed = transition_needed(row.status, status, has_mode=has_mode)
+            if changed:
                 if mode_on_activation is not None:
                     await _ensure_mode_exists(session, mode_on_activation)
                     row.mode_id = mode_on_activation
                 row.status = status
+                row.pause_reason = pause_reason
                 await session.flush()
-            return Contact.model_validate(row)
+            return _status_change(row, changed=changed)
 
     async def set_mode(self, contact_id: int, mode_id: int) -> Contact:
         async with self._session_factory.begin() as session:
@@ -164,14 +186,17 @@ class SqlMessageRepository:
         self._session_factory = session_factory
 
     async def append(self, data: MessageCreate) -> Message:
+        values: dict[str, object] = {
+            "contact_id": data.contact_id,
+            "direction": data.direction,
+            "text": data.text,
+            "tg_message_id": data.tg_message_id,
+        }
+        if data.created_at is not None:
+            values["created_at"] = data.created_at
         insert_new = (
             insert(MessageRow)
-            .values(
-                contact_id=data.contact_id,
-                direction=data.direction,
-                text=data.text,
-                tg_message_id=data.tg_message_id,
-            )
+            .values(**values)
             .on_conflict_do_nothing(
                 index_elements=[MessageRow.contact_id, MessageRow.tg_message_id]
             )
@@ -189,6 +214,15 @@ class SqlMessageRepository:
                 return Message.model_validate(row)
         except IntegrityError:
             raise ContactNotFound(data.contact_id) from None
+
+    async def exists(self, contact_id: int, tg_message_id: int) -> bool:
+        statement = select(
+            select(MessageRow.id)
+            .where(MessageRow.contact_id == contact_id, MessageRow.tg_message_id == tg_message_id)
+            .exists()
+        )
+        async with self._session_factory() as session:
+            return bool(await session.scalar(statement))
 
     async def list_last(self, contact_id: int, limit: int) -> list[Message]:
         if limit <= 0:
@@ -581,6 +615,18 @@ class SqlOutboxRepository:
         )
         async with self._session_factory.begin() as session:
             return len((await session.scalars(statement)).all())
+
+    async def has_sending_row(self, contact_id: int) -> bool:
+        statement = select(
+            select(ScheduledMessageRow.id)
+            .where(
+                ScheduledMessageRow.contact_id == contact_id,
+                ScheduledMessageRow.state == OutboxState.SENDING,
+            )
+            .exists()
+        )
+        async with self._session_factory() as session:
+            return bool(await session.scalar(statement))
 
     async def stale_sending(self, claimed_before: datetime) -> list[ScheduledMessage]:
         _require_aware(claimed_before)

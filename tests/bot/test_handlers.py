@@ -15,10 +15,11 @@ from aiogram.methods import (
 
 from cyrano.bot import messages
 from cyrano.bot.app import build_dispatcher
-from cyrano.bot.callbacks import CardAction, CardCallback
-from cyrano.domain.enums import ContactStatus
+from cyrano.bot.callbacks import CardAction, CardCallback, PauseAction, PauseCallback
+from cyrano.domain.enums import ContactStatus, PauseReason
 from cyrano.domain.models import Contact, ModeCreate
 from cyrano.services.card_actions import CardActions
+from cyrano.services.pause_actions import PauseActions
 from tests.bot.fakes import (
     OWNER_ID,
     STRANGER_ID,
@@ -63,15 +64,18 @@ async def _rig(
     mode_id: int | None = None,
     session: RecordingSession | None = None,
     contacts: InMemoryContacts | None = None,
+    pause_reason: PauseReason | None = None,
 ) -> Rig:
     contacts = contacts if contacts is not None else InMemoryContacts()
     modes = InMemoryModes()
     await modes.create(ModeCreate(name="default", prompt_fragment=""))
     await modes.create(ModeCreate(name="flirt", prompt_fragment=""))
     await modes.create(ModeCreate(name="retired", prompt_fragment="", enabled=False))
-    contact = await contacts.seed(CONTACT_TG_ID, status=status, mode_id=mode_id)
+    contact = await contacts.seed(
+        CONTACT_TG_ID, status=status, mode_id=mode_id, pause_reason=pause_reason
+    )
     bot, session = recording_bot(session)
-    dispatcher = build_dispatcher(OWNER_ID, CardActions(contacts, modes))
+    dispatcher = build_dispatcher(OWNER_ID, CardActions(contacts, modes), PauseActions(contacts))
     return Rig(dispatcher, bot, session, contacts, modes, contact)
 
 
@@ -387,3 +391,175 @@ async def test_callbacks_log_internal_ids_and_outcomes_only(
         "applied",
     )
     assert_absent(OWNER_ID, "".join(r.getMessage() + str(r.__dict__) for r in caplog.records))
+
+
+RESUME_NOTICE = messages.MANUAL_PAUSE_NOTICE.format(contact_id=17)
+
+
+async def _paused_rig(**kwargs: object) -> Rig:
+    return await _rig(
+        status=ContactStatus.PAUSED,
+        mode_id=2,
+        pause_reason=PauseReason.MANUAL_MESSAGE,
+        **kwargs,  # type: ignore[arg-type]
+    )
+
+
+def _resume(rig: Rig) -> PauseCallback:
+    return PauseCallback(action=PauseAction.RESUME, contact_id=rig.contact.id)
+
+
+async def _press_resume(rig: Rig, **kwargs: object) -> None:
+    await rig.feed(
+        callback_update(OWNER_ID, _resume(rig).pack(), card_text=RESUME_NOTICE, **kwargs)  # type: ignore[arg-type]
+    )
+
+
+async def test_resume_activates_the_contact_with_its_mode_and_edits_the_notice() -> None:
+    rig = await _paused_rig()
+
+    await _press_resume(rig)
+
+    current = await rig.current()
+    assert (current.status, current.mode_id, current.pause_reason) == (
+        ContactStatus.ACTIVE,
+        2,
+        None,
+    )
+    [edit] = rig.session.calls_of(EditMessageText)
+    assert edit.text == messages.RESUMED_TEXT.format(contact_id=rig.contact.id)
+    assert edit.reply_markup is None
+    [answer] = rig.session.calls_of(AnswerCallbackQuery)
+    assert answer.text is None
+    _assert_only_the_owner_is_addressed(rig.session)
+
+
+async def test_a_double_click_on_resume_changes_nothing_twice_and_answers_both() -> None:
+    rig = await _paused_rig()
+
+    await _press_resume(rig)
+    await _press_resume(rig, update_id=3)
+
+    assert rig.contacts.status_changes == [(rig.contact.id, ContactStatus.ACTIVE)]
+    first, second = rig.session.calls_of(EditMessageText)
+    assert first.text == second.text
+    assert [a.text for a in rig.session.calls_of(AnswerCallbackQuery)] == [None, None]
+
+
+@pytest.mark.parametrize(
+    "status", [ContactStatus.NEW, ContactStatus.PENDING, ContactStatus.IGNORED]
+)
+async def test_resume_on_a_contact_that_is_not_paused_gets_an_alert_and_changes_nothing(
+    status: ContactStatus,
+) -> None:
+    rig = await _rig(status=status, mode_id=2)
+
+    await _press_resume(rig)
+
+    assert (await rig.current()).status is status
+    assert rig.contacts.status_changes == []
+    [answer] = rig.session.calls_of(AnswerCallbackQuery)
+    assert (answer.text, answer.show_alert) == (messages.ALERT_RESUME_REFUSED, True)
+    assert rig.session.calls_of(EditMessageText) == []
+
+
+async def test_resume_without_a_mode_gets_an_alert_and_the_contact_stays_paused() -> None:
+    rig = await _rig(status=ContactStatus.PAUSED, mode_id=None)
+
+    await _press_resume(rig)
+
+    assert (await rig.current()).status is ContactStatus.PAUSED
+    [answer] = rig.session.calls_of(AnswerCallbackQuery)
+    assert answer.text == messages.ALERT_RESUME_REFUSED
+
+
+async def test_resume_of_an_unknown_contact_gets_a_not_found_alert() -> None:
+    rig = await _paused_rig()
+    unknown = PauseCallback(action=PauseAction.RESUME, contact_id=9999)
+
+    await rig.feed(callback_update(OWNER_ID, unknown.pack()))
+
+    [answer] = rig.session.calls_of(AnswerCallbackQuery)
+    assert (answer.text, answer.show_alert) == (messages.ALERT_NOT_FOUND, True)
+    assert (await rig.current()).status is ContactStatus.PAUSED
+
+
+async def test_a_notice_that_cannot_be_edited_is_only_answered_and_the_contact_is_resumed() -> None:
+    session = RecordingSession(
+        {
+            EditMessageText: [
+                TelegramBadRequest(
+                    EditMessageText(text="x"), "Bad Request: message can't be edited"
+                )
+            ]
+        }
+    )
+    rig = await _paused_rig(session=session)
+
+    await _press_resume(rig)
+
+    assert (await rig.current()).status is ContactStatus.ACTIVE
+    assert len(rig.session.calls_of(AnswerCallbackQuery)) == 1
+
+
+async def test_an_inaccessible_notice_is_only_answered_and_the_contact_is_resumed() -> None:
+    rig = await _paused_rig()
+
+    await _press_resume(rig, inaccessible=True)
+
+    assert (await rig.current()).status is ContactStatus.ACTIVE
+    assert rig.session.calls_of(EditMessageText) == []
+    assert len(rig.session.calls_of(AnswerCallbackQuery)) == 1
+
+
+async def test_a_failing_resume_is_always_answered_with_the_failure_alert(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    class _Broken(InMemoryContacts):
+        async def get_by_id(self, contact_id: int) -> Contact | None:
+            raise RuntimeError("fake storage failure")
+
+    rig = await _paused_rig(contacts=_Broken())
+
+    with caplog.at_level(logging.DEBUG):
+        await _press_resume(rig)
+
+    [answer] = rig.session.calls_of(AnswerCallbackQuery)
+    assert (answer.text, answer.show_alert) == (messages.ALERT_FAILED, True)
+    assert rig.session.calls_of(EditMessageText) == []
+
+
+async def test_a_resume_press_from_a_stranger_changes_nothing_and_is_not_answered() -> None:
+    rig = await _paused_rig()
+
+    await rig.feed(callback_update(STRANGER_ID, _resume(rig).pack(), chat_id=STRANGER_ID))
+
+    assert rig.session.calls == []
+    assert (await rig.current()).status is ContactStatus.PAUSED
+    assert rig.contacts.status_changes == []
+
+
+async def test_the_resume_callback_data_is_short_and_has_its_own_prefix() -> None:
+    packed = PauseCallback(action=PauseAction.RESUME, contact_id=10**12).pack()
+
+    assert packed.startswith("pause:")
+    assert len(packed.encode()) <= 64
+    assert PauseCallback.unpack(packed) == PauseCallback(
+        action=PauseAction.RESUME, contact_id=10**12
+    )
+    assert not packed.startswith("card:")
+
+
+async def test_resume_logs_carry_only_the_internal_id_and_the_outcome(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    rig = await _paused_rig()
+
+    with caplog.at_level(logging.DEBUG):
+        await _press_resume(rig)
+
+    [handled] = [r for r in caplog.records if r.getMessage() == "pause button handled"]
+    assert handled.__dict__["contact_id"] == rig.contact.id
+    assert handled.__dict__["outcome"] == "applied"
+    logged = "".join(f"{r.getMessage()} {r.__dict__}" for r in caplog.records)
+    assert_absent(OWNER_ID, logged)

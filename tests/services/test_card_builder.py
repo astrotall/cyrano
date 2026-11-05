@@ -32,6 +32,7 @@ def _contact(profile: dict[str, object] | None = None, **overrides: object) -> C
         "username": "fake_user",
         "display_name": "Fakefirst Fakelast",
         "status": ContactStatus.NEW,
+        "pause_reason": None,
         "mode_id": None,
         "profile": profile if profile is not None else {},
         "summary": {},

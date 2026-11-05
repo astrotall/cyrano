@@ -17,11 +17,18 @@ import pytest
 from cyrano import main as main_module
 from cyrano.bot.errors import BotTokenRejected, PollingFailed
 from cyrano.config import Settings, load_settings
-from cyrano.domain.enums import ContactStatus, MessageDirection, OutboxSource, OutboxState
+from cyrano.domain.enums import (
+    ContactStatus,
+    MessageDirection,
+    OutboxSource,
+    OutboxState,
+    PauseReason,
+)
 from cyrano.domain.models import ContactProfile, Message
 from cyrano.logging import configure_logging
 from cyrano.main import main, run
 from cyrano.services.card_actions import CardActions
+from cyrano.services.pause_actions import PauseActions
 from cyrano.userbot.client import UserbotAccess
 from cyrano.userbot.errors import Disconnected, SessionMissing, SessionNotAuthorized
 from tests.bot.fakes import FakeControlBot, fake_control_bot_class
@@ -306,9 +313,11 @@ async def test_shutdown_removes_the_handler_then_disconnects_then_disposes_the_e
 
     assert calls == [
         "add_event_handler",
+        "add_event_handler",
         "connect",
         "is_user_authorized",
         "catch_up",
+        "remove_event_handler",
         "remove_event_handler",
         "disconnect",
         "engine.dispose",
@@ -337,7 +346,9 @@ async def test_stop_signal_while_connecting_cleans_up_without_an_error(
 
     assert calls == [
         "add_event_handler",
+        "add_event_handler",
         "connect",
+        "remove_event_handler",
         "remove_event_handler",
         "disconnect",
         "engine.dispose",
@@ -375,7 +386,7 @@ async def test_run_with_an_unauthorized_session_fails_and_cleans_up(
         await run(settings, asyncio.Event(), client_factory=_factory(client))
 
     assert "catch_up" not in client.calls
-    assert client.calls[-2:] == ["remove_event_handler", "disconnect"]
+    assert client.calls[-3:] == ["remove_event_handler", "remove_event_handler", "disconnect"]
     assert not _exists(heartbeat_file)
 
 
@@ -392,7 +403,7 @@ async def test_run_fails_when_the_connection_is_lost(
     with pytest.raises(Disconnected):
         await asyncio.wait_for(task, timeout=2)
 
-    assert client.calls[-2:] == ["remove_event_handler", "disconnect"]
+    assert client.calls[-3:] == ["remove_event_handler", "remove_event_handler", "disconnect"]
     assert not _exists(heartbeat_file)
 
 
@@ -846,8 +857,10 @@ async def test_a_row_left_in_sending_is_failed_at_start_with_one_notice_through_
     built: list[FakeControlBot] = []
     build_bot = fake_control_bot_class()
 
-    def remember(settings: Settings, actions: CardActions) -> FakeControlBot:
-        bot = build_bot(settings, actions)
+    def remember(
+        settings: Settings, actions: CardActions, pause_actions: PauseActions
+    ) -> FakeControlBot:
+        bot = build_bot(settings, actions, pause_actions)
         built.append(bot)
         return bot
 
@@ -1008,7 +1021,7 @@ async def test_a_polling_failure_ends_the_app_with_a_readable_error(
             timeout=2,
         )
 
-    assert bot_calls[-2:] == ["remove_event_handler", "disconnect"]
+    assert bot_calls[-3:] == ["remove_event_handler", "remove_event_handler", "disconnect"]
     assert "bot.stop" in bot_calls
     assert not _exists(heartbeat_file)
 
@@ -1144,3 +1157,106 @@ def test_a_control_bot_error_is_a_readable_exit(
 
     assert main([]) == 1
     assert str(error) in capsys.readouterr().err
+
+
+OWNER_ACCOUNT_ID = 424242424242
+MANUAL_MESSAGE_ID = 9100
+
+
+async def _run_with_manual_message(
+    repositories: Repositories,
+    monkeypatch: pytest.MonkeyPatch,
+    status: ContactStatus,
+    event: FakeEvent,
+) -> FakeControlBot:
+    await repositories.contacts.seed(FAKE_SENDER_ID, status=status, mode_id=1)
+    built: list[FakeControlBot] = []
+    build_bot = fake_control_bot_class()
+
+    def remember(
+        settings: Settings, actions: CardActions, pause_actions: PauseActions
+    ) -> FakeControlBot:
+        bot = build_bot(settings, actions, pause_actions)
+        built.append(bot)
+        return bot
+
+    monkeypatch.setattr("cyrano.main.ControlBot", remember)
+    client = FakeClient()
+    stop = asyncio.Event()
+    task = asyncio.create_task(
+        run(load_settings(env_file=None), stop, client_factory=_factory(client))
+    )
+    await asyncio.sleep(0.05)
+
+    await client.deliver(event)
+    stop.set()
+    await asyncio.wait_for(task, timeout=2)
+    return built[0]
+
+
+def _manual_event(**overrides: object) -> FakeEvent:
+    fields: dict[str, object] = {
+        "id": MANUAL_MESSAGE_ID,
+        "out": True,
+        "sender_id": OWNER_ACCOUNT_ID,
+        "sender": FakeSender(id=OWNER_ACCOUNT_ID, is_self=True),
+        "chat_id": FAKE_SENDER_ID,
+        "chat": FakeSender(id=FAKE_SENDER_ID),
+    }
+    return FakeEvent(**{**fields, **overrides})  # type: ignore[arg-type]
+
+
+async def test_a_manual_message_pauses_the_active_contact_and_tells_the_owner_once(
+    session_env: dict[str, str],
+    heartbeat_file: Path,
+    repositories: Repositories,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    bot = await _run_with_manual_message(
+        repositories, monkeypatch, ContactStatus.ACTIVE, _manual_event()
+    )
+
+    contact = await repositories.contacts.get_by_tg_id(FAKE_SENDER_ID)
+    assert contact is not None
+    assert (contact.status, contact.pause_reason) == (
+        ContactStatus.PAUSED,
+        PauseReason.MANUAL_MESSAGE,
+    )
+    assert bot.manual_pause_notifier.contact_ids == [contact.id]
+    assert [m.direction for m in repositories.messages.stored] == [MessageDirection.OUTGOING]
+
+
+async def test_a_manual_message_to_a_contact_that_is_not_active_changes_nothing_in_the_app(
+    session_env: dict[str, str],
+    heartbeat_file: Path,
+    repositories: Repositories,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    bot = await _run_with_manual_message(
+        repositories, monkeypatch, ContactStatus.PENDING, _manual_event()
+    )
+
+    contact = await repositories.contacts.get_by_tg_id(FAKE_SENDER_ID)
+    assert contact is not None
+    assert contact.status is ContactStatus.PENDING
+    assert bot.manual_pause_notifier.contact_ids == []
+
+
+async def test_a_message_the_owner_sent_to_a_group_changes_nothing_in_the_app(
+    session_env: dict[str, str],
+    heartbeat_file: Path,
+    repositories: Repositories,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    bot = await _run_with_manual_message(
+        repositories,
+        monkeypatch,
+        ContactStatus.ACTIVE,
+        _manual_event(is_group=True, is_private=False),
+    )
+
+    contact = await repositories.contacts.get_by_tg_id(FAKE_SENDER_ID)
+    assert contact is not None
+    assert contact.status is ContactStatus.ACTIVE
+    assert bot.manual_pause_notifier.contact_ids == []
+    assert repositories.messages.stored == []

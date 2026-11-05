@@ -6,8 +6,11 @@ collection of the profile for the owner's card exists too (CYR-11): it fills `pr
 no status. The owner's card exists since CYR-12: delivering it moves `new` to `pending`, and its two
 buttons move `pending` to `active` or `ignored`. The outbox and the guarded sender exist since
 CYR-19 ([outbox-and-sender.md](outbox-and-sender.md)), and only the owner's test command can add a
-row. Since CYR-22 a recipient rejection moves an `active` contact to `paused`. The other flows that drive the lifecycle are **planned**, each marked with its ticket; nothing
-replies to an `active` contact automatically yet.
+row. Since CYR-22 a recipient rejection moves an `active` contact to `paused`. Since CYR-21 a message
+the owner writes by hand to a contact from the second account does the same, and the owner can resume
+from the notice ([Manual intervention](#manual-intervention-cyr-21)). The other flows that drive the
+lifecycle are **planned**, each marked with its ticket; nothing replies to an `active` contact
+automatically yet.
 
 ## Statuses
 
@@ -18,7 +21,7 @@ replies to an `active` contact automatically yet.
 | `new` | Registered by the userbot from an unknown sender | Never | userbot (CYR-10, exists) |
 | `pending` | A card was delivered to the owner, waiting for a decision | No | card announcer (CYR-12, exists) |
 | `active` | The owner pressed Reply and chose a mode | Yes, via the sender only (the sender exists, CYR-19; the autopilot is CYR-17, so nothing replies automatically yet) | owner (CYR-12 exists, modes CYR-15) |
-| `paused` | Stopped by Telegram refusing to deliver to the contact, by a stop-trigger, by a manual message of the owner, by two unanswered proactive messages, or by the owner | No | sender (CYR-22, exists), system (CYR-20, CYR-21, CYR-23) or owner |
+| `paused` | Stopped by Telegram refusing to deliver to the contact, by a stop-trigger, by a manual message of the owner, by two unanswered proactive messages, or by the owner. The column `pause_reason` says which | No | sender (CYR-22, exists), manual-message detector (CYR-21, exists), system (CYR-20, CYR-23) or owner |
 | `ignored` | The owner pressed Ignore | Never; silence forever | owner (CYR-12, exists) |
 
 Only `active` is allowed to receive an automatic reply. See [S1](safety-rules.md).
@@ -38,11 +41,11 @@ The triggers marked "exists" are implemented; the others are planned. Changing t
 | `pending` | `ignored` | Owner presses Ignore | owner, through the card | CYR-12 (exists) |
 | `active` | `paused` | Telegram refused a send because of the recipient (blocked, privacy, deactivated, not found, forbidden) | sender | CYR-22 (exists) |
 | `active` | `paused` | A stop-trigger fires | system | CYR-20 |
-| `active` | `paused` | The owner writes a manual message in the chat | system | CYR-21 |
+| `active` | `paused` | The owner writes a manual message in the chat from the second account | manual-message detector | CYR-21 (exists) |
 | `active` | `paused` | Two proactive messages in a row stay unanswered | system | CYR-23 |
 | `active` | `paused` | The owner pauses the contact | owner | none yet |
 | `active` | `ignored` | The owner ignores the contact | owner | none yet |
-| `paused` | `active` | Owner presses Resume | owner | none yet |
+| `paused` | `active` | Owner presses Resume on the manual-pause notice | owner, through `PauseActions` | CYR-21 (exists) |
 | `paused` | `ignored` | The owner ignores the contact | owner | none yet |
 
 Rules:
@@ -57,6 +60,13 @@ Rules:
   `ActivationWithoutMode`, a subclass of `InvalidStatusTransition`, is raised. A `mode_id` that does
   not exist raises `ModeNotFound`.
 - `mode_id` is applied only by a call that really activates the contact; other calls ignore it.
+- `pause_reason` (`manual_message`, `send_rejected`, `owner`) may be passed only together with
+  `paused`; with any other status `PauseReasonRefused` is raised. It is stored by a call that really
+  moves the contact into `paused` and cleared by every call that moves it out of `paused`. A
+  same-status request is a no-op, so a second pause keeps the first reason. A contact paused before
+  CYR-21 has no reason (`NULL`). `set_status` returns the contact plus a `changed` flag, true only
+  when the status really changed; a caller that must act once per real change (the notice of a
+  manual pause) uses that flag.
 
 A contact may keep a mode that is later disabled. The mode is resolved when it is used:
 `ModeRepository.resolve_by_id` and `resolve_by_name` return the requested mode if it is enabled and
@@ -293,6 +303,71 @@ cancelled first on shutdown. It talks to the owner only through the `CardSender`
   messages that arrived while the contact was `pending`. Pausing and resuming from the card, and the
   stop-trigger notification, are CYR-26 and CYR-20.
 
+## Manual intervention (CYR-21)
+
+Exists. If the owner writes to a contact by hand from the second account, the assistant must not talk
+over them: the contact is paused, its scheduled rows are cancelled and the owner gets one notice with
+a Resume button ([S4](safety-rules.md)).
+
+**Detection.** A second Telethon handler, `OutgoingHandler` in `userbot/outgoing_handler.py`, listens
+for outgoing messages next to the incoming one (`IntakeService` and the incoming handler are not
+touched). A pure filter lets through only a private chat with a real user and counts everything else
+at DEBUG: groups, channels, bots, the service account (777000), deleted accounts, the account itself,
+an event without a usable peer id. The peer is the chat, never the sender (the sender of an outgoing
+message is the account itself). The handler builds an `OutgoingMessage` (peer Telegram id, message
+id, text or an empty string, Telegram's send time) and calls `ManualMessageDetector.handle`. It
+catches everything, retries a failed detection up to 3 times (1 s, then 2 s) and never retries a
+detection that already paused the contact, because the detector never raises after the pause.
+
+**Classification** (`services/manual_intervention.py`). A message the sender itself sent also arrives
+as an outgoing event, and the assistant must not take its own echo for the owner:
+
+| Step | What happens |
+| --- | --- |
+| 1 | The contact is read by the peer's Telegram id. Unknown peer: nothing happens, nothing is stored |
+| 2 | Whether the contact has a row in state `sending` is read **first**, then whether the message id is already stored. Stored: it is the sender's own message (or an event seen before), ignored |
+| 3 | If it is not stored but a row is `sending`, the echo may have arrived before the sender stored its message id. The detector re-checks the message id after each of the delays 0.25, 0.5, 1, 2, 4 and 8 s (15.75 s in all, injected sleep, early exit as soon as the id appears). Stored by then: own message, ignored |
+| 4 | Otherwise the message is manual. The status is re-read now, because it may have changed during the wait |
+| 5 | Only an `active` contact is paused: `set_status(paused, pause_reason=manual_message)`. Any other status is left as it is (an `ignored` contact stays ignored, an earlier pause keeps its first reason) and the message is only stored |
+| 6 | If the status really changed (the `changed` flag), the contact's scheduled rows are cancelled with the reason `manual_message`, the message is stored, and the owner gets ONE notice. Each of these three steps is guarded on its own: a failure is logged with the step and the error class and never undoes the pause, never blocks the other steps and never reaches the handler |
+
+The order is pause first, then cancel, store, notify. Storing first and pausing afterwards would let a
+replayed event (a retry, a catch-up after a restart) find the message already stored, take it for
+the sender's own and skip the pause. The same event twice therefore pauses once, stores once and
+notifies once.
+
+**The stored message.** An owner message is appended as `outgoing` with Telegram's send time as
+`created_at` and does not move `contacts.last_message_at`, which stays the time of the latest message
+from the contact. It counts as an outgoing message for the send limits ([S5](safety-rules.md)),
+because Telegram counts it as well.
+
+**A row in the middle of sending.** A `sending` row cannot be cancelled by the detector (the claim and
+the Telegram call belong to the sender). Pausing the contact is enough: the sender checks the guard
+a second time right before the send call and refuses the row with `contact_not_active`
+([outbox-and-sender.md](outbox-and-sender.md#the-guard)). A test proves exactly that, with a manual
+message arriving during the typing action of a real `OutboxSender`.
+
+**The notice.** `ManualPauseNotifier.notify_manual_pause(contact_id)` is a single-method Protocol
+implemented only by the control bot (`TelegramManualPauseNotifier`). It sends one plain text message
+to the owner chat with the internal contact id and one button, «Возобновить автоответы». The notice
+carries no name, nick, Telegram id or message text. The call has a 15 s deadline; a failure or a
+timeout is logged with the error class and never undoes the pause. A crash between the pause and the
+notice loses the notice, not the pause; the owner then finds the contact paused when they look for it.
+
+**Resume.** The button calls `PauseActions.resume(contact_id)` through a callback with its own prefix
+(`pause`), handled by the owner-only control bot. Under a lock: the contact must be `paused` and have
+a mode; it becomes `active` with the mode it already had (`set_status` is called without a mode), and
+`pause_reason` is cleared. Outcomes: `applied`; `already_applied` (the contact is already `active`, a
+second click); `refused` (not paused, or no mode, or the transition is not allowed); `not_found`.
+The bot always answers the callback query. On `applied` and `already_applied` it edits the notice and
+removes the button; otherwise it shows a short alert. A contact paused by a recipient rejection
+(`send_rejected`) can be resumed the same way, but only a notice of a manual pause carries the button.
+
+**Limits.** Activity from other devices of the second account that sends no messages is not seen, and
+a message sent from another client is indistinguishable from the owner's by hand: both pause. Because
+Telethon runs handlers one after another (`sequential_updates`), the settle wait can delay the
+processing of other updates by up to 15.75 s when a row is `sending`.
+
 ## What is stored per contact
 
 Fixed in CYR-9. Table `contacts`:
@@ -304,6 +379,7 @@ Fixed in CYR-9. Table `contacts`:
 | `username`, `display_name` | Nick and name; both may be missing |
 | `status` | One of the statuses above, starts as `new` |
 | `mode_id` | Chosen mode, nullable, foreign key to `modes` |
+| `pause_reason` | Why the contact is `paused`: `manual_message`, `send_rejected` or `owner`; `NULL` for every other status and for contacts paused before CYR-21. A check constraint allows only these values (migration `0007`, no backfill) |
 | `profile` | JSONB object: bio, photo path, matching-bot card text and card photo paths, `collected_at`. Structure: [The stored profile](#the-stored-profile) (CYR-11) |
 | `summary` | JSONB object: contact summary. Its schema arrives with CYR-25 |
 | `last_message_at` | Time of the latest message **from the contact**; only moves forward, a late event does not take it back. A message we send does not move it (CYR-19) |
@@ -313,7 +389,8 @@ Message history is in table `messages` (the "last N messages" come from here), o
 message: `contact_id`, `direction` (`incoming`, `outgoing`), `text`, `tg_message_id`, `created_at`.
 `incoming` rows are written by the registration above; `outgoing` rows by the sender's
 `complete_send`, in one transaction with marking the outbox row sent, with the Telegram message id and
-Telegram's send time (CYR-19).
+Telegram's send time (CYR-19), and, for messages the owner wrote by hand, by the manual-message
+detector with Telegram's send time as `created_at` and without moving `last_message_at` (CYR-21).
 The counter of unanswered proactive messages does not exist yet; CYR-23 adds it with a migration.
 
 All timestamps are `timestamptz` stored in UTC. All of it is personal data: it stays in the database
@@ -338,6 +415,7 @@ when both events arrive at the same time. `list_last` returns the newest N in ch
   prompt building and sending (for example a stop-trigger or a manual message of the owner) always
   cancels the reply.
 - A job whose contact is not `active` when it runs finishes without sending.
-- A manual message of the owner in the chat pauses the contact (CYR-21); a job already scheduled
-  then ends at the status re-check.
+- A manual message of the owner in the chat pauses the contact (CYR-21, exists); a job already
+  scheduled then ends at the status re-check, and the sender's rows of that contact are cancelled
+  with the reason `manual_message`.
 - Reminders for `pending` cards (CYR-24) do not change the status.

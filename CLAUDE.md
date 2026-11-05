@@ -29,7 +29,9 @@ wired into the app) and the outbox with the one sender and the status guard (CYR
 owner's test command writes rows, nothing is sent automatically) with its limits, flood-wait pause
 and account-level stop (CYR-22) and the humanization (CYR-18: the send time planner, not used by the
 app yet, the schedule profile, and the read mark, typing and availability check in the sender) exist.
-Everything
+and the pause on a manual message
+of the owner (CYR-21: the outgoing handler and the detector in the running app, the notice with its Resume
+button). Everything
 else is planned and marked with its ticket key.
 Never describe planned behaviour as existing.
 
@@ -204,6 +206,16 @@ CYR-18 added the humanization: `domain/schedule.py` (`ScheduleProfile` with its 
 the second guard; `SENDING_STALE_AFTER` computed, 195 s), `schedule_cli.py` with the `schedule` commands and
 their Makefile targets, `examples/schedule.sample.json`, the `schedule*.json` ignore rule, and the
 tests. Splitting a reply is CYR-36.
+CYR-21 added the auto-pause on a manual message: the `PauseReason` enum and the nullable
+`contacts.pause_reason` (migration `0007`, a check constraint, no backfill), the `pause_reason`
+argument and the `changed` flag of `ContactRepository.set_status` (`StatusChange`), the recipient-rejection pause
+now storing `send_rejected`, `MessageRepository.exists`, `OutboxRepository.has_sending_row`, the
+`OutgoingMessage` model, the outcome enums, `services/manual_intervention.py` (`ManualMessageDetector`),
+`manual_pause_notifier.py` (the one-method `ManualPauseNotifier` Protocol) and `pause_actions.py`
+(`PauseActions`), `userbot/outgoing_handler.py` and `outgoing_event_rejection` (a second Telethon handler;
+`IncomingEvent` gained the read members `chat_id` and `get_chat`), `TelegramManualPauseNotifier` in
+`bot/notifier.py`, the `PauseCallback` and the resume handler, the new owner texts, the wiring in `main.py`,
+and the tests, with the new scans in `tests/test_one_sender.py`.
 
 ## Detailed guides
 

@@ -44,8 +44,10 @@ ALLOWED_EVENT_MEMBERS = frozenset(
         "is_group",
         "is_channel",
         "sender_id",
+        "chat_id",
         "raw_text",
         "get_sender",
+        "get_chat",
     }
 )
 ALLOWED_SENDER_MEMBERS = frozenset(

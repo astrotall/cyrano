@@ -16,26 +16,34 @@ from aiogram.utils.token import TokenValidationError
 from cyrano.bot.errors import BotTokenRejected, PollingFailed
 from cyrano.bot.handlers import build_router
 from cyrano.bot.middleware import OwnerOnlyMiddleware
-from cyrano.bot.notifier import TelegramOwnerNotifier
+from cyrano.bot.notifier import TelegramManualPauseNotifier, TelegramOwnerNotifier
 from cyrano.bot.sender import TelegramCardSender
 from cyrano.config import Settings
 from cyrano.services.card_actions import CardActions
+from cyrano.services.pause_actions import PauseActions
 
 logger = logging.getLogger("cyrano.bot")
 
 STOP_POLLING_TIMEOUT_SECONDS = 5.0
 
 
-def build_dispatcher(owner_id: int, actions: CardActions) -> Dispatcher:
+def build_dispatcher(
+    owner_id: int, actions: CardActions, pause_actions: PauseActions
+) -> Dispatcher:
     dispatcher = Dispatcher()
     dispatcher.update.outer_middleware(OwnerOnlyMiddleware(owner_id))
-    dispatcher.include_router(build_router(actions))
+    dispatcher.include_router(build_router(actions, pause_actions))
     return dispatcher
 
 
 class ControlBot:
     def __init__(
-        self, settings: Settings, actions: CardActions, *, session: BaseSession | None = None
+        self,
+        settings: Settings,
+        actions: CardActions,
+        pause_actions: PauseActions,
+        *,
+        session: BaseSession | None = None,
     ) -> None:
         try:
             self._bot = Bot(
@@ -47,9 +55,12 @@ class ControlBot:
             )
         except TokenValidationError:
             raise BotTokenRejected from None
-        self._dispatcher = build_dispatcher(settings.owner_telegram_id, actions)
+        self._dispatcher = build_dispatcher(settings.owner_telegram_id, actions, pause_actions)
         self._sender = TelegramCardSender(self._bot, settings.owner_telegram_id, settings.media_dir)
         self._notifier = TelegramOwnerNotifier(self._bot, settings.owner_telegram_id)
+        self._manual_pause_notifier = TelegramManualPauseNotifier(
+            self._bot, settings.owner_telegram_id
+        )
 
     @property
     def sender(self) -> TelegramCardSender:
@@ -58,6 +69,10 @@ class ControlBot:
     @property
     def notifier(self) -> TelegramOwnerNotifier:
         return self._notifier
+
+    @property
+    def manual_pause_notifier(self) -> TelegramManualPauseNotifier:
+        return self._manual_pause_notifier
 
     async def poll(self) -> None:
         try:

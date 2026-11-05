@@ -10,13 +10,14 @@ from sqlalchemy.engine import URL
 from cyrano.db.models import ContactRow
 from cyrano.db.repositories import SqlContactRepository, SqlModeRepository
 from cyrano.db.session import SessionFactory
-from cyrano.domain.enums import ContactStatus
+from cyrano.domain.enums import ContactStatus, PauseReason
 from cyrano.domain.errors import (
     ActivationWithoutMode,
     ContactAlreadyExists,
     ContactNotFound,
     InvalidStatusTransition,
     ModeNotFound,
+    PauseReasonRefused,
 )
 from cyrano.domain.models import (
     DEFAULT_MODE_NAME,
@@ -171,7 +172,10 @@ async def test_same_status_is_a_no_op_and_writes_nothing(
 ) -> None:
     contact = await _contact_in(status, contacts, session_factory)
 
-    assert await contacts.set_status(contact.id, status) == contact
+    result = await contacts.set_status(contact.id, status)
+
+    assert result.changed is False
+    assert result.model_dump(exclude={"changed"}) == contact.model_dump()
     assert await contacts.get_by_id(contact.id) == contact
 
 
@@ -181,7 +185,10 @@ async def test_same_status_does_not_change_the_mode(
     contact = await _contact_in(ContactStatus.ACTIVE, contacts, session_factory)
     other = await modes.create(ModeCreate(name="other", prompt_fragment="fake"))
 
-    assert await contacts.set_status(contact.id, ContactStatus.ACTIVE, mode_id=other.id) == contact
+    result = await contacts.set_status(contact.id, ContactStatus.ACTIVE, mode_id=other.id)
+
+    assert result.changed is False
+    assert result.model_dump(exclude={"changed"}) == contact.model_dump()
 
 
 async def test_activation_without_a_mode_is_refused(
@@ -409,3 +416,149 @@ async def test_rows_hold_the_enum_value_not_the_member_name(
     rows = await fetch_all(migrated_url, "SELECT status::text FROM contacts")
 
     assert rows == [(ContactStatus.NEW.value,)]
+
+
+async def test_a_real_transition_reports_that_the_status_changed(
+    contacts: SqlContactRepository, session_factory: SessionFactory
+) -> None:
+    contact = await _contact_in(ContactStatus.PENDING, contacts, session_factory)
+
+    result = await contacts.set_status(contact.id, ContactStatus.ACTIVE)
+
+    assert result.changed is True
+    assert result.status is ContactStatus.ACTIVE
+    assert result.pause_reason is None
+
+
+async def test_pausing_with_a_reason_stores_it(
+    contacts: SqlContactRepository, session_factory: SessionFactory
+) -> None:
+    contact = await _contact_in(ContactStatus.ACTIVE, contacts, session_factory)
+
+    result = await contacts.set_status(
+        contact.id, ContactStatus.PAUSED, pause_reason=PauseReason.MANUAL_MESSAGE
+    )
+
+    assert (result.changed, result.status, result.pause_reason) == (
+        True,
+        ContactStatus.PAUSED,
+        PauseReason.MANUAL_MESSAGE,
+    )
+    stored = await contacts.get_by_id(contact.id)
+    assert stored is not None
+    assert stored.pause_reason is PauseReason.MANUAL_MESSAGE
+
+
+@pytest.mark.parametrize("reason", list(PauseReason))
+async def test_every_pause_reason_round_trips(
+    reason: PauseReason, contacts: SqlContactRepository, session_factory: SessionFactory
+) -> None:
+    contact = await _contact_in(ContactStatus.ACTIVE, contacts, session_factory)
+
+    await contacts.set_status(contact.id, ContactStatus.PAUSED, pause_reason=reason)
+
+    stored = await contacts.get_by_id(contact.id)
+    assert stored is not None
+    assert stored.pause_reason is reason
+
+
+async def test_pausing_without_a_reason_stores_none(
+    contacts: SqlContactRepository, session_factory: SessionFactory
+) -> None:
+    contact = await _contact_in(ContactStatus.ACTIVE, contacts, session_factory)
+
+    result = await contacts.set_status(contact.id, ContactStatus.PAUSED)
+
+    assert (result.changed, result.pause_reason) == (True, None)
+
+
+@pytest.mark.parametrize("status", [s for s in ContactStatus if s is not ContactStatus.PAUSED])
+async def test_a_reason_with_any_other_status_is_refused_before_touching_anything(
+    status: ContactStatus, contacts: SqlContactRepository, session_factory: SessionFactory
+) -> None:
+    contact = await _contact_in(ContactStatus.ACTIVE, contacts, session_factory)
+
+    with pytest.raises(PauseReasonRefused):
+        await contacts.set_status(contact.id, status, pause_reason=PauseReason.OWNER)
+
+    assert await contacts.get_by_id(contact.id) == contact
+
+
+async def test_a_reason_is_refused_even_when_the_status_is_unchanged(
+    contacts: SqlContactRepository, session_factory: SessionFactory
+) -> None:
+    contact = await _contact_in(ContactStatus.ACTIVE, contacts, session_factory)
+
+    with pytest.raises(PauseReasonRefused):
+        await contacts.set_status(contact.id, ContactStatus.ACTIVE, pause_reason=PauseReason.OWNER)
+
+
+@pytest.mark.parametrize("target", [ContactStatus.ACTIVE, ContactStatus.IGNORED])
+async def test_leaving_paused_clears_the_reason(
+    target: ContactStatus, contacts: SqlContactRepository, session_factory: SessionFactory
+) -> None:
+    contact = await _contact_in(ContactStatus.ACTIVE, contacts, session_factory)
+    await contacts.set_status(
+        contact.id, ContactStatus.PAUSED, pause_reason=PauseReason.MANUAL_MESSAGE
+    )
+
+    result = await contacts.set_status(contact.id, target)
+
+    assert (result.changed, result.status, result.pause_reason) == (True, target, None)
+    stored = await contacts.get_by_id(contact.id)
+    assert stored is not None
+    assert stored.pause_reason is None
+
+
+async def test_the_same_status_keeps_the_first_reason_and_reports_no_change(
+    contacts: SqlContactRepository, session_factory: SessionFactory
+) -> None:
+    contact = await _contact_in(ContactStatus.ACTIVE, contacts, session_factory)
+    await contacts.set_status(
+        contact.id, ContactStatus.PAUSED, pause_reason=PauseReason.MANUAL_MESSAGE
+    )
+    before = await contacts.get_by_id(contact.id)
+
+    result = await contacts.set_status(
+        contact.id, ContactStatus.PAUSED, pause_reason=PauseReason.SEND_REJECTED
+    )
+
+    assert result.changed is False
+    assert result.pause_reason is PauseReason.MANUAL_MESSAGE
+    assert await contacts.get_by_id(contact.id) == before
+
+
+async def test_resuming_from_a_pause_keeps_the_existing_mode(
+    contacts: SqlContactRepository, session_factory: SessionFactory
+) -> None:
+    contact = await _contact_in(ContactStatus.ACTIVE, contacts, session_factory)
+    await contacts.set_status(
+        contact.id, ContactStatus.PAUSED, pause_reason=PauseReason.MANUAL_MESSAGE
+    )
+
+    result = await contacts.set_status(contact.id, ContactStatus.ACTIVE)
+
+    assert result.mode_id == contact.mode_id
+
+
+async def test_only_one_of_two_simultaneous_pauses_reports_a_change(
+    contacts: SqlContactRepository, session_factory: SessionFactory
+) -> None:
+    contact = await _contact_in(ContactStatus.ACTIVE, contacts, session_factory)
+
+    results = await asyncio.gather(
+        *(
+            contacts.set_status(
+                contact.id, ContactStatus.PAUSED, pause_reason=PauseReason.MANUAL_MESSAGE
+            )
+            for _ in range(4)
+        )
+    )
+
+    assert sorted(result.changed for result in results) == [False, False, False, True]
+
+
+async def test_a_new_contact_has_no_pause_reason(contacts: SqlContactRepository) -> None:
+    contact = await _new_contact(contacts)
+
+    assert contact.pause_reason is None

@@ -164,6 +164,31 @@ class RecordingNotifier:
             raise self._error
 
 
+class RecordingManualPauseNotifier:
+    def __init__(self, error: Exception | None = None) -> None:
+        self.contact_ids: list[int] = []
+        self._error = error
+
+    async def notify_manual_pause(self, contact_id: int) -> None:
+        self.contact_ids.append(contact_id)
+        if self._error is not None:
+            raise self._error
+
+
+class HangingManualPauseNotifier:
+    def __init__(self) -> None:
+        self.calls = 0
+        self.cancelled = 0
+
+    async def notify_manual_pause(self, contact_id: int) -> None:
+        self.calls += 1
+        try:
+            await asyncio.sleep(3600)
+        except asyncio.CancelledError:
+            self.cancelled += 1
+            raise
+
+
 class HangingNotifier:
     def __init__(self) -> None:
         self.calls = 0
@@ -294,6 +319,12 @@ class InMemoryOutbox:
         for row in pending:
             self._update(row.id, state=OutboxState.CANCELLED, cancel_reason=reason)
         return len(pending)
+
+    async def has_sending_row(self, contact_id: int) -> bool:
+        return any(
+            row.contact_id == contact_id and row.state is OutboxState.SENDING
+            for row in self.rows.values()
+        )
 
     async def stale_sending(self, claimed_before: datetime) -> list[ScheduledMessage]:
         return [

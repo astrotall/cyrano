@@ -7,12 +7,15 @@ import string
 import pytest
 from aiogram.exceptions import TelegramForbiddenError, TelegramNetworkError
 from aiogram.methods import SendMessage
+from aiogram.types import InlineKeyboardMarkup
 from pytest import LogCaptureFixture
 
 from cyrano.bot import messages
-from cyrano.bot.notifier import OUTBOX_NOTICES, TelegramOwnerNotifier
+from cyrano.bot.callbacks import PauseAction, PauseCallback
+from cyrano.bot.notifier import OUTBOX_NOTICES, TelegramManualPauseNotifier, TelegramOwnerNotifier
 from cyrano.domain.enums import LimitScope, LimitWindow
 from cyrano.domain.outbox import ROW_STALE_AFTER_SECONDS, STALE_NOTICE_CONTACT_IDS_MAX
+from cyrano.services.manual_pause_notifier import ManualPauseNotifier
 from cyrano.services.owner_notifier import OwnerNotifier
 from tests.bot.fakes import OWNER_ID, RecordingSession, recording_bot
 from tests.privacy import FAKE_OTHER_INTERNAL_ID, FAKE_TELEGRAM_ID, assert_absent
@@ -206,3 +209,66 @@ def test_a_limit_notice_says_which_limit_and_keeps_only_the_contact_id(
     assert "python -m cyrano outbox status" in rendered
     assert _fields(template) <= {"contact_id"}
     assert any("а" <= character <= "я" for character in rendered)
+
+
+def test_the_manual_pause_notifier_satisfies_the_service_interface() -> None:
+    bot, _ = recording_bot()
+    notifier: ManualPauseNotifier = TelegramManualPauseNotifier(bot, OWNER_ID)
+
+    assert notifier is not None
+
+
+async def test_a_manual_pause_notice_is_one_plain_message_to_the_owner_with_one_button() -> None:
+    bot, session = recording_bot()
+
+    await TelegramManualPauseNotifier(bot, OWNER_ID).notify_manual_pause(17)
+
+    [sent] = session.calls_of(SendMessage)
+    assert len(session.calls) == 1
+    assert sent.chat_id == OWNER_ID
+    assert sent.text == messages.MANUAL_PAUSE_NOTICE.format(contact_id=17)
+    assert sent.parse_mode is None
+    keyboard = sent.reply_markup
+    assert isinstance(keyboard, InlineKeyboardMarkup)
+    [[button]] = keyboard.inline_keyboard
+    assert button.text == messages.RESUME_BUTTON
+    assert button.callback_data == PauseCallback(action=PauseAction.RESUME, contact_id=17).pack()
+
+
+async def test_the_manual_pause_notice_carries_the_internal_id_and_no_other_number() -> None:
+    bot, session = recording_bot()
+
+    await TelegramManualPauseNotifier(bot, OWNER_ID).notify_manual_pause(17)
+
+    [sent] = session.calls_of(SendMessage)
+    assert sent.text is not None
+    assert set(re.findall(r"\d+", sent.text)) == {"17"}
+
+
+def test_nothing_in_the_manual_pause_notifier_can_address_another_chat() -> None:
+    public = {name for name in vars(TelegramManualPauseNotifier) if not name.startswith("_")}
+
+    assert public == {"notify_manual_pause"}
+
+
+async def test_a_failing_manual_pause_notice_is_logged_with_the_class_only_and_never_raises(
+    caplog: LogCaptureFixture,
+) -> None:
+    caplog.set_level(logging.DEBUG)
+    error = TelegramForbiddenError(method=SendMessage(chat_id=1, text="x"), message="fake detail")
+    bot, _ = recording_bot(RecordingSession(errors={SendMessage: [error]}))
+
+    await TelegramManualPauseNotifier(bot, OWNER_ID).notify_manual_pause(17)
+
+    logged = "".join(f"{r.getMessage()} {r.__dict__}" for r in caplog.records)
+    assert "TelegramForbiddenError" in logged
+    assert "fake detail" not in logged
+
+
+def test_the_manual_pause_notice_names_the_button_and_has_no_personal_placeholder() -> None:
+    fields = {
+        name for _, name, _, _ in string.Formatter().parse(messages.MANUAL_PAUSE_NOTICE) if name
+    }
+
+    assert fields == {"contact_id"}
+    assert "кнопк" in messages.MANUAL_PAUSE_NOTICE

@@ -7,7 +7,13 @@ from typing import Annotated
 
 from pydantic import AfterValidator, AwareDatetime, BaseModel, ConfigDict, Field, model_validator
 
-from cyrano.domain.enums import CardOutcome, ContactStatus, LeomatchNameSource, MessageDirection
+from cyrano.domain.enums import (
+    CardOutcome,
+    ContactStatus,
+    LeomatchNameSource,
+    MessageDirection,
+    PauseReason,
+)
 
 DEFAULT_MODE_NAME = "default"
 
@@ -62,12 +68,17 @@ class Contact(_Stored):
     username: str | None
     display_name: str | None
     status: ContactStatus
+    pause_reason: PauseReason | None
     mode_id: int | None
     profile: dict[str, object]
     summary: dict[str, object]
     last_message_at: UtcDatetime | None
     created_at: UtcDatetime
     updated_at: UtcDatetime
+
+
+class StatusChange(Contact):
+    changed: bool
 
 
 class ContactCreate(_Input):
@@ -96,6 +107,7 @@ class MessageCreate(_Input):
     direction: MessageDirection
     text: str
     tg_message_id: TelegramId
+    created_at: UtcDatetime | None = None
 
 
 class Mode(_Stored):
@@ -119,6 +131,13 @@ class IncomingMessage(_Input):
     tg_id: TelegramId
     username: str | None = None
     display_name: str | None = None
+    tg_message_id: TelegramId
+    text: str
+    sent_at: UtcDatetime
+
+
+class OutgoingMessage(_Input):
+    tg_id: TelegramId
     tg_message_id: TelegramId
     text: str
     sent_at: UtcDatetime

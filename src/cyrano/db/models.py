@@ -26,9 +26,16 @@ from sqlalchemy import (
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
-from cyrano.domain.enums import ContactStatus, MessageDirection, OutboxSource, OutboxState
+from cyrano.domain.enums import (
+    ContactStatus,
+    MessageDirection,
+    OutboxSource,
+    OutboxState,
+    PauseReason,
+)
 
 OUTBOX_VOCABULARY_LENGTH = 32
+PAUSE_REASON_LENGTH = 32
 
 NAMING_CONVENTION = {
     "ix": "ix_%(table_name)s_%(column_0_N_name)s",
@@ -44,6 +51,11 @@ EMPTY_JSON_ARRAY = text("'[]'::jsonb")
 
 def _enum_values(enum_type: type[StrEnum]) -> list[str]:
     return [member.value for member in enum_type]
+
+
+def _allowed_values(column: str, enum_type: type[StrEnum]) -> str:
+    quoted = ", ".join(f"'{value}'" for value in _enum_values(enum_type))
+    return f"{column} IN ({quoted})"
 
 
 class Base(DeclarativeBase):
@@ -69,6 +81,9 @@ class ModeRow(Base):
 
 class ContactRow(Base):
     __tablename__ = "contacts"
+    __table_args__ = (
+        CheckConstraint(_allowed_values("pause_reason", PauseReason), name="pause_reason_allowed"),
+    )
 
     id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
     tg_id: Mapped[int] = mapped_column(BigInteger, unique=True)
@@ -78,6 +93,14 @@ class ContactRow(Base):
         Enum(ContactStatus, name="contact_status", values_callable=_enum_values),
         server_default=ContactStatus.NEW.value,
         index=True,
+    )
+    pause_reason: Mapped[PauseReason | None] = mapped_column(
+        Enum(
+            PauseReason,
+            native_enum=False,
+            length=PAUSE_REASON_LENGTH,
+            values_callable=_enum_values,
+        )
     )
     mode_id: Mapped[int | None] = mapped_column(BigInteger, ForeignKey(ModeRow.id))
     profile: Mapped[dict[str, object]] = mapped_column(JSONB, server_default=EMPTY_JSON_OBJECT)
@@ -131,11 +154,6 @@ class StyleExampleRow(Base):
     turns: Mapped[list[dict[str, str]]] = mapped_column(JSONB)
     content_hash: Mapped[str] = mapped_column(Text, unique=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
-
-
-def _allowed_values(column: str, enum_type: type[StrEnum]) -> str:
-    quoted = ", ".join(f"'{value}'" for value in _enum_values(enum_type))
-    return f"{column} IN ({quoted})"
 
 
 class ScheduledMessageRow(Base):

@@ -20,6 +20,7 @@ def _contact(created_at: datetime) -> Contact:
         username=None,
         display_name=None,
         status=ContactStatus.NEW,
+        pause_reason=None,
         mode_id=None,
         profile={},
         summary={},

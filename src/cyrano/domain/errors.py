@@ -24,6 +24,12 @@ class ActivationWithoutMode(InvalidStatusTransition):
         super().__init__(current, ContactStatus.ACTIVE)
 
 
+class PauseReasonRefused(DomainError):
+    def __init__(self, status: ContactStatus) -> None:
+        super().__init__(f"a pause reason is allowed only with the paused status, not {status}")
+        self.status = status
+
+
 class ContactNotFound(DomainError):
     def __init__(self, contact_id: int) -> None:
         super().__init__(f"contact {contact_id} does not exist")

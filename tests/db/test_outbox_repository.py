@@ -651,3 +651,54 @@ async def test_the_row_repr_does_not_carry_the_text(
     row = await outbox.enqueue(contact.id, TEXT, LATER, OutboxSource.MANUAL_TEST)
 
     assert TEXT not in repr(row)
+
+
+async def test_has_sending_row_is_false_without_rows(
+    outbox: SqlOutboxRepository, contact: Contact
+) -> None:
+    assert await outbox.has_sending_row(contact.id) is False
+
+
+async def test_has_sending_row_is_true_only_while_a_row_is_sending(
+    outbox: SqlOutboxRepository, contact: Contact
+) -> None:
+    row_id = await _enqueue(outbox, contact)
+    assert await outbox.has_sending_row(contact.id) is False
+
+    await outbox.claim_due(FAKE_NOW)
+    assert await outbox.has_sending_row(contact.id) is True
+
+    await outbox.mark_cancelled(row_id, "fake_reason")
+    assert await outbox.has_sending_row(contact.id) is False
+
+
+async def test_has_sending_row_does_not_mix_contacts(
+    outbox: SqlOutboxRepository,
+    contact: Contact,
+    contacts: SqlContactRepository,
+    modes: SqlModeRepository,
+) -> None:
+    other = await stored_contact(contacts, modes, ContactStatus.ACTIVE, tg_id=FAKE_TELEGRAM_ID + 1)
+    await _enqueue(outbox, contact)
+    await outbox.claim_due(FAKE_NOW)
+
+    assert await outbox.has_sending_row(other.id) is False
+    assert await outbox.has_sending_row(contact.id) is True
+
+
+async def test_cancelling_pending_rows_leaves_a_sending_row_alone(
+    outbox: SqlOutboxRepository, contact: Contact
+) -> None:
+    sending_id = await _enqueue(outbox, contact, EARLIER)
+    await outbox.claim_due(FAKE_NOW)
+    scheduled_id = await _enqueue(outbox, contact, LATER)
+
+    cancelled = await outbox.cancel_pending_for_contact(contact.id, "manual_message")
+
+    assert cancelled == 1
+    sending = await outbox.get(sending_id)
+    scheduled = await outbox.get(scheduled_id)
+    assert sending is not None
+    assert sending.state is OutboxState.SENDING
+    assert scheduled is not None
+    assert (scheduled.state, scheduled.cancel_reason) == (OutboxState.CANCELLED, "manual_message")

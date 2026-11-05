@@ -1,9 +1,9 @@
-"""The only module that touches the Telethon client directly, and the only one that sends."""
+"""The only module that touches the Telethon client directly, and the only one that writes."""
 
 from __future__ import annotations
 
 import asyncio
-from collections.abc import AsyncIterator, Awaitable
+from collections.abc import AsyncIterator, Awaitable, Callable
 
 from telethon import TelegramClient
 from telethon.errors import (
@@ -88,6 +88,7 @@ RECIPIENT_REFUSALS = (
 )
 PEER_NOT_FOUND = "PeerNotFound"
 MISSING_RESPONSE = "MissingSentMessage"
+TYPING_ACTION = "typing"
 
 
 def classify_failure(error: Exception) -> SendFailure:
@@ -104,8 +105,11 @@ def classify_failure(error: Exception) -> SendFailure:
 
 
 class TelethonAdapter:
-    def __init__(self, client: TelegramClient) -> None:
+    def __init__(
+        self, client: TelegramClient, *, sleep: Callable[[float], Awaitable[None]] = asyncio.sleep
+    ) -> None:
         self._client = client
+        self._sleep = sleep
 
     @property
     def disconnected(self) -> asyncio.Future[object]:
@@ -166,13 +170,17 @@ class TelethonAdapter:
         )
         return messages
 
-    async def send_text(self, tg_id: int, text: str) -> SentMessage:
+    async def _peer(self, tg_id: int) -> object:
         try:
-            peer = await self._client.get_input_entity(tg_id)
+            peer: object = await self._client.get_input_entity(tg_id)
         except ValueError:
             raise SendRejected(PEER_NOT_FOUND, RejectionReason.RECIPIENT) from None
         except Exception as exc:
             raise classify_failure(exc) from None
+        return peer
+
+    async def send_text(self, tg_id: int, text: str) -> SentMessage:
+        peer = await self._peer(tg_id)
         try:
             sent = await self._client.send_message(peer, text, parse_mode=None, link_preview=False)
         except Exception as exc:
@@ -180,3 +188,18 @@ class TelethonAdapter:
         if sent is None:
             raise SendUncertain(MISSING_RESPONSE)
         return SentMessage(tg_message_id=sent.id, sent_at=sent.date)
+
+    async def show_typing(self, tg_id: int, seconds: float) -> None:
+        peer = await self._peer(tg_id)
+        try:
+            async with self._client.action(peer, TYPING_ACTION, auto_cancel=False):
+                await self._sleep(seconds)
+        except Exception as exc:
+            raise classify_failure(exc) from None
+
+    async def mark_read(self, tg_id: int) -> None:
+        peer = await self._peer(tg_id)
+        try:
+            await self._client.send_read_acknowledge(peer)
+        except Exception as exc:
+            raise classify_failure(exc) from None

@@ -4,11 +4,18 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import random
 from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 
-from cyrano.domain.enums import ContactStatus, LimitScope, LimitWindow, RejectionReason
+from cyrano.domain.enums import (
+    ContactStatus,
+    LimitScope,
+    LimitWindow,
+    OutboxSource,
+    RejectionReason,
+)
 from cyrano.domain.errors import (
     InvalidStatusTransition,
     OutboxStateConflict,
@@ -17,11 +24,13 @@ from cyrano.domain.errors import (
     SendFloodWait,
     SendRejected,
 )
+from cyrano.domain.models import Contact
 from cyrano.domain.outbox import (
     CANCEL_REASON_SEND_REJECTED,
     CANCEL_REASON_STALE,
     CAUSE_SEND_DEADLINE,
     ERROR_INTERRUPTED,
+    ERROR_OUTSIDE_HOURS,
     ERROR_RATE_LIMITED,
     ERROR_UNCERTAIN,
     LIMIT_NOTICE_INTERVAL_SECONDS,
@@ -32,6 +41,8 @@ from cyrano.domain.outbox import (
     ScheduledMessage,
     SenderState,
 )
+from cyrano.domain.schedule import MAX_TYPING_SECONDS
+from cyrano.services.humanization import ScheduleService, postponed_after, typing_seconds
 from cyrano.services.message_transport import MessageTransport
 from cyrano.services.owner_notifier import OwnerNotifier
 from cyrano.services.repositories import (
@@ -46,12 +57,16 @@ logger = logging.getLogger("cyrano.services.outbox_sender")
 
 SENDER_POLL_INTERVAL = 2.0
 SENDER_STALE_CHECK_INTERVAL = 60.0
-SENDING_STALE_AFTER = 120.0
 SENDER_SEND_DEADLINE = 100.0
+PRE_SEND_DEADLINE_MARGIN = 15.0
+LONGEST_PRE_SEND = MAX_TYPING_SECONDS + PRE_SEND_DEADLINE_MARGIN
+SENDING_STALE_MARGIN = 20.0
+SENDING_STALE_AFTER = LONGEST_PRE_SEND + SENDER_SEND_DEADLINE + SENDING_STALE_MARGIN
 FLOOD_WAIT_MARGIN = 5.0
 FLOOD_WAIT_NOTIFY_ABOVE = 60.0
 OWNER_NOTIFY_DEADLINE = 15.0
 NOTIFIED_LIMIT_WINDOWS = frozenset({LimitWindow.HOUR, LimitWindow.DAY})
+_SYSTEM_RANDOM = random.SystemRandom()
 
 
 def _utc_now() -> datetime:
@@ -64,6 +79,7 @@ class SenderTimings:
     stale_check_interval: float = SENDER_STALE_CHECK_INTERVAL
     stale_after: float = SENDING_STALE_AFTER
     send_deadline: float = SENDER_SEND_DEADLINE
+    pre_send_margin: float = PRE_SEND_DEADLINE_MARGIN
     flood_margin: float = FLOOD_WAIT_MARGIN
     flood_notify_above: float = FLOOD_WAIT_NOTIFY_ABOVE
     row_stale_after: float = ROW_STALE_AFTER_SECONDS
@@ -93,6 +109,7 @@ class OutboxSender:
         contacts: ContactRepository,
         state: SenderStateRepository,
         limiter: SendLimiter,
+        schedule: ScheduleService,
         transport: MessageTransport,
         notifier: OwnerNotifier,
         guard: SendGuard,
@@ -101,11 +118,13 @@ class OutboxSender:
         clock: Callable[[], datetime] = _utc_now,
         timings: SenderTimings | None = None,
         sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
+        rng: random.Random = _SYSTEM_RANDOM,
     ) -> None:
         self._outbox = outbox
         self._contacts = contacts
         self._state = state
         self._limiter = limiter
+        self._schedule = schedule
         self._transport = transport
         self._notifier = notifier
         self._guard = guard
@@ -113,6 +132,7 @@ class OutboxSender:
         self._clock = clock
         self._timings = timings if timings is not None else SenderTimings()
         self._sleep = sleep
+        self._rng = rng
         self._limit_notified_at: dict[tuple[LimitScope, LimitWindow], datetime] = {}
         self._stale_unreported = 0
         self._stale_contact_ids: list[int] = []
@@ -173,6 +193,18 @@ class OutboxSender:
                 )
             )
 
+    async def _guarded_contact(self, row: ScheduledMessage) -> Contact | None:
+        contact = await self._contacts.get_by_id(row.contact_id)
+        decision = self._guard.check(contact, row.source)
+        if contact is None or not decision.allowed:
+            await self._outbox.mark_cancelled(row.id, decision.reason)
+            logger.info(
+                "outbox row refused by the guard",
+                extra={"row_id": row.id, "contact_id": row.contact_id, "reason": decision.reason},
+            )
+            return None
+        return contact
+
     async def _deliver(self, row: ScheduledMessage) -> None:
         now = self._clock()
         if now - row.due_at > timedelta(seconds=self._timings.row_stale_after):
@@ -184,18 +216,22 @@ class OutboxSender:
             self._count_stale(row.contact_id)
             await self._report_stale(now)
             return
-        contact = await self._contacts.get_by_id(row.contact_id)
-        decision = self._guard.check(contact, row.source)
-        if contact is None or not decision.allowed:
-            await self._outbox.mark_cancelled(row.id, decision.reason)
-            logger.info(
-                "outbox row refused by the guard",
-                extra={"row_id": row.id, "contact_id": row.contact_id, "reason": decision.reason},
-            )
+        contact = await self._guarded_contact(row)
+        if contact is None:
             return
         limits = await self._limiter.check(row.contact_id, now)
         if limits.free_at is not None:
             await self._hold_for_limit(row, limits, limits.free_at, now)
+            return
+        if row.source is OutboxSource.AUTOPILOT and await self._hold_outside_hours(row, now):
+            return
+        try:
+            await self._before_send(row, contact.tg_id)
+        except (SendFloodWait, SendAccountBlocked) as exc:
+            await self._handle_failure(row, exc)
+            return
+        contact = await self._guarded_contact(row)
+        if contact is None:
             return
         deadline = asyncio.timeout(self._timings.send_deadline)
         try:
@@ -212,6 +248,42 @@ class OutboxSender:
             row.id, row.contact_id, row.text, sent.tg_message_id, sent.sent_at
         )
         logger.info("outbox row sent", extra={"row_id": row.id, "contact_id": row.contact_id})
+
+    async def _hold_outside_hours(self, row: ScheduledMessage, now: datetime) -> bool:
+        block = await self._schedule.blocked_until(now)
+        if block is None:
+            return False
+        profile = await self._schedule.get_profile()
+        send_at = postponed_after(block.end, profile, self._rng)
+        await self._outbox.reschedule(row.id, send_at, ERROR_OUTSIDE_HOURS)
+        logger.info(
+            "outbox row delayed outside the available hours",
+            extra={"row_id": row.id, "contact_id": row.contact_id, "kind": block.kind.value},
+        )
+        return True
+
+    async def _before_send(self, row: ScheduledMessage, tg_id: int) -> None:
+        profile = await self._schedule.get_profile()
+        try:
+            async with asyncio.timeout(profile.typing.max_seconds + self._timings.pre_send_margin):
+                await self._cosmetic(self._transport.mark_read(tg_id))
+                await self._sleep(self._rng.uniform(*profile.read_pause_seconds))
+                await self._cosmetic(
+                    self._transport.show_typing(tg_id, typing_seconds(row.text, profile))
+                )
+        except TimeoutError:
+            logger.info(
+                "the pre-send part ran out of time",
+                extra={"row_id": row.id, "contact_id": row.contact_id},
+            )
+
+    async def _cosmetic(self, step: Awaitable[None]) -> None:
+        try:
+            await step
+        except SendFloodWait, SendAccountBlocked:
+            raise
+        except Exception as exc:
+            logger.info("a pre-send step failed", extra={"error": type(exc).__name__})
 
     async def _hold_for_limit(
         self, row: ScheduledMessage, limits: LimitDecision, free_at: datetime, now: datetime

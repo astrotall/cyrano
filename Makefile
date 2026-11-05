@@ -1,4 +1,4 @@
-.PHONY: install check test fmt up down logs migrate revision db-up login login-docker llm-check persona-import examples-import examples-stats examples-convert reply-preview outbox-enqueue outbox-list outbox-cancel outbox-retry outbox-status outbox-resume setup-hooks
+.PHONY: install check test fmt up down logs migrate revision db-up login login-docker llm-check persona-import examples-import examples-stats examples-convert reply-preview outbox-enqueue outbox-list outbox-cancel outbox-retry outbox-status outbox-resume schedule-import schedule-show schedule-check schedule-plan setup-hooks
 
 install:
 	uv sync --locked
@@ -68,6 +68,20 @@ outbox-status:
 
 outbox-resume:
 	uv run python -m cyrano outbox resume $${YES:+--yes}
+
+schedule-import:
+	@test -n "$$FILE" || (echo 'usage: make schedule-import FILE=data/schedule.json' >&2; exit 2)
+	uv run python -m cyrano schedule import "$$FILE"
+
+schedule-show:
+	uv run python -m cyrano schedule show
+
+schedule-check:
+	uv run python -m cyrano schedule check $${AT:+--at "$$AT"}
+
+schedule-plan:
+	@test -n "$$CONTACT" || (echo 'usage: make schedule-plan CONTACT=<contact id>' >&2; exit 2)
+	uv run python -m cyrano schedule plan "$$CONTACT"
 
 revision:
 	@test -n "$(m)" || (echo 'usage: make revision m="what changed"' >&2; exit 2)

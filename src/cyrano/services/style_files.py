@@ -39,6 +39,7 @@ STATIC_RULES: Mapping[str, str] = {
     "string_pattern_mismatch": TAG_RULE,
     "string_type": "must be text",
     "list_type": "must be a list",
+    "tuple_type": "must be a list",
     "dict_type": "must be an object",
     "model_type": "must be an object",
     "int_type": "must be an integer",
@@ -62,7 +63,7 @@ class ExamplesFile(BaseModel):
         return value
 
 
-def read_import_file(path: Path) -> str:
+def read_import_file(path: Path, *, max_bytes: int = MAX_IMPORT_FILE_BYTES) -> str:
     try:
         is_file = path.is_file()
     except OSError as exc:
@@ -71,11 +72,11 @@ def read_import_file(path: Path) -> str:
         raise ImportFileError(f"not a readable file: {path}")
     try:
         with path.open("rb") as handle:
-            data = handle.read(MAX_IMPORT_FILE_BYTES + 1)
+            data = handle.read(max_bytes + 1)
     except OSError as exc:
         raise ImportFileError(f"cannot read {path}: {type(exc).__name__}") from None
-    if len(data) > MAX_IMPORT_FILE_BYTES:
-        raise ImportFileError(f"file is larger than {MAX_IMPORT_FILE_BYTES} bytes: {path}")
+    if len(data) > max_bytes:
+        raise ImportFileError(f"file is larger than {max_bytes} bytes: {path}")
     try:
         return data.decode("utf-8-sig")
     except UnicodeDecodeError:
@@ -103,6 +104,10 @@ def _rule(error: ErrorDetails) -> str:
         return f"too many (max {context['max_length']})"
     if kind == "enum":
         return f"must be {context['expected']}"
+    if kind == "greater_than_equal":
+        return f"must be at least {context['ge']}"
+    if kind == "less_than_equal":
+        return f"must be at most {context['le']}"
     if kind == "value_error":
         return str(context["error"])
     return INVALID_RULE
@@ -125,16 +130,21 @@ def parse_persona(raw: str) -> PersonaCreate:
         raise ContentValidationError(PERSONA_SUBJECT, problems_from(exc, skip=1)) from None
 
 
-def parse_examples(raw: str) -> list[StyleExampleCreate]:
+def load_json_document(raw: str, subject: str) -> object:
     try:
-        data = json.loads(raw)
+        data: object = json.loads(raw)
     except json.JSONDecodeError as exc:
         rule = f"invalid JSON: {exc.msg} at line {exc.lineno} column {exc.colno}"
-        raise ContentValidationError(EXAMPLES_SUBJECT, [ContentProblem(ROOT_PATH, rule)]) from None
+        raise ContentValidationError(subject, [ContentProblem(ROOT_PATH, rule)]) from None
     except RecursionError:
         raise ContentValidationError(
-            EXAMPLES_SUBJECT, [ContentProblem(ROOT_PATH, "nested too deeply")]
+            subject, [ContentProblem(ROOT_PATH, "nested too deeply")]
         ) from None
+    return data
+
+
+def parse_examples(raw: str) -> list[StyleExampleCreate]:
+    data = load_json_document(raw, EXAMPLES_SUBJECT)
     try:
         return list(ExamplesFile.model_validate(data).dialogues)
     except ValidationError as exc:

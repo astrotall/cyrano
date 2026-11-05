@@ -17,6 +17,7 @@ from cyrano.domain.models import (
     ModeCreate,
 )
 from cyrano.domain.outbox import OutgoingPeak, ScheduledMessage, SenderState
+from cyrano.domain.schedule import ScheduleProfile
 from cyrano.domain.style import ExamplesAddResult, Persona, StyleExample, StyleExampleCreate
 
 
@@ -135,3 +136,9 @@ class SenderStateRepository(Protocol):
     async def stop(self, reason: str) -> bool: ...
 
     async def resume(self, *, keep_stop: bool = False) -> SenderState: ...
+
+
+class ScheduleProfileRepository(Protocol):
+    async def get(self) -> ScheduleProfile | None: ...
+
+    async def replace(self, profile: ScheduleProfile) -> ScheduleProfile: ...

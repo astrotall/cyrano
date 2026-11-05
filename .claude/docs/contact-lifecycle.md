@@ -76,7 +76,7 @@ otherwise the `default` mode. If `default` itself is missing or disabled they ra
 | 7 | Stop-triggers: on a hit the contact becomes `paused`, the owner is notified and no reply is sent | CYR-20 |
 | 8 | The layered prompt is built: persona, mode fragment with few-shot examples, contact summary, last N messages | CYR-14, CYR-15, CYR-16, CYR-25 |
 | 9 | The LLM is called through the LLM interface; the response is validated | CYR-13 |
-| 10 | The reply goes through the sender: status guard, FloodWait handling and rate limits (exist, see [outbox-and-sender.md](outbox-and-sender.md)), humanized delay, typing action, splitting, quiet hours | CYR-19, CYR-22, CYR-18 |
+| 10 | The reply goes through the sender: status guard, FloodWait handling, rate limits, the read mark, typing and quiet hours (exist, see [outbox-and-sender.md](outbox-and-sender.md)); the delayed send time comes from the planner (exists, see [humanization.md](humanization.md)), which the autopilot will call (CYR-17); splitting (CYR-36) | CYR-19, CYR-22, CYR-18, CYR-17, CYR-36 |
 | 11 | Background: contact summaries, proactive messages, reminders for undecided cards | CYR-25, CYR-23, CYR-24 |
 
 How stop-triggers are detected (lists, model output, both) and at which step each one is

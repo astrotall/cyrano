@@ -54,6 +54,7 @@ from cyrano.services.owner_notifier import OwnerNotifier
 from cyrano.services.send_guard import SendGuard
 from cyrano.services.send_limiter import SendLimiter
 from cyrano.userbot.adapter import MISSING_RESPONSE, TelethonAdapter
+from tests.capped_loop import CappedLoop
 from tests.privacy import (
     FAKE_OTHER_INTERNAL_ID,
     FAKE_TELEGRAM_ID,
@@ -68,6 +69,7 @@ from tests.services.outbox_fakes import (
     RecordingNotifier,
     ScriptedTransport,
     eventually,
+    free_schedule,
     stored_contact,
 )
 
@@ -125,6 +127,7 @@ class Harness:
             self.contacts,
             self.state,
             self.limiter,
+            free_schedule(),
             transport,
             notifier if notifier is not None else self.notifier,
             SendGuard(_Switch(switch)),
@@ -389,30 +392,33 @@ async def test_a_send_that_hits_the_deadline_is_uncertain_and_never_sent_again(
 async def test_the_running_loop_never_sends_an_uncertain_row_again(harness: Harness) -> None:
     row = await harness.row()
     transport = ScriptedTransport([SendUncertain("FakeNetworkError")])
-    ticks = 0
+    watched_until = FAKE_NOW + timedelta(hours=59)
 
-    async def advance(_: float) -> None:
-        nonlocal ticks
-        ticks += 1
-        if ticks == 60:
-            raise _StopLoop
+    async def advance(_: float) -> bool:
+        if (
+            harness.clock() >= watched_until
+            and (await harness.stored(row.id)).state is OutboxState.FAILED
+        ):
+            return True
         harness.clock.advance(3600)
+        return False
 
+    loop = CappedLoop(advance)
     sender = OutboxSender(
         harness.outbox,
         harness.contacts,
         harness.state,
         harness.limiter,
+        free_schedule(),
         transport,
         harness.notifier,
         SendGuard(_Switch(False)),
         OUTBOX_NOTICES,
         clock=harness.clock,
-        sleep=advance,
+        sleep=loop.sleep,
     )
 
-    with pytest.raises(_StopLoop):
-        await sender.poll_forever()
+    await loop.run(sender.poll_forever())
 
     assert len(transport.calls) == 1
     assert len(harness.notifier.texts) == 1
@@ -641,10 +647,6 @@ async def test_two_stale_checks_notify_once_about_one_row(harness: Harness) -> N
     assert len(harness.notifier.texts) == 1
 
 
-class _StopLoop(Exception):
-    pass
-
-
 async def _has_calls(transport: ScriptedTransport) -> bool:
     return bool(transport.calls)
 
@@ -661,36 +663,40 @@ async def test_the_loop_runs_the_stale_check_on_its_interval(harness: Harness) -
     row = await harness.row()
     await harness.outbox.claim_due(FAKE_NOW)
     timings = SenderTimings(poll_interval=10, stale_check_interval=60, stale_after=120)
-    seen: list[OutboxState] = []
-    ticks = 0
+    seen: list[tuple[timedelta, OutboxState]] = []
 
-    async def advance(seconds: float) -> None:
-        nonlocal ticks
-        ticks += 1
-        seen.append((await harness.stored(row.id)).state)
-        if ticks == 13:
-            raise _StopLoop
+    async def advance(seconds: float) -> bool:
+        if seconds != timings.poll_interval:
+            return False
+        state = (await harness.stored(row.id)).state
+        seen.append((harness.clock() - FAKE_NOW, state))
+        if state is OutboxState.FAILED:
+            return True
         harness.clock.advance(seconds)
+        return False
 
+    loop = CappedLoop(advance)
     sender = OutboxSender(
         harness.outbox,
         harness.contacts,
         harness.state,
         harness.limiter,
+        free_schedule(),
         ScriptedTransport(),
         harness.notifier,
         SendGuard(_Switch(False)),
         OUTBOX_NOTICES,
         clock=harness.clock,
         timings=timings,
-        sleep=advance,
+        sleep=loop.sleep,
     )
 
-    with pytest.raises(_StopLoop):
-        await sender.poll_forever()
+    await loop.run(sender.poll_forever())
 
-    assert seen[:12] == [OutboxState.SENDING] * 12
-    assert seen[12] is OutboxState.FAILED
+    assert seen[:-1] == [
+        (timedelta(seconds=elapsed), OutboxState.SENDING) for elapsed in range(0, 120, 10)
+    ]
+    assert seen[-1] == (timedelta(seconds=120), OutboxState.FAILED)
     assert len(harness.notifier.texts) == 1
 
 

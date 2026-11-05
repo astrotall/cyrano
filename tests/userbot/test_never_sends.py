@@ -57,7 +57,7 @@ WRITE_NAME = re.compile(
     r"send|reply|respond|edit|delete|forward|upload|invoke|action|typing)$"
 )
 ALLOWED_WRITE_LOOKING_NAMES = {
-    "adapter.py": {"send_message", "send_text"},
+    "adapter.py": {"send_message", "send_text", "send_read_acknowledge", "action", "mark_read"},
     "login.py": {"send_code_request"},
     "protocols.py": {"send_code_request"},
 }

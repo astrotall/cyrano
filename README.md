@@ -26,8 +26,9 @@ Key principles:
 - **Only active contacts get automatic replies, checked at the sender.** The status is checked
   when a reply is scheduled and again right before it is sent. Every outgoing message goes
   through one guarded sender; no other code path sends.
-- **Pacing and limits are central.** Humanized delay, typing action, message splitting, quiet
-  hours, rate limits and FloodWait handling live in the sender, not in callers.
+- **Pacing and limits are central.** The read mark, typing, quiet hours, rate limits and FloodWait
+  handling live in the sender, not in callers. The delayed send time comes from one planner. Message
+  splitting will join them (CYR-36).
 - **Stop-triggers hand over.** Meeting or date proposals, phone and contact exchange, money,
   photo requests, a direct question whether it is a bot or AI, and low model confidence stop the
   conversation and notify the owner. The assistant does not answer those itself.
@@ -78,9 +79,9 @@ registering contacts only; the control bot box exists for the card and its two b
       |  reply text
       v
  +-----------------------------------------------+
- | sender: outbox, status guard (exists);        |
- | rate limits, humanized delay, typing,         |  --> Telegram
- | splitting, quiet hours (planned)              |
+ | sender: outbox, status guard, rate limits,    |
+ | read mark, typing, quiet hours (exist);       |  --> Telegram
+ | splitting (planned)                           |
  +-----------------------------------------------+
 ```
 
@@ -180,8 +181,9 @@ Every message to a contact goes through one table and one sender. A message is a
 (`scheduled_messages`). The sender, a background task of the app, takes one due row at a time,
 re-reads the contact, checks that it is still `active`, and only then sends. A row that may or may
 not have reached Telegram is never sent again: it is marked failed and the owner is told, because a
-duplicate message to a person cannot be taken back. Only a flood wait and a reached send limit put a
-row back automatically; the sender calls Telegram once for a row whatever else goes wrong. The sender
+duplicate message to a person cannot be taken back. Only a flood wait, a reached send limit and a
+closed window put a row back automatically; the sender calls `send_text` once for a row whatever else
+goes wrong. The sender
 also keeps conservative limits per minute, hour and day, pauses as a whole during a flood wait, and
 stops completely on a problem with the account itself. Notifications to the owner carry
 internal ids and error class names only.
@@ -235,6 +237,32 @@ from `scheduled` to `sent`, and the message appears in that chat on the second a
 guard, enqueue for a contact that is not `active`: the command refuses with `contact_not_active` and
 stores nothing. To stop a planned row, enqueue with a longer `IN` and use `make outbox-cancel`. This
 uses a real account, so keep it to a few messages to a contact of your own.
+
+### Humanization and the schedule
+
+Replies should look like they come from a person with a daily routine. A planner decides when a reply
+goes out (a short delay inside a conversation, a longer one otherwise, past the night and the busy
+windows), and the sender marks the chat as read, pauses and shows typing before every message. A failed
+read mark or typing never blocks the message. An autopilot row due inside a window is postponed, not
+dropped; the owner's test rows skip that check but get the read mark and typing too. The autopilot does
+not exist yet, so nothing calls the planner except `schedule plan`. Splitting a reply is CYR-36.
+
+Without an imported file the built-in default profile is used: night from 01:00-02:00 until 09:00, on
+Saturday and Sunday until 11:00-12:00, no busy windows, in `TIMEZONE`.
+
+**Your own routine.** The real file lives only at `data/schedule.json`, which never goes to git:
+
+```bash
+mkdir -p data
+cp examples/schedule.sample.json data/schedule.json   # then put your own times in it
+make schedule-import FILE=data/schedule.json          # validates the whole file; a bad file stores nothing
+make schedule-show                                    # the profile in use
+make schedule-check AT="2026-11-03 09:30"             # free, or blocked until a time, and the kind
+make schedule-plan CONTACT=<id>                       # when a reply to their last message would go out
+```
+
+The running app picks up an import without a restart. Format, rules and worked examples:
+[.claude/docs/humanization.md](.claude/docs/humanization.md).
 
 ### Code layers
 
@@ -300,14 +328,15 @@ What exists now:
 ├── alembic.ini                   # points at migrations/; no URL, it comes from Settings
 ├── migrations/
 │   ├── env.py                    # async environment, URL from Settings
-│   └── versions/                 # 0001 creates the tables and seeds the default mode; 0002 adds persona and style_examples; 0003 adds scheduled_messages
-├── examples/                     # invented sample persona and style examples (the real files go to data/, never to git)
+│   └── versions/                 # 0001 creates the tables and seeds the default mode; 0002 adds persona and style_examples; 0003 adds scheduled_messages; 0004 adds sender_state; 0005 adds due_at; 0006 adds schedule_profile
+├── examples/                     # invented sample persona, style examples and schedule (the real files go to data/, never to git)
 ├── .dockerignore
 ├── .gitignore
 ├── .claude/docs/
 │   ├── architecture.md           # layers, import rules, processes, config, logging
 │   ├── contact-lifecycle.md      # statuses, transitions, message flow
 │   ├── persona-and-examples.md   # persona and style examples: formats, limits, commands, privacy
+│   ├── humanization.md           # schedule profile, planner rules, pre-send sequence, commands
 │   ├── reply-generation.md       # the layered prompt, the budget, the reply cleaning, reply-preview
 │   ├── outbox-and-sender.md      # the outbox, the one sender, the guard, limits, pause and stop, errors, owner commands
 │   ├── safety-rules.md           # S1..S10
@@ -316,12 +345,13 @@ What exists now:
 │   ├── dependabot.yml            # weekly: Actions, Docker, Compose, uv
 │   └── workflows/ci.yml
 ├── src/cyrano/
-│   ├── __main__.py               # python -m cyrano [login | llm-check | persona ... | examples ...]
-│   ├── main.py                   # app entrypoint, login, llm-check, persona and examples subcommands, signals, heartbeat
+│   ├── __main__.py               # python -m cyrano [login | llm-check | persona ... | examples ... | reply-preview ... | outbox ... | schedule ...]
+│   ├── main.py                   # app entrypoint, signals, heartbeat, subcommands login, llm-check, persona (import, show), examples (import, stats, convert), reply-preview, outbox (enqueue, list, cancel, retry, status, resume), schedule (import, show, check, plan)
 │   ├── style_cli.py              # the persona and examples commands
 │   ├── convert_cli.py            # examples convert: Telegram Desktop export to a draft examples file
 │   ├── reply_cli.py              # reply-preview: generate one reply for a stored conversation
 │   ├── outbox_cli.py             # outbox enqueue, list, cancel, retry, status, resume: the owner's commands
+│   ├── schedule_cli.py           # schedule import, show, check, plan: the owner's commands
 │   ├── config.py                 # Settings, load_settings, ConfigError
 │   ├── logging.py                # JSON-lines logging
 │   ├── health.py                 # heartbeat file and the app healthcheck
@@ -360,8 +390,10 @@ What exists now:
 │   │   ├── send_guard.py         # the status and source check, at enqueue and before sending
 │   │   ├── outbox_service.py     # OutboxService: text validation, guard, row
 │   │   ├── send_limiter.py       # the six send limits, counted from stored messages
-│   │   ├── outbox_sender.py      # OutboxSender: the only caller of send_text
-│   │   ├── message_transport.py  # MessageTransport Protocol: send_text
+│   │   ├── outbox_sender.py      # OutboxSender: the only caller of the transport
+│   │   ├── humanization.py       # the send time planner, ScheduleService, HumanizationPlanner
+│   │   ├── schedule_files.py     # validating and importing the schedule file
+│   │   ├── message_transport.py  # MessageTransport Protocol: send_text, show_typing, mark_read
 │   │   └── owner_notifier.py     # OwnerNotifier Protocol: notify
 │   └── worker/
 │       └── settings.py           # Arq WorkerSettings, placeholder job
@@ -539,6 +571,7 @@ The app connects to Telegram as the userbot and polls the control bot, and conne
 | `make examples-convert INPUT=... ME=... \| ME_ID=... [OUT=...]` | Convert a Telegram Desktop JSON chat export into a draft examples file; give exactly one of `ME` and `ME_ID`; needs no `.env` and no database |
 | `make reply-preview CONTACT=... [MODE=...]` | Generate one reply for a stored conversation and print it with a stats line; sends nothing, writes nothing (see [Previewing a reply](#previewing-a-reply)) |
 | `make outbox-enqueue CONTACT=... TEXT="..." [IN=...]`, `make outbox-list [STATE=...] [LIMIT=...]`, `make outbox-cancel ID=...`, `make outbox-retry ID=... [IN=...] [YES=1]`, `make outbox-status`, `make outbox-resume [YES=1]` | The owner's commands for the outbox (see [The outbox and the sender](#the-outbox-and-the-sender)) |
+| `make schedule-import FILE=...`, `make schedule-show`, `make schedule-check [AT="YYYY-MM-DD HH:MM"]`, `make schedule-plan CONTACT=...` | The owner's commands for the schedule profile (see [Humanization and the schedule](#humanization-and-the-schedule)) |
 | `make llm-check` | Send one tiny request to DeepSeek with the `reply` settings and print the result (see [Checking the LLM key](#checking-the-llm-key)) |
 
 ### Checking the LLM key
@@ -744,5 +777,6 @@ cancels the older one.
 - [.claude/docs/persona-and-examples.md](.claude/docs/persona-and-examples.md)
 - [.claude/docs/reply-generation.md](.claude/docs/reply-generation.md)
 - [.claude/docs/outbox-and-sender.md](.claude/docs/outbox-and-sender.md)
+- [.claude/docs/humanization.md](.claude/docs/humanization.md)
 - [.claude/docs/safety-rules.md](.claude/docs/safety-rules.md)
 - [.claude/docs/decisions.md](.claude/docs/decisions.md)

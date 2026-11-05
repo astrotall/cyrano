@@ -27,7 +27,9 @@ used by the app yet), the persona and style examples import (CYR-14, not used by
 the layered reply prompt with the reply generator and the `reply-preview` command (CYR-16, not
 wired into the app) and the outbox with the one sender and the status guard (CYR-19; only the
 owner's test command writes rows, nothing is sent automatically) with its limits, flood-wait pause
-and account-level stop (CYR-22) exist. Everything
+and account-level stop (CYR-22) and the humanization (CYR-18: the send time planner, not used by the
+app yet, the schedule profile, and the read mark, typing and availability check in the sender) exist.
+Everything
 else is planned and marked with its ticket key.
 Never describe planned behaviour as existing.
 
@@ -73,21 +75,22 @@ Changing any of these is a large change (see Workflow expectations). Reasons:
 .
 ├── CLAUDE.md, CONTRIBUTING.md, README.md
 ├── pyproject.toml, uv.lock, .python-version
-├── Makefile                      includes login, login-docker, llm-check, persona-import, examples-import, examples-stats, examples-convert, reply-preview, outbox-enqueue, outbox-list, outbox-cancel, outbox-retry, outbox-status, outbox-resume and setup-hooks
+├── Makefile                      includes login, login-docker, llm-check, persona-import, examples-import, examples-stats, examples-convert, reply-preview, outbox-enqueue, outbox-list, outbox-cancel, outbox-retry, outbox-status, outbox-resume, schedule-import, schedule-show, schedule-check, schedule-plan and setup-hooks
 ├── Dockerfile, docker-compose.yml, docker-compose.override.yml
 ├── .env.example, .dockerignore, .gitignore
 ├── alembic.ini
 ├── migrations/                   async env.py, versions/
-├── examples/                     invented sample persona and style examples (real files go to data/)
-├── .claude/docs/                 architecture, contact-lifecycle, safety-rules, decisions, persona-and-examples, reply-generation, outbox-and-sender
+├── examples/                     invented sample persona, style examples and schedule (real files go to data/)
+├── .claude/docs/                 architecture, contact-lifecycle, safety-rules, decisions, persona-and-examples, reply-generation, outbox-and-sender, humanization
 ├── .githooks/                    pre-commit (runs make check and make test; enabled by make setup-hooks)
 ├── .github/                      dependabot.yml, workflows/ci.yml
 ├── src/cyrano/
-│   ├── __main__.py, main.py      entrypoint (composition root), login, llm-check, persona and examples subcommands, signals, heartbeat
+│   ├── __main__.py, main.py      entrypoint (composition root), signals, heartbeat, subcommands login, llm-check, persona (import, show), examples (import, stats, convert), reply-preview, outbox (enqueue, list, cancel, retry, status, resume), schedule (import, show, check, plan)
 │   ├── style_cli.py              the persona and examples commands
 │   ├── convert_cli.py            the examples convert command (chat export to a draft)
 │   ├── reply_cli.py              the reply-preview command
 │   ├── outbox_cli.py             the outbox enqueue, list, cancel, retry, status and resume commands
+│   ├── schedule_cli.py           the schedule import, show, check and plan commands
 │   ├── config.py                 Settings, load_settings, ConfigError
 │   ├── logging.py                JSON-lines logging
 │   ├── health.py                 heartbeat file and the app healthcheck
@@ -99,7 +102,7 @@ Changing any of these is a large change (see Workflow expectations). Reasons:
 │   │                             style_examples, chat_export_reader, chat_redaction, chat_dialogues,
 │   │                             chat_export_converter, contact_facts, prompt_builder,
 │   │                             reply_postprocess, reply_generator, send_guard, send_limiter, outbox_service, outbox_sender,
-│   │                             message_transport, owner_notifier; the rest is planned
+│   │                             message_transport, owner_notifier, humanization, schedule_files; the rest is planned
 │   ├── userbot/                  Telethon: protocols, filters, handler, client, adapter, login, runner, errors,
 │   │                             profile_source, leomatch_source, leomatch_match
 │   ├── bot/                      aiogram: app, middleware, handlers, rendering, callbacks, sender, notifier, messages, errors
@@ -167,7 +170,7 @@ enums, the outbox and send errors in `domain/errors.py`, the optional `AUTOPILOT
 migration `0003` (`scheduled_messages`), `SqlOutboxRepository` and the `OutboxRepository` Protocol,
 `services/send_guard.py`, `outbox_service.py`, `outbox_sender.py` (`OutboxSender`, started by `main.run`
 after the userbot and the control bot and cancelled first; the only caller of `send_text`),
-`message_transport.py` and `owner_notifier.py` (one-method Protocols), `userbot/adapter.py`
+`message_transport.py` (three methods since CYR-18) and `owner_notifier.py` (one method), `userbot/adapter.py`
 (`TelethonAdapter`, the only module with a Telethon write call; the rest of `userbot/` only listens
 and reads), `UserbotAccess` and `build_access` instead of `build_client`, `get_full_user`
 instead of the generic request call on `UserbotClient`, `bot/notifier.py`, `outbox_cli.py` with the
@@ -190,6 +193,17 @@ notice of the sender has a 15 s deadline), the account-level errors extended to 
 `SessionPasswordNeededError` and a bare `UnauthorizedError`, the stale summary notice (one notice with
 the count of rows cancelled as stale, at most hourly) and the stop reminder (every 6 h while the
 sender is stopped).
+CYR-18 added the humanization: `domain/schedule.py` (`ScheduleProfile` with its limits and defaults,
+`Block`, `SendPlan`), the `Weekday`, `BlockKind` and `PlanReason` enums, `PlanNotPossible`,
+`StoredScheduleInvalid`, `ScheduleTimezoneUnresolved`, `ERROR_OUTSIDE_HOURS`, migration `0006`
+(`schedule_profile`, no seed row), the `ScheduleProfileRepository` Protocol with
+`SqlScheduleProfileRepository`, `services/humanization.py` (the pure planner, `ScheduleService`,
+`HumanizationPlanner`, which no app code calls yet), `services/schedule_files.py`, the `show_typing` and
+`mark_read` methods of `MessageTransport` with their adapter implementation, the new steps of
+`OutboxSender` (the availability check for autopilot rows; read mark, pause and typing for every row;
+the second guard; `SENDING_STALE_AFTER` computed, 195 s), `schedule_cli.py` with the `schedule` commands and
+their Makefile targets, `examples/schedule.sample.json`, the `schedule*.json` ignore rule, and the
+tests. Splitting a reply is CYR-36.
 
 ## Detailed guides
 
@@ -206,6 +220,8 @@ sender is stopped).
 - [outbox-and-sender.md](.claude/docs/outbox-and-sender.md): the outbox table and states, claiming,
   the guard, crash and stale semantics, error handling, the two sources and the switch, the owner's
   commands, what is not built yet.
+- [humanization.md](.claude/docs/humanization.md): the schedule profile, the planner rules with worked
+  examples, the pre-send sequence, the safety net, the commands.
 - [decisions.md](.claude/docs/decisions.md): what is decided and why; open questions.
 - [CONTRIBUTING.md](CONTRIBUTING.md): branches, commits, Jira, pull requests, checks.
 

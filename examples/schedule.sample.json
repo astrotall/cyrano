@@ -1,0 +1,24 @@
+{
+  "version": 1,
+  "timezone": "Europe/Berlin",
+  "night": {
+    "start": ["00:30", "01:30"],
+    "end_weekday": ["08:00", "08:00"],
+    "end_weekend": ["10:00", "11:00"]
+  },
+  "busy": [
+    {"days": ["tue", "thu"], "from": "09:00", "to": "10:30"}
+  ],
+  "reaction": {
+    "ongoing_seconds": [1, 4],
+    "new_seconds": [20, 120],
+    "ongoing_window_minutes": 10
+  },
+  "read_pause_seconds": [1, 3],
+  "typing": {
+    "chars_per_second": 5,
+    "min_seconds": 2,
+    "max_seconds": 25
+  },
+  "postponed_spread_minutes": [1, 15]
+}

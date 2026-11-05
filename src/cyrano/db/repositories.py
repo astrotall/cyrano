@@ -5,6 +5,7 @@ from __future__ import annotations
 from collections.abc import Sequence
 from datetime import datetime
 
+from pydantic import ValidationError
 from sqlalchemy import delete, func, select, update
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.exc import IntegrityError
@@ -12,12 +13,14 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from cyrano.db.models import (
     PERSONA_ROW_ID,
+    SCHEDULE_PROFILE_ROW_ID,
     SENDER_STATE_ROW_ID,
     ContactRow,
     MessageRow,
     ModeRow,
     PersonaRow,
     ScheduledMessageRow,
+    ScheduleProfileRow,
     SenderStateRow,
     StyleExampleRow,
 )
@@ -33,6 +36,7 @@ from cyrano.domain.errors import (
     OutboxRowNotFound,
     OutboxStateConflict,
     SenderStateMissing,
+    StoredScheduleInvalid,
 )
 from cyrano.domain.models import (
     DEFAULT_MODE_NAME,
@@ -45,6 +49,7 @@ from cyrano.domain.models import (
     ModeCreate,
 )
 from cyrano.domain.outbox import OutgoingPeak, ScheduledMessage, SenderState
+from cyrano.domain.schedule import ScheduleProfile
 from cyrano.domain.style import ExamplesAddResult, Persona, StyleExample, StyleExampleCreate
 from cyrano.domain.transitions import transition_needed
 
@@ -302,6 +307,38 @@ class SqlPersonaRepository:
         async with self._session_factory.begin() as session:
             row = (await session.scalars(statement)).one()
             return Persona.model_validate(row)
+
+
+class SqlScheduleProfileRepository:
+    def __init__(self, session_factory: SessionFactory) -> None:
+        self._session_factory = session_factory
+
+    async def get(self) -> ScheduleProfile | None:
+        async with self._session_factory() as session:
+            row = await session.get(ScheduleProfileRow, SCHEDULE_PROFILE_ROW_ID)
+            return None if row is None else _schedule_profile(row.data)
+
+    async def replace(self, profile: ScheduleProfile) -> ScheduleProfile:
+        data = profile.stored_data()
+        statement = (
+            insert(ScheduleProfileRow)
+            .values(id=SCHEDULE_PROFILE_ROW_ID, data=data)
+            .on_conflict_do_update(
+                index_elements=[ScheduleProfileRow.id],
+                set_={"data": data, "updated_at": func.now()},
+            )
+            .returning(ScheduleProfileRow)
+        )
+        async with self._session_factory.begin() as session:
+            row = (await session.scalars(statement)).one()
+            return _schedule_profile(row.data)
+
+
+def _schedule_profile(data: dict[str, object]) -> ScheduleProfile:
+    try:
+        return ScheduleProfile.model_validate(data)
+    except ValidationError:
+        raise StoredScheduleInvalid from None
 
 
 class SqlStyleExampleRepository:

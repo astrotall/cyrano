@@ -1,6 +1,7 @@
 # Outbox and sender
 
-Exists since CYR-19; the limits, the pause and the stop since CYR-22. The outbox is the table of
+Exists since CYR-19; the limits, the pause and the stop since CYR-22; the pre-send part and the
+availability check since CYR-18. The outbox is the table of
 messages waiting to go out; the sender is the one piece of code that sends them to contacts. The
 Telethon session lives in the app process, so sending stays there. A future Arq worker (CYR-17) will
 only generate replies and write them to the outbox.
@@ -20,11 +21,11 @@ explicit test command. Nothing is ever sent automatically. Rules S1 and S2:
 | `trigger_message_id` | The incoming message this row answers, or `NULL`; plain integer, no foreign key |
 | `text` | The text to send. Personal data: never logged, printed or put in a notification |
 | `source` | `autopilot` or `manual_test` |
-| `send_at` | When the sender may claim the row, `timestamptz`. A flood wait or a reached limit moves it forward |
+| `send_at` | When the sender may claim the row, `timestamptz`. A flood wait, a reached limit or a closed window moves it forward |
 | `due_at` | The originally intended send time, `timestamptz`, not null. Set at enqueue to the `send_at` given there and never changed by a reschedule; only the owner's `retry_failed` resets it. The stale rule counts from it |
 | `state` | See below; starts as `scheduled` |
 | `attempts` | Unused and always 0; it stays in the schema, and the code does not read it |
-| `error_class` | `uncertain`, `interrupted`, `rate_limited`, the class name of a certain refusal, of a flood wait or of an account problem, or `NULL` |
+| `error_class` | `uncertain`, `interrupted`, `rate_limited`, `outside_hours`, the class name of a certain refusal, of a flood wait or of an account problem, or `NULL` |
 | `cancel_reason` | A reason constant, or `NULL` |
 | `claimed_at` | When the sender claimed the row |
 | `sent_tg_message_id` | The Telegram id of the sent message |
@@ -43,7 +44,7 @@ with a known trigger returns the row already stored, also when two calls race.
 | `scheduled` | `sending` | `claim_due` in the sender | The row is due |
 | `scheduled` | `cancelled` | `cancel_scheduled` (the owner's command), `cancel_pending_for_contact` (the sender after a recipient rejection, reason `send_rejected`; later CYR-20, CYR-21) | |
 | `sending` | `sent` | `complete_send` in the sender | Telegram accepted the message |
-| `sending` | `scheduled` | `reschedule` in the sender | Flood wait or a reached limit, and nothing else |
+| `sending` | `scheduled` | `reschedule` in the sender | Flood wait, a reached limit or an autopilot row inside a window, and nothing else |
 | `sending` | `failed` | `mark_failed` in the sender | Certain refusal, account problem, unknown outcome, or `interrupted` |
 | `sending` | `cancelled` | `mark_cancelled` in the sender | The row is stale, or the guard refused it at send time |
 | `failed` | `scheduled` | `retry_failed`, only from the owner's `outbox retry --yes` | The owner checked the chat and decided |
@@ -79,21 +80,25 @@ which stays "the last message from the contact".
 It runs twice: in `OutboxService.enqueue`, which also validates the text (NUL removed, trimmed, not
 empty, at most `MAX_OUTBOX_TEXT_LENGTH`, 4096 UTF-16 code units, which is how Telegram counts, so
 2048 emoji fit and 2049 do not) and raises `EnqueueRefused` without storing anything;
-and in the sender, right before sending, on a contact it has just re-read. A refusal at send time
-cancels the row with the reason as `cancel_reason`, and nothing is sent. A row the owner retried goes
-through the same check.
+and in the sender, on a contact it has just re-read: once after the claim, so a refused contact is
+never marked as read, and once more after the pre-send part, right before `send_text`, because that
+part can take over a minute. A refusal at send time cancels the row with the reason as
+`cancel_reason`, and nothing is sent. A row the owner retried goes through the same check.
 
 ## The sender
 
 `services/outbox_sender.py`, `OutboxSender`, a background task of the app. Its module is the only
-one in `src` that calls `send_text`. Strictly sequential: one row at a time, one row per poll.
+one in `src` that calls the transport. Strictly sequential: one row at a time, one row per poll.
 
 | Constant | Value | Meaning |
 | --- | --- | --- |
 | `SENDER_POLL_INTERVAL` | 2 s | Pause between polls |
 | `SENDER_STALE_CHECK_INTERVAL` | 60 s | How often stuck rows are looked for |
-| `SENDING_STALE_AFTER` | 120 s | Age of a claim that counts as stuck |
+| `SENDING_STALE_AFTER` | 195 s | Age of a claim that counts as stuck: `LONGEST_PRE_SEND + SENDER_SEND_DEADLINE + SENDING_STALE_MARGIN` |
 | `SENDER_SEND_DEADLINE` | 100 s | Deadline of one send; shorter than the stale age |
+| `PRE_SEND_DEADLINE_MARGIN` | 15 s | Added to the profile's `typing.max_seconds` for the deadline of the pre-send part; the read pause (at most 10 s) fits inside it |
+| `LONGEST_PRE_SEND` | 75 s | The longest legal pre-send part: `MAX_TYPING_SECONDS` (60 s) plus the margin |
+| `SENDING_STALE_MARGIN` | 20 s | Keeps a healthy claim from ever counting as stuck; a test asserts the relation |
 | `FLOOD_WAIT_MARGIN` | 5 s | Added to the wait Telegram asks for |
 | `FLOOD_WAIT_NOTIFY_ABOVE` | 60 s | A longer wait notifies the owner |
 | `ROW_STALE_AFTER_SECONDS` | 6 h | A row whose `due_at` is older than this is cancelled, not sent |
@@ -113,13 +118,47 @@ Each poll, in this order:
    summary notice, and sends that notice if it is due.
 4. Re-read the contact and run the guard.
 5. Check the limits. A reached limit puts the row back; see below.
-6. `send_text`, then `complete_send`.
+6. Autopilot rows only: the availability check. See below.
+7. The pre-send part: `mark_read`, a pause, `show_typing`. See below.
+8. Re-read the contact and run the guard again.
+9. `send_text`, then `complete_send`.
 
 The startup sweep and the stale check of stuck rows keep running while the sender is paused or
 stopped. They only ever mark rows as failed; they send nothing.
 
 If `sender_state` cannot be read, nothing is claimed, and the step logs the class name. If the limits
-cannot be read after the claim, nothing is sent and the row stays `sending`, for the stale check.
+cannot be read after the claim, nothing is sent and the row stays `sending`, for the stale check. The
+same goes for a schedule profile that cannot be read.
+
+### The availability check
+
+`ScheduleService.blocked_until(now)` with the stored or the default profile. An `autopilot` row inside
+a night or busy window goes back to `scheduled` at the window's end plus
+`uniform(postponed_spread_minutes)`, with `error_class = outside_hours`. It is never dropped and not
+an attempt, because the transport was not called. `due_at` stays, and the owner gets no notice. A spread
+that lands in the next window is held again at the next claim. A `manual_test` row skips the check: the
+owner asked for that message now.
+
+The stale rule runs first, so a row held past 6 h from its `due_at` is cancelled as `stale` when it
+comes back, as for a limit. Why a planned row does not run into this:
+[humanization.md](humanization.md#the-safety-net).
+
+### The pre-send part
+
+For every source, in this order: `mark_read(tg_id)`, a pause of `uniform(read_pause_seconds)`,
+`show_typing(tg_id, typing_seconds(text))`. The numbers come from the profile; the rules are in
+[humanization.md](humanization.md).
+
+It runs under one deadline, the profile's `typing.max_seconds` + `PRE_SEND_DEADLINE_MARGIN`.
+
+| What happens in the pre-send part | What the sender does |
+| --- | --- |
+| `mark_read` or `show_typing` fails with anything else | Logs the class name and goes on; the send still happens |
+| `SendFloodWait` | Exactly as a flood wait on a send: pauses the sender, reschedules the row, same notice rule. Nothing is sent |
+| `SendAccountBlocked` | Exactly as on a send: stops the sender, the row is `failed` with the kind, nothing is sent |
+| The deadline passes | Logs it, skips the rest of the pre-send part and goes on to the guard and the send |
+| Cancellation (shutdown) | Leaves the row in `sending`, for the next startup sweep, as for a send |
+| The guard refuses after it | The row is cancelled with the reason; nothing is sent |
 
 ## The limits
 
@@ -217,7 +256,7 @@ goes by `send_at`.
 | What happens to the row | `send_at` | `due_at` |
 | --- | --- | --- |
 | `enqueue` | The given time | The same time |
-| A reached limit or a flood wait (`reschedule`) | Moved forward | Unchanged |
+| A reached limit, a flood wait or a closed window (`reschedule`) | Moved forward | Unchanged |
 | The owner's `outbox retry --yes` (`retry_failed`) | Now + N seconds | The same new time, because the owner wants it sent now |
 
 Rows that existed before migration `0005` got `due_at = send_at`. A row already moved by a reschedule
@@ -225,7 +264,8 @@ at that moment counts from the moved time, because the original one was not reco
 
 ### Errors
 
-The Telethon adapter (`userbot/adapter.py`) maps every Telegram failure to one of four classes.
+The Telethon adapter (`userbot/adapter.py`) maps every Telegram failure to one of four classes, with
+the same function for `send_text`, `show_typing` and `mark_read`.
 They carry a class name, and the seconds for a flood wait, never a text. The checks run in the order
 of the table. The account check comes before the refusals because `UserRestrictedError`, a
 restriction of our own account, is a subclass of `ForbiddenError`, which otherwise means the
@@ -244,8 +284,8 @@ and shown is the Telethon class name, never the base class of a subclass.
 
 | Result of the send | What the sender does | Stored `error_class` | Owner notified |
 | --- | --- | --- | --- |
-| `SendFloodWait` | Pauses the whole sender until now + wait + margin, and reschedules the row to that time | The class name | Once per new pause, only above 60 s |
-| `SendAccountBlocked` | Stops the sender; `failed`; other rows untouched; the contact is not paused | The kind | Once, when newly stopped; names the kind and the resume command; then a reminder every 6 h while stopped |
+| `SendFloodWait`, also from `mark_read` or `show_typing` | Pauses the whole sender until now + wait + margin, and reschedules the row to that time | The class name | Once per new pause, only above 60 s |
+| `SendAccountBlocked`, also from `mark_read` or `show_typing` | Stops the sender; `failed`; other rows untouched; the contact is not paused | The kind | Once, when newly stopped; names the kind and the resume command; then a reminder every 6 h while stopped |
 | `SendRejected`, recipient | `failed`; contact `active -> paused`; the contact's other `scheduled` rows cancelled with reason `send_rejected` | The class name | Once, with the contact id and the class name |
 | `SendRejected`, content | `failed`, and nothing else | The class name | Once |
 | `SendUncertain` | `failed` | `uncertain` | Once, and told to check the chat and how to retry |
@@ -254,9 +294,10 @@ and shown is the Telethon class name, never the base class of a subclass.
 | Storing the failure or `complete_send` failed | The row stays `sending`; the stale check fails it | `interrupted` | Once, by the stale check |
 | The row is stale when claimed | `cancelled`, reason `stale`; nothing is sent | none (`cancel_reason = stale`) | A summary with the count, first at once, then at most hourly |
 
-**Only a flood wait and a reached limit put a row back.** In both, the message certainly did not go
-out: for a flood wait Telegram refused it and said when to try again, and for a limit the transport
-was never called. Every other failure ends the row: the transport is called exactly once for it, and
+**Only a flood wait, a reached limit and a closed window put a row back.** In all three, the message
+certainly did not go out: for a flood wait Telegram refused it and said when to try again, even when
+the wait came from the read mark or the typing, and for a limit or a window `send_text` was never called.
+Every other failure ends the row: `send_text` is called exactly once for it, and
 an unknown outcome is never retried by the sender, because the first attempt may have reached
 Telegram and each new call gets a new `random_id`, so the contact would receive the message twice. A
 cause of an uncertain row (a class name, or `SendDeadlinePassed`) goes to the log line; the row stores
@@ -286,7 +327,7 @@ person twice. Such a row is therefore never retried:
 - **Startup sweep.** Once, before the first poll: every `sending` row left by the previous process
   becomes `failed` with `error_class = interrupted`, and the owner gets one notification per row, told
   to check the chat and how to retry.
-- **Stale check.** Every 60 s: `sending` rows claimed more than 120 s ago go the same way.
+- **Stale check.** Every 60 s: `sending` rows claimed more than 195 s ago go the same way.
 - **Cancellation mid-send** (shutdown) leaves the row in `sending`, for the next startup sweep.
 
 The owner decides what to do after reading the chat. A step that fails (a database outage) is logged
@@ -294,12 +335,15 @@ with the class name, and the loop goes on: one bad row never stops it. Only canc
 
 ## The transport, the notifier and the adapter
 
-- `MessageTransport` (`services/message_transport.py`) has exactly one method:
-  `send_text(tg_id, text) -> SentMessage`.
+- `MessageTransport` (`services/message_transport.py`) has exactly three methods, and only the sender
+  calls them: `send_text(tg_id, text) -> SentMessage`, `show_typing(tg_id, seconds)` and
+  `mark_read(tg_id)`.
 - `OwnerNotifier` (`services/owner_notifier.py`) has exactly one method: `notify(text)`.
 - `TelethonAdapter` (`userbot/adapter.py`) is the only module that touches the Telethon client
   directly and the only one with a Telethon write call: `send_message` with plain text, no parse
-  mode and no link preview. It also implements the read Protocol `UserbotClient`, whose generic
+  mode and no link preview; `action` with `typing`, held for the given seconds through an injected
+  sleep, cancellable, with `auto_cancel=False`, because the message clears the indicator and a cancel
+  would be one more write; and `send_read_acknowledge` for the whole chat. It also implements the read Protocol `UserbotClient`, whose generic
   request call was replaced by `get_full_user(tg_id)`; only the adapter imports a request class
   (`GetFullUserRequest`). It logs nothing.
 - `TelegramOwnerNotifier` (`bot/notifier.py`) sends one plain Russian message to the owner chat. The
@@ -366,7 +410,7 @@ its message, because PostgreSQL can quote row values in it.
 
 | What | Ticket |
 | --- | --- |
-| The autopilot: generating replies and writing `autopilot` rows | CYR-17 |
-| Humanization: delay, typing action, splitting, quiet hours | CYR-18 |
+| The autopilot: generating replies, asking the planner for the time and writing `autopilot` rows | CYR-17 |
+| Splitting a reply into several messages | CYR-36 |
 | Stop-triggers, which will use `cancel_pending_for_contact` | CYR-20 |
 | Manual pause from the owner's own messages | CYR-21 |

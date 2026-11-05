@@ -3,7 +3,8 @@
 **All rules below are planned until their tickets land, except where a rule says it exists.** S1
 and S2 are enforced since CYR-19: one guarded sender is the only way to a contact, and nothing
 writes to the outbox except the owner's explicit test command, so nothing is sent automatically.
-S8 is enforced since CYR-12. S5 is enforced since CYR-22. The other rules are
+S8 is enforced since CYR-12. S5 is enforced since CYR-22. S6 is enforced since CYR-18, except the
+splitting (CYR-36). The other rules are
 not enforced by code yet; they are the contract that the tickets must implement and test. Changing or dropping a rule is a large change (see [CLAUDE.md](../../CLAUDE.md)) and ships
 with the code and the test ([CONTRIBUTING.md](../../CONTRIBUTING.md)). Statuses:
 [contact-lifecycle.md](contact-lifecycle.md).
@@ -33,28 +34,31 @@ only.
 - **Rule:** every outgoing message goes through the sender. No other code path sends. This
   includes replies, proactive messages and reminders to contacts.
 - **Why:** guards, limits and pacing can only be trusted if they cannot be bypassed.
-- **Enforced where:** exists (CYR-19). `OutboxSender` in `services/outbox_sender.py` is the only
-  caller of `MessageTransport.send_text`, and `TelethonAdapter` in `userbot/adapter.py` is the only
-  module with a Telethon write call. The read Protocol `UserbotClient` has no write method and no
-  generic request call, so code typed against it cannot send, and the transport has exactly one
-  method. Telethon is imported only inside `userbot/`. A send with an unknown outcome is never retried
-  automatically, because the contact could receive the message twice: the transport is called once for
-  the row, and the owner checks the chat and decides. The limits in the sender exist since CYR-22
-  (see S5). Planned in the sender: humanization (CYR-18).
+- **Enforced where:** exists (CYR-19). The transport, `MessageTransport`, has exactly three narrow
+  write methods (`send_text`, `show_typing`, `mark_read`; the last two since CYR-18). `OutboxSender` in
+  `services/outbox_sender.py` is the only caller of all three, and `TelethonAdapter` in
+  `userbot/adapter.py` is the only module with a Telethon write call. The read Protocol `UserbotClient`
+  has no write method and no generic request call, so code typed against it cannot send. Telethon is
+  imported only inside `userbot/`. A send with an unknown outcome is never retried automatically,
+  because the contact could receive the message twice: the transport is called once for the row, and
+  the owner checks the chat and decides. The limits in the sender exist since CYR-22 (see S5), and its
+  humanized pacing since CYR-18 (see S6).
 - **How it is tested:** exists, as structural tests that fail on a new way out.
   `tests/test_one_sender.py` scans the syntax tree of all of `src`: only the sender module calls
-  `send_text`, also through `getattr`; only the adapter and the Protocol define it; outside `bot/` only
-  the adapter uses a Telethon write method (`send_message`, `send_file`, `forward_messages`,
-  `edit_message`, `delete_messages`, `send_read_acknowledge`, `action` and similar); inside `bot/` only
-  the two owner-chat modules send; Telethon request classes are imported only by the adapter and only
-  from the allowlist (`GetFullUserRequest`); nothing outside `userbot/` imports Telethon and nothing
-  outside `bot/` imports aiogram; `UserbotClient` has no write member; `MessageTransport` has exactly
-  `send_text`. A last test proves the scans catch a planted violation.
+  `send_text`, `show_typing` and `mark_read`, also through `getattr`, and only on its transport; only
+  the adapter and the Protocol define them; outside `bot/` only the adapter uses a Telethon write method
+  (`send_message`, `send_file`, `forward_messages`, `edit_message`, `delete_messages`,
+  `send_read_acknowledge`, `action` and similar), the sender's `mark_read` on the transport being the
+  one allowed use of such a name elsewhere; inside `bot/` only the two owner-chat modules send; Telethon
+  request classes are imported only by the adapter and only from the allowlist (`GetFullUserRequest`);
+  nothing outside `userbot/` imports Telethon and nothing outside `bot/` imports aiogram; `UserbotClient`
+  has no write member; `MessageTransport` has exactly `send_text`, `show_typing` and `mark_read`. A last
+  test proves the scans catch a planted violation.
   `tests/userbot/test_never_sends.py` still compares the members of `UserbotClient`, `IncomingEvent` and
   `SenderLike` with an allowlist, scans every userbot module for write-looking names, with the adapter's
-  `send_message` and `send_text` and `send_code_request` in `login.py` (it asks Telegram for a login
-  code) as the only allowed ones, and runs the handler tests with fakes whose write methods record the
-  attempt and raise.
+  `send_message`, `send_text`, `send_read_acknowledge`, `action` and `mark_read` and `send_code_request`
+  in `login.py` (it asks Telegram for a login code) as the only allowed ones, and runs the handler tests
+  with fakes whose write methods record the attempt and raise.
 
 ## S3. Stop-triggers hand over
 
@@ -107,9 +111,20 @@ only.
 - **Rule:** replies are delayed, show a typing action, are split into several messages when long,
   and are not sent during quiet hours.
 - **Why:** instant, uniform replies at any hour look automated and draw limits.
-- **Enforced where:** the sender (CYR-18). Quiet hours use `TIMEZONE`.
-- **How it is tested:** delay and splitting with an injected clock and random source; a reply due
-  in quiet hours is deferred, not dropped.
+- **Enforced where:** exists (CYR-18), except the splitting (CYR-36, planned). `plan_send_time` in
+  `services/humanization.py` proposes the delayed time; the autopilot that will call it is CYR-17. The
+  sender, `services/outbox_sender.py`, enforces the rest for itself: an `autopilot` row inside a night or
+  busy window goes back to `scheduled` with `error_class = outside_hours`, never dropped, and every row
+  goes through the read mark, a pause and typing before the send. A failed read mark or typing never
+  blocks the send, except a flood wait or an account problem, handled as on a send. The windows use the
+  profile's time zone, by default `TIMEZONE`. Details: [humanization.md](humanization.md).
+- **How it is tested:** exists. With an injected clock and a seeded random generator:
+  `tests/services/test_humanization.py` (windows, reasons, delays, typing),
+  `tests/services/test_humanization_planner.py` (the burst, on real PostgreSQL) and
+  `tests/services/test_outbox_sender_humanization.py` (the order, a row due in a window is deferred and
+  sent after, not dropped, `manual_test` rows skip the check, cosmetic failures, a flood wait and an
+  account problem before the send, the deadline, the relation of the stale-sending age). Splitting is
+  untested because it is not built.
 
 ## S7. Limits on proactive messages
 

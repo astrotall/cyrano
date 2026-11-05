@@ -10,11 +10,29 @@ from cyrano.domain.enums import ContactStatus, OutboxSource, OutboxState
 from cyrano.domain.errors import OutboxRowNotFound, OutboxStateConflict
 from cyrano.domain.models import DEFAULT_MODE_NAME, Contact, ContactCreate
 from cyrano.domain.outbox import ScheduledMessage, SenderState, SentMessage
+from cyrano.domain.schedule import ScheduleProfile
+from cyrano.services.humanization import ScheduleService
 
 FAKE_NOW = datetime(2025, 3, 4, 5, 6, 7, tzinfo=UTC)
 FIRST_FAKE_TG_MESSAGE_ID = 700100
 EVENTUALLY_TRIES = 1000
 EVENTUALLY_PAUSE = 0.01
+MARK_READ_STEP = "mark_read"
+SHOW_TYPING_STEP = "show_typing"
+SEND_TEXT_STEP = "send_text"
+FREE_TIMEZONE = "UTC"
+ALWAYS_FREE_PROFILE = ScheduleProfile.model_validate(
+    {
+        "version": 1,
+        "timezone": FREE_TIMEZONE,
+        "night": {
+            "start": ["00:00", "00:00"],
+            "end_weekday": ["00:01", "00:01"],
+            "end_weekend": ["00:01", "00:01"],
+        },
+        "read_pause_seconds": [0, 0],
+    }
+)
 
 
 async def eventually(check: Callable[[], Awaitable[bool]]) -> None:
@@ -46,18 +64,57 @@ class FakeLimits:
     send_limit_contact_day: int = 100_000
 
 
+class InMemoryScheduleProfiles:
+    def __init__(self, profile: ScheduleProfile | None = None) -> None:
+        self.profile = profile
+
+    async def get(self) -> ScheduleProfile | None:
+        return self.profile
+
+    async def replace(self, profile: ScheduleProfile) -> ScheduleProfile:
+        self.profile = profile
+        return profile
+
+
+def free_schedule() -> ScheduleService:
+    return ScheduleService(InMemoryScheduleProfiles(ALWAYS_FREE_PROFILE), FREE_TIMEZONE)
+
+
 class ScriptedTransport:
     def __init__(
-        self, script: Sequence[Exception] = (), clock: Callable[[], datetime] | None = None
+        self,
+        script: Sequence[Exception] = (),
+        clock: Callable[[], datetime] | None = None,
+        *,
+        read_errors: Sequence[BaseException] = (),
+        typing_errors: Sequence[BaseException] = (),
     ) -> None:
         self.calls: list[tuple[int, str]] = []
+        self.steps: list[str] = []
+        self.typing_seconds: list[float] = []
+        self.read_ids: list[int] = []
         self.max_active = 0
         self.delay = 0.0
         self._script = list(script)
+        self._read_errors = list(read_errors)
+        self._typing_errors = list(typing_errors)
         self._clock = clock
         self._active = 0
 
+    async def mark_read(self, tg_id: int) -> None:
+        self.steps.append(MARK_READ_STEP)
+        self.read_ids.append(tg_id)
+        if self._read_errors:
+            raise self._read_errors.pop(0)
+
+    async def show_typing(self, tg_id: int, seconds: float) -> None:
+        self.steps.append(SHOW_TYPING_STEP)
+        self.typing_seconds.append(seconds)
+        if self._typing_errors:
+            raise self._typing_errors.pop(0)
+
     async def send_text(self, tg_id: int, text: str) -> SentMessage:
+        self.steps.append(SEND_TEXT_STEP)
         self.calls.append((tg_id, text))
         number = len(self.calls)
         self._active += 1
@@ -78,6 +135,12 @@ class HangingTransport:
         self.started = asyncio.Event()
         self.cancelled = False
         self.calls = 0
+
+    async def mark_read(self, tg_id: int) -> None:
+        return None
+
+    async def show_typing(self, tg_id: int, seconds: float) -> None:
+        return None
 
     async def send_text(self, tg_id: int, text: str) -> SentMessage:
         self.calls += 1

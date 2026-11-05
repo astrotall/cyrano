@@ -8,6 +8,7 @@ import random
 from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
+from enum import StrEnum
 
 from cyrano.domain.enums import (
     ContactStatus,
@@ -66,7 +67,23 @@ FLOOD_WAIT_MARGIN = 5.0
 FLOOD_WAIT_NOTIFY_ABOVE = 60.0
 OWNER_NOTIFY_DEADLINE = 15.0
 NOTIFIED_LIMIT_WINDOWS = frozenset({LimitWindow.HOUR, LimitWindow.DAY})
+STEP_LOG_MESSAGE = "outbox row step"
+STEP_DURATION_UNIT = timedelta(milliseconds=1)
 _SYSTEM_RANDOM = random.SystemRandom()
+
+
+class SendStep(StrEnum):
+    MARK_READ = "mark_read"
+    PAUSE = "pause"
+    TYPING = "typing"
+    SEND = "send"
+
+
+class StepOutcome(StrEnum):
+    OK = "ok"
+    FAILED = "failed"
+    TIMEOUT = "timeout"
+    SKIPPED = "skipped"
 
 
 def _utc_now() -> datetime:
@@ -100,6 +117,14 @@ class SenderNotices:
     stale_summary: str
     stop_reminder: str
     limit_reached: Mapping[tuple[LimitScope, LimitWindow], str]
+
+
+@dataclass(frozen=True, slots=True)
+class _PlannedStep:
+    step: SendStep
+    run: Callable[[], Awaitable[None]]
+    cosmetic: bool
+    planned_seconds: float | None = None
 
 
 class OutboxSender:
@@ -228,22 +253,32 @@ class OutboxSender:
         try:
             await self._before_send(row, contact.tg_id)
         except (SendFloodWait, SendAccountBlocked) as exc:
+            self._log_step(row, SendStep.SEND, StepOutcome.SKIPPED)
             await self._handle_failure(row, exc)
             return
         contact = await self._guarded_contact(row)
         if contact is None:
+            self._log_step(row, SendStep.SEND, StepOutcome.SKIPPED)
             return
         deadline = asyncio.timeout(self._timings.send_deadline)
+        started = self._clock()
         try:
             async with deadline:
                 sent = await self._transport.send_text(contact.tg_id, row.text)
         except SendFailure as exc:
+            self._log_step(row, SendStep.SEND, StepOutcome.FAILED, started, error=exc)
             await self._handle_failure(row, exc)
             return
         except Exception as exc:
-            cause = CAUSE_SEND_DEADLINE if deadline.expired() else type(exc).__name__
+            if deadline.expired():
+                self._log_step(row, SendStep.SEND, StepOutcome.TIMEOUT, started)
+                cause = CAUSE_SEND_DEADLINE
+            else:
+                self._log_step(row, SendStep.SEND, StepOutcome.FAILED, started, error=exc)
+                cause = type(exc).__name__
             await self._fail_uncertain(row, cause)
             return
+        self._log_step(row, SendStep.SEND, StepOutcome.OK, started)
         await self._outbox.complete_send(
             row.id, row.contact_id, row.text, sent.tg_message_id, sent.sent_at
         )
@@ -264,26 +299,96 @@ class OutboxSender:
 
     async def _before_send(self, row: ScheduledMessage, tg_id: int) -> None:
         profile = await self._schedule.get_profile()
+        pause = self._rng.uniform(*profile.read_pause_seconds)
+        typing = typing_seconds(row.text, profile)
+        pending = [
+            _PlannedStep(SendStep.MARK_READ, lambda: self._transport.mark_read(tg_id), True),
+            _PlannedStep(SendStep.PAUSE, lambda: self._sleep(pause), False, pause),
+            _PlannedStep(
+                SendStep.TYPING, lambda: self._transport.show_typing(tg_id, typing), True, typing
+            ),
+        ]
+        started = self._clock()
         try:
             async with asyncio.timeout(profile.typing.max_seconds + self._timings.pre_send_margin):
-                await self._cosmetic(self._transport.mark_read(tg_id))
-                await self._sleep(self._rng.uniform(*profile.read_pause_seconds))
-                await self._cosmetic(
-                    self._transport.show_typing(tg_id, typing_seconds(row.text, profile))
-                )
+                while pending:
+                    started = self._clock()
+                    await self._pre_send_step(row, pending[0], started)
+                    pending.pop(0)
         except TimeoutError:
             logger.info(
                 "the pre-send part ran out of time",
                 extra={"row_id": row.id, "contact_id": row.contact_id},
             )
-
-    async def _cosmetic(self, step: Awaitable[None]) -> None:
-        try:
-            await step
+            if pending:
+                overran, *pending = pending
+                self._log_planned(row, overran, StepOutcome.TIMEOUT, started)
+            self._log_skipped(row, pending)
         except SendFloodWait, SendAccountBlocked:
+            self._log_skipped(row, pending[1:])
+            raise
+
+    async def _pre_send_step(
+        self, row: ScheduledMessage, planned: _PlannedStep, started: datetime
+    ) -> None:
+        try:
+            await planned.run()
+        except (SendFloodWait, SendAccountBlocked) as exc:
+            self._log_planned(row, planned, StepOutcome.FAILED, started, error=exc)
             raise
         except Exception as exc:
+            self._log_planned(row, planned, StepOutcome.FAILED, started, error=exc)
+            if not planned.cosmetic:
+                raise
             logger.info("a pre-send step failed", extra={"error": type(exc).__name__})
+            return
+        self._log_planned(row, planned, StepOutcome.OK, started)
+
+    def _log_skipped(self, row: ScheduledMessage, steps: list[_PlannedStep]) -> None:
+        for planned in steps:
+            self._log_planned(row, planned, StepOutcome.SKIPPED)
+
+    def _log_planned(
+        self,
+        row: ScheduledMessage,
+        planned: _PlannedStep,
+        outcome: StepOutcome,
+        started: datetime | None = None,
+        *,
+        error: Exception | None = None,
+    ) -> None:
+        self._log_step(
+            row,
+            planned.step,
+            outcome,
+            started,
+            error=error,
+            planned_seconds=planned.planned_seconds,
+        )
+
+    def _log_step(
+        self,
+        row: ScheduledMessage,
+        step: SendStep,
+        outcome: StepOutcome,
+        started: datetime | None = None,
+        *,
+        error: Exception | None = None,
+        planned_seconds: float | None = None,
+    ) -> None:
+        duration = timedelta() if started is None else self._clock() - started
+        extra: dict[str, object] = {
+            "row_id": row.id,
+            "contact_id": row.contact_id,
+            "step": step.value,
+            "outcome": outcome.value,
+            "duration_ms": round(duration / STEP_DURATION_UNIT),
+        }
+        if error is not None:
+            extra["error_class"] = type(error).__name__
+        if planned_seconds is not None:
+            extra["planned_seconds"] = planned_seconds
+        logger.info(STEP_LOG_MESSAGE, extra=extra)
 
     async def _hold_for_limit(
         self, row: ScheduledMessage, limits: LimitDecision, free_at: datetime, now: datetime

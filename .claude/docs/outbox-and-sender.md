@@ -160,6 +160,49 @@ It runs under one deadline, the profile's `typing.max_seconds` + `PRE_SEND_DEADL
 | Cancellation (shutdown) | Leaves the row in `sending`, for the next startup sweep, as for a send |
 | The guard refuses after it | The row is cancelled with the reason; nothing is sent |
 
+### Reading the logs
+
+Since CYR-38 every row that reaches the pre-send part gets exactly four INFO lines with the message
+`outbox row step` from the logger `cyrano.services.outbox_sender`, one per step, in this order:
+`mark_read`, `pause`, `typing`, `send`. The `send` line comes before the `outbox row sent` line,
+which is unchanged. A row that stops earlier (stale, refused by the first guard, held by a limit or a
+window, an unreadable profile) has only its own line and no step lines.
+
+| Field | Holds |
+| --- | --- |
+| `step` | `mark_read`, `pause`, `typing` or `send` |
+| `outcome` | `ok`; `failed`; `timeout` (the pre-send deadline or the send deadline ran out in this step); `skipped` (the step did not run: after a timeout, a flood wait or an account error, or `send` after a guard refusal) |
+| `error_class` | Only on `failed`: the exception class name, for example `SendUncertain`, `SendFloodWait`, `SendAccountBlocked` |
+| `duration_ms` | Integer, measured with the sender's clock; `0` for `skipped` |
+| `row_id`, `contact_id` | The internal ids |
+| `planned_seconds` | Only on `pause` and `typing`: the seconds drawn or computed for this row |
+
+Nothing else is in a step line: no text, name, username, Telegram id, photo path, and no value of
+the schedule profile other than the two planned numbers. A failed `mark_read` or `typing` still
+leads to `send` with `ok`, as described above. A flood wait or an account error is logged as
+`failed` with its class, the rest as `skipped`, and then handled as in the table above.
+
+A normal sequence, with invented ids:
+
+```
+{"ts": "2026-11-05T12:00:00.310+00:00", "level": "INFO", "logger": "cyrano.services.outbox_sender", "msg": "outbox row step", "row_id": 41, "contact_id": 7, "step": "mark_read", "outcome": "ok", "duration_ms": 250}
+{"ts": "2026-11-05T12:00:03.161+00:00", "level": "INFO", "logger": "cyrano.services.outbox_sender", "msg": "outbox row step", "row_id": 41, "contact_id": 7, "step": "pause", "outcome": "ok", "duration_ms": 2850, "planned_seconds": 2.8497305032518905}
+{"ts": "2026-11-05T12:00:18.362+00:00", "level": "INFO", "logger": "cyrano.services.outbox_sender", "msg": "outbox row step", "row_id": 41, "contact_id": 7, "step": "typing", "outcome": "ok", "duration_ms": 15200, "planned_seconds": 15.2}
+{"ts": "2026-11-05T12:00:18.863+00:00", "level": "INFO", "logger": "cyrano.services.outbox_sender", "msg": "outbox row step", "row_id": 41, "contact_id": 7, "step": "send", "outcome": "ok", "duration_ms": 500}
+{"ts": "2026-11-05T12:00:18.871+00:00", "level": "INFO", "logger": "cyrano.services.outbox_sender", "msg": "outbox row sent", "row_id": 41, "contact_id": 7}
+```
+
+`ts` is written when a step ends, so a step started at `ts - duration_ms`. Above, the read mark was
+accepted by Telegram at 12:00:00.310, the pause ran until 12:00:03.161, the typing was held from then
+until 12:00:18.362, and the message was accepted half a second later. Group the lines by `row_id`;
+the sender handles one row at a time, so the lines of one row are never interleaved with another's.
+
+**A failed read mark or a late display.** When the contact's client shows the read mark only after the
+message, look at the `mark_read` line of that row. `ok` with a `ts` before the `typing` and `send`
+lines means Telegram accepted the read mark first, so the late display is on the contact's side.
+`failed` (with its class) or `skipped` means the read mark was not sent. `timeout` means the call did
+not finish within the deadline, so it is unknown whether Telegram got it.
+
 ## The limits
 
 `services/send_limiter.py`. All six are optional settings, and each must be at least 1.

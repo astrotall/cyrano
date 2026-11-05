@@ -23,7 +23,12 @@ FIRST_REVISION_TABLES = {"contacts", "messages", "modes"}
 STYLE_TABLES = {"persona", "style_examples"}
 OUTBOX_TABLE = "scheduled_messages"
 SENDER_STATE_TABLE = "sender_state"
-TABLES = FIRST_REVISION_TABLES | STYLE_TABLES | {OUTBOX_TABLE, SENDER_STATE_TABLE}
+SCHEDULE_PROFILE_TABLE = "schedule_profile"
+TABLES = (
+    FIRST_REVISION_TABLES
+    | STYLE_TABLES
+    | {OUTBOX_TABLE, SENDER_STATE_TABLE, SCHEDULE_PROFILE_TABLE}
+)
 ENUM_TYPES = {"contact_status", "message_direction"}
 TIMESTAMP_COLUMNS = {
     ("contacts", "created_at"),
@@ -41,6 +46,7 @@ TIMESTAMP_COLUMNS = {
     ("scheduled_messages", "updated_at"),
     ("sender_state", "paused_until"),
     ("sender_state", "updated_at"),
+    ("schedule_profile", "updated_at"),
 }
 EXPECTED_CONSTRAINTS = {
     "pk_contacts",
@@ -62,6 +68,8 @@ EXPECTED_CONSTRAINTS = {
     "ck_scheduled_messages_source_allowed",
     "pk_sender_state",
     "ck_sender_state_single_row",
+    "pk_schedule_profile",
+    "ck_schedule_profile_single_row",
 }
 EXPECTED_INDEXES = {
     "ix_contacts_status",
@@ -182,13 +190,58 @@ async def test_revision_0004_follows_0003(alembic_config: Config) -> None:
     assert revision.down_revision == "0003"
 
 
-async def test_revision_0005_is_the_head_and_follows_0004(alembic_config: Config) -> None:
+async def test_revision_0005_follows_0004(alembic_config: Config) -> None:
     script = ScriptDirectory.from_config(alembic_config)
 
-    assert script.get_heads() == ["0005"]
     revision = script.get_revision("0005")
     assert revision is not None
     assert revision.down_revision == "0004"
+
+
+async def test_revision_0006_is_the_head_and_follows_0005(alembic_config: Config) -> None:
+    script = ScriptDirectory.from_config(alembic_config)
+
+    assert script.get_heads() == ["0006"]
+    revision = script.get_revision("0006")
+    assert revision is not None
+    assert revision.down_revision == "0005"
+
+
+async def test_revision_0006_creates_an_empty_table_and_downgrades_to_0005(
+    database_url: URL, alembic_config: Config
+) -> None:
+    await asyncio.to_thread(command.upgrade, alembic_config, "0005")
+    assert SCHEDULE_PROFILE_TABLE not in await _tables(database_url)
+
+    await asyncio.to_thread(command.upgrade, alembic_config, "0006")
+    assert SCHEDULE_PROFILE_TABLE in await _tables(database_url)
+    assert await fetch_all(database_url, "SELECT id FROM schedule_profile") == []
+
+    await asyncio.to_thread(command.downgrade, alembic_config, "0005")
+    assert SCHEDULE_PROFILE_TABLE not in await _tables(database_url)
+    assert SENDER_STATE_TABLE in await _tables(database_url)
+
+    await asyncio.to_thread(command.upgrade, alembic_config, "0006")
+    assert SCHEDULE_PROFILE_TABLE in await _tables(database_url)
+
+
+async def test_the_single_row_check_refuses_a_second_schedule_profile_row(
+    migrated_url: URL,
+) -> None:
+    with pytest.raises(DBAPIError, match="ck_schedule_profile_single_row"):
+        await execute(
+            migrated_url, "INSERT INTO schedule_profile (id, data) VALUES (2, '{}'::jsonb)"
+        )
+
+
+async def test_the_schedule_profile_data_is_jsonb_and_not_null(migrated_url: URL) -> None:
+    rows = await fetch_all(
+        migrated_url,
+        "SELECT data_type, is_nullable FROM information_schema.columns "
+        "WHERE table_name = 'schedule_profile' AND column_name = 'data'",
+    )
+
+    assert rows == [("jsonb", "NO")]
 
 
 async def _insert_outbox_rows_at_0004(url: URL) -> None:

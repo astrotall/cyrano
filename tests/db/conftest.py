@@ -21,6 +21,7 @@ from cyrano.db.repositories import (
     SqlModeRepository,
     SqlOutboxRepository,
     SqlPersonaRepository,
+    SqlScheduleProfileRepository,
     SqlSenderStateRepository,
     SqlStyleExampleRepository,
 )
@@ -162,6 +163,11 @@ def outbox(session_factory: SessionFactory) -> SqlOutboxRepository:
 @pytest.fixture
 def sender_state(session_factory: SessionFactory) -> SqlSenderStateRepository:
     return SqlSenderStateRepository(session_factory)
+
+
+@pytest.fixture
+def schedule_profiles(session_factory: SessionFactory) -> SqlScheduleProfileRepository:
+    return SqlScheduleProfileRepository(session_factory)
 
 
 @pytest.fixture

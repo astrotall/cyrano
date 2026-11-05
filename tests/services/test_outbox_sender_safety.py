@@ -76,6 +76,7 @@ from cyrano.services.outbox_sender import (
     FLOOD_WAIT_MARGIN,
     FLOOD_WAIT_NOTIFY_ABOVE,
     OWNER_NOTIFY_DEADLINE,
+    SENDER_POLL_INTERVAL,
     SENDING_STALE_AFTER,
     OutboxSender,
     SenderTimings,
@@ -84,6 +85,7 @@ from cyrano.services.owner_notifier import OwnerNotifier
 from cyrano.services.send_guard import SendGuard
 from cyrano.services.send_limiter import SendLimiter
 from cyrano.userbot.adapter import PEER_NOT_FOUND, TelethonAdapter
+from tests.capped_loop import CappedLoop
 from tests.db.conftest import fetch_all
 from tests.privacy import FAKE_TELEGRAM_ID, assert_absent
 from tests.services.outbox_fakes import (
@@ -94,6 +96,7 @@ from tests.services.outbox_fakes import (
     RecordingNotifier,
     ScriptedTransport,
     eventually,
+    free_schedule,
     stored_contact,
 )
 
@@ -193,6 +196,7 @@ class Rig:
             self.contacts,
             self.state,
             SendLimiter(self.messages, limits if limits is not None else FakeLimits()),
+            free_schedule(),
             transport,
             notifier if notifier is not None else self.notifier,
             SendGuard(_Switch()),
@@ -1034,46 +1038,47 @@ async def test_the_running_loop_claims_nothing_during_a_pause_and_goes_on_after_
     first = await rig.row()
     second = await rig.row(rig.other)
     transport = rig.transport([SendFloodWait("FakeFloodWait", 100)])
-    ticks = 0
+    watched_until = FAKE_NOW + timedelta(seconds=5)
+    past_the_pause = watched_until + timedelta(seconds=200)
     calls_during_the_pause: list[int] = []
     claims_during_the_pause: list[OutboxState] = []
 
-    async def advance(_: float) -> None:
-        nonlocal ticks
-        ticks += 1
-        if ticks <= 5:
+    async def advance(seconds: float) -> bool:
+        if seconds != SENDER_POLL_INTERVAL:
+            return False
+        if rig.clock() < watched_until:
             calls_during_the_pause.append(len(transport.calls))
             claims_during_the_pause.append((await rig.stored(second.id)).state)
             rig.clock.advance(1)
-        elif ticks == 6:
+            return False
+        if rig.clock() < past_the_pause:
             rig.clock.advance(200)
-        elif ticks == 9:
-            raise _StopLoop
+            return False
+        return (await rig.stored(first.id)).state is OutboxState.SENT and (
+            await rig.stored(second.id)
+        ).state is OutboxState.SENT
 
+    loop = CappedLoop(advance)
     sender = OutboxSender(
         rig.outbox,
         rig.contacts,
         rig.state,
         SendLimiter(rig.messages, FakeLimits()),
+        free_schedule(),
         transport,
         rig.notifier,
         SendGuard(_Switch()),
         OUTBOX_NOTICES,
         clock=rig.clock,
-        sleep=advance,
+        sleep=loop.sleep,
     )
 
-    with pytest.raises(_StopLoop):
-        await sender.poll_forever()
+    await loop.run(sender.poll_forever())
 
     assert calls_during_the_pause == [1] * 5
     assert claims_during_the_pause == [OutboxState.SCHEDULED] * 5
     assert (await rig.stored(first.id)).state is OutboxState.SENT
     assert (await rig.stored(second.id)).state is OutboxState.SENT
-
-
-class _StopLoop(Exception):
-    pass
 
 
 @pytest.mark.parametrize("kind", ACCOUNT_KINDS)

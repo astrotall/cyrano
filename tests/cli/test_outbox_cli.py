@@ -52,6 +52,7 @@ from tests.services.outbox_fakes import (
     FakeLimits,
     RecordingNotifier,
     ScriptedTransport,
+    free_schedule,
     stored_contact,
 )
 
@@ -418,6 +419,7 @@ def _sender(
         contacts,
         SqlSenderStateRepository(factory),
         SendLimiter(SqlMessageRepository(factory), LIMITS),
+        free_schedule(),
         transport,
         RecordingNotifier(),
         SendGuard(_Switch(False)),

@@ -51,7 +51,13 @@ from telethon.errors import (
 from telethon.tl.functions.users import GetFullUserRequest
 
 from cyrano.domain.enums import RejectionReason
-from cyrano.domain.errors import SendAccountBlocked, SendFloodWait, SendRejected, SendUncertain
+from cyrano.domain.errors import (
+    SendAccountBlocked,
+    SendFailure,
+    SendFloodWait,
+    SendRejected,
+    SendUncertain,
+)
 from cyrano.services.message_transport import MessageTransport
 from cyrano.userbot.adapter import (
     ACCOUNT_BLOCKS,
@@ -168,7 +174,11 @@ def test_the_adapter_satisfies_both_interfaces() -> None:
 def test_the_public_surface_is_the_read_protocol_plus_exactly_one_send() -> None:
     public = {name for name in vars(TelethonAdapter) if not name.startswith("_")}
 
-    assert public == set(typing.get_protocol_members(UserbotClient)) | {"send_text"}
+    assert public == set(typing.get_protocol_members(UserbotClient)) | {
+        "send_text",
+        "show_typing",
+        "mark_read",
+    }
 
 
 async def test_a_text_goes_out_plain_without_a_link_preview() -> None:
@@ -568,3 +578,191 @@ async def test_the_disconnected_future_is_the_clients() -> None:
     raw.disconnected = future
 
     assert TelethonAdapter(raw).disconnected is future
+
+
+class _ActionContext:
+    def __init__(self, raw: _WriteRaw) -> None:
+        self._raw = raw
+
+    async def __aenter__(self) -> None:
+        self._raw.events.append("typing started")
+        self._raw.typing_started.set()
+        if self._raw.enter_error is not None:
+            raise self._raw.enter_error
+
+    async def __aexit__(self, *_: object) -> None:
+        self._raw.events.append("typing stopped")
+        if self._raw.exit_error is not None:
+            raise self._raw.exit_error
+
+
+class _WriteRaw(_RawTelethon):
+    def __init__(
+        self,
+        *,
+        enter_error: Exception | None = None,
+        exit_error: Exception | None = None,
+        read_error: Exception | None = None,
+        peer_error: Exception | None = None,
+    ) -> None:
+        super().__init__(peer_error=peer_error)
+        self.events: list[str] = []
+        self.typing_started = asyncio.Event()
+        self.action_calls: list[tuple[object, str, dict[str, object]]] = []
+        self.read_calls: list[object] = []
+        self.enter_error = enter_error
+        self.exit_error = exit_error
+        self._read_error = read_error
+
+    def action(self, peer: object, action: str, **kwargs: object) -> _ActionContext:
+        self.action_calls.append((peer, action, kwargs))
+        return _ActionContext(self)
+
+    async def send_read_acknowledge(self, peer: object) -> bool:
+        self.read_calls.append(peer)
+        if self._read_error is not None:
+            raise self._read_error
+        return True
+
+
+def _adapter(raw: _WriteRaw, slept: list[float] | None = None) -> TelethonAdapter:
+    sleeps = slept if slept is not None else []
+
+    async def sleep(seconds: float) -> None:
+        sleeps.append(seconds)
+        raw.events.append("held")
+
+    return TelethonAdapter(raw, sleep=sleep)
+
+
+FLOOD_IN_WRITE = FloodWaitError(request=None, capture=33)
+WRITE_FAILURES = [
+    (FLOOD_IN_WRITE, SendFloodWait, "FloodWaitError"),
+    (PeerFloodError(request=None), SendAccountBlocked, "PeerFloodError"),
+    (UserDeactivatedBanError(request=None), SendAccountBlocked, "UserDeactivatedBanError"),
+    (FrozenMethodInvalidError(request=None), SendAccountBlocked, "FrozenMethodInvalidError"),
+    (AuthKeyUnregisteredError(request=None), SendAccountBlocked, "AuthKeyUnregisteredError"),
+    (UserRestrictedError(request=None), SendAccountBlocked, "UserRestrictedError"),
+    (UserPrivacyRestrictedError(request=None), SendRejected, "UserPrivacyRestrictedError"),
+    (UserIsBlockedError(request=None), SendRejected, "UserIsBlockedError"),
+    (ServerError(request=None, message="x", code=500), SendUncertain, "ServerError"),
+    (TimeoutError(), SendUncertain, "TimeoutError"),
+    (ValueError("marker"), SendUncertain, "ValueError"),
+]
+WRITE_FAILURE_IDS = [case[2] for case in WRITE_FAILURES]
+
+
+async def test_typing_is_held_for_the_given_seconds_on_the_resolved_peer() -> None:
+    raw = _WriteRaw()
+    slept: list[float] = []
+
+    await _adapter(raw, slept).show_typing(FAKE_TELEGRAM_ID, 4.5)
+
+    assert raw.peer_lookups == [FAKE_TELEGRAM_ID]
+    assert raw.action_calls == [(FAKE_PEER, "typing", {"auto_cancel": False})]
+    assert slept == [4.5]
+    assert raw.events == ["typing started", "held", "typing stopped"]
+    assert raw.send_calls == []
+
+
+async def test_a_read_mark_goes_to_the_resolved_peer_and_sends_nothing() -> None:
+    raw = _WriteRaw()
+
+    await _adapter(raw).mark_read(FAKE_TELEGRAM_ID)
+
+    assert raw.peer_lookups == [FAKE_TELEGRAM_ID]
+    assert raw.read_calls == [FAKE_PEER]
+    assert raw.send_calls == []
+
+
+@pytest.mark.parametrize(("error", "kind", "name"), WRITE_FAILURES, ids=WRITE_FAILURE_IDS)
+async def test_a_failure_at_the_start_of_typing_is_mapped_like_a_send(
+    error: Exception, kind: type[SendFailure], name: str
+) -> None:
+    with pytest.raises(kind) as caught:
+        await _adapter(_WriteRaw(enter_error=error)).show_typing(FAKE_TELEGRAM_ID, 1)
+
+    assert type(caught.value) is type(classify_failure(error))
+    assert caught.value.error_class == name
+    assert caught.value.__cause__ is None
+
+
+@pytest.mark.parametrize(("error", "kind", "name"), WRITE_FAILURES, ids=WRITE_FAILURE_IDS)
+async def test_a_failure_of_the_background_typing_request_surfaces_at_the_end_and_is_mapped(
+    error: Exception, kind: type[SendFailure], name: str
+) -> None:
+    with pytest.raises(kind) as caught:
+        await _adapter(_WriteRaw(exit_error=error)).show_typing(FAKE_TELEGRAM_ID, 1)
+
+    assert caught.value.error_class == name
+
+
+@pytest.mark.parametrize(("error", "kind", "name"), WRITE_FAILURES, ids=WRITE_FAILURE_IDS)
+async def test_a_read_mark_failure_is_mapped_like_a_send(
+    error: Exception, kind: type[SendFailure], name: str
+) -> None:
+    with pytest.raises(kind) as caught:
+        await _adapter(_WriteRaw(read_error=error)).mark_read(FAKE_TELEGRAM_ID)
+
+    assert caught.value.error_class == name
+    assert caught.value.__cause__ is None
+
+
+async def test_a_flood_wait_in_a_write_carries_its_seconds() -> None:
+    with pytest.raises(SendFloodWait) as caught:
+        await _adapter(_WriteRaw(read_error=FLOOD_IN_WRITE)).mark_read(FAKE_TELEGRAM_ID)
+
+    assert caught.value.seconds == 33
+
+
+@pytest.mark.parametrize("method", ["typing", "read"])
+async def test_an_unknown_peer_is_a_recipient_refusal_as_on_a_send(method: str) -> None:
+    raw = _WriteRaw(peer_error=ValueError("no such peer"))
+    adapter = _adapter(raw)
+
+    with pytest.raises(SendRejected) as caught:
+        if method == "typing":
+            await adapter.show_typing(FAKE_TELEGRAM_ID, 1)
+        else:
+            await adapter.mark_read(FAKE_TELEGRAM_ID)
+
+    assert caught.value.error_class == PEER_NOT_FOUND
+    assert caught.value.reason is RejectionReason.RECIPIENT
+    assert raw.action_calls == []
+    assert raw.read_calls == []
+
+
+async def test_a_flood_wait_while_resolving_the_peer_of_a_read_mark_is_a_flood_wait() -> None:
+    raw = _WriteRaw(peer_error=FLOOD_IN_WRITE)
+
+    with pytest.raises(SendFloodWait):
+        await _adapter(raw).mark_read(FAKE_TELEGRAM_ID)
+
+
+async def test_cancelling_a_held_typing_ends_it_and_is_not_swallowed() -> None:
+    raw = _WriteRaw()
+    adapter = TelethonAdapter(raw)
+
+    task = asyncio.create_task(adapter.show_typing(FAKE_TELEGRAM_ID, 3600))
+    await raw.typing_started.wait()
+    await asyncio.sleep(0)
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    assert raw.events == ["typing started", "typing stopped"]
+
+
+async def test_the_new_writes_log_nothing(caplog: pytest.LogCaptureFixture) -> None:
+    caplog.set_level(logging.DEBUG)
+    adapter = _adapter(_WriteRaw(read_error=ValueError("marker-value-zq")))
+
+    with pytest.raises(SendUncertain):
+        await adapter.mark_read(FAKE_TELEGRAM_ID)
+    await _adapter(_WriteRaw()).show_typing(FAKE_TELEGRAM_ID, 1)
+
+    assert caplog.text == ""
+
+
+def test_the_adapter_method_names_are_exactly_the_transport_methods() -> None:
+    assert set(typing.get_protocol_members(MessageTransport)) <= set(vars(TelethonAdapter))

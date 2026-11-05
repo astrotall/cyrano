@@ -35,7 +35,13 @@ from tests.conftest import (
 from tests.fake_app import CONNECTING_MARKER, HANGING_CONNECT_SCENARIO
 from tests.privacy import assert_absent
 from tests.services.fakes import FakeCardSender, InMemoryModes
-from tests.services.outbox_fakes import InMemoryOutbox, InMemorySenderState, ScriptedTransport
+from tests.services.outbox_fakes import (
+    ALWAYS_FREE_PROFILE,
+    InMemoryOutbox,
+    InMemoryScheduleProfiles,
+    InMemorySenderState,
+    ScriptedTransport,
+)
 from tests.userbot.fakes import (
     FAKE_SENDER_ID,
     FakeClient,
@@ -84,6 +90,10 @@ def repositories(monkeypatch: pytest.MonkeyPatch) -> Repositories:
     monkeypatch.setattr("cyrano.main.SqlModeRepository", lambda _: stored.modes)
     monkeypatch.setattr("cyrano.main.SqlOutboxRepository", lambda _: stored.outbox)
     monkeypatch.setattr("cyrano.main.SqlSenderStateRepository", lambda _: stored.sender_state)
+    monkeypatch.setattr(
+        "cyrano.main.SqlScheduleProfileRepository",
+        lambda _: InMemoryScheduleProfiles(ALWAYS_FREE_PROFILE),
+    )
     return stored
 
 

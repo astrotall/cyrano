@@ -1,4 +1,4 @@
-"""Contact statuses, message directions, LLM vocabulary, dialogue roles and outbox vocabulary."""
+"""Contact statuses, message directions, LLM, dialogue, outbox and schedule vocabulary."""
 
 from __future__ import annotations
 
@@ -74,3 +74,26 @@ class LimitWindow(StrEnum):
     MINUTE = "minute"
     HOUR = "hour"
     DAY = "day"
+
+
+class Weekday(StrEnum):
+    MON = "mon"
+    TUE = "tue"
+    WED = "wed"
+    THU = "thu"
+    FRI = "fri"
+    SAT = "sat"
+    SUN = "sun"
+
+
+class BlockKind(StrEnum):
+    NIGHT = "night"
+    BUSY = "busy"
+
+
+class PlanReason(StrEnum):
+    ONGOING = "ongoing"
+    DELAYED = "delayed"
+    POSTPONED_NIGHT = "postponed_night"
+    POSTPONED_BUSY = "postponed_busy"
+    EXHAUSTED = "exhausted"

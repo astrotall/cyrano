@@ -7,8 +7,13 @@ from tests.style_samples import REPO_ROOT, SAMPLE_EXAMPLES, SAMPLE_PERSONA, SAMP
 GITIGNORE = REPO_ROOT / ".gitignore"
 DOCKERIGNORE = REPO_ROOT / ".dockerignore"
 GUIDE = REPO_ROOT / ".claude" / "docs" / "persona-and-examples.md"
-IGNORED_PATTERNS = ("data/", "persona*.md", "style-examples*.json")
-SAMPLE_NEGATIONS = ("!examples/persona.sample.md", "!examples/style-examples.sample.json")
+SAMPLE_SCHEDULE = SAMPLES_DIR / "schedule.sample.json"
+IGNORED_PATTERNS = ("data/", "persona*.md", "style-examples*.json", "schedule*.json")
+SAMPLE_NEGATIONS = (
+    "!examples/persona.sample.md",
+    "!examples/style-examples.sample.json",
+    "!examples/schedule.sample.json",
+)
 GUIDE_NEGATION = "!.claude/docs/persona-and-examples.md"
 
 
@@ -51,7 +56,7 @@ def test_the_gitignore_keeps_real_files_out_and_lets_the_samples_in() -> None:
         assert pattern in lines
     for negation in (*SAMPLE_NEGATIONS, GUIDE_NEGATION):
         assert negation in lines
-        for pattern in ("persona*.md", "style-examples*.json"):
+        for pattern in ("persona*.md", "style-examples*.json", "schedule*.json"):
             assert lines.index(pattern) < lines.index(negation)
 
 
@@ -62,6 +67,7 @@ def test_the_negations_name_exactly_the_committed_files() -> None:
     assert negated == {
         str(SAMPLE_PERSONA.relative_to(REPO_ROOT)),
         str(SAMPLE_EXAMPLES.relative_to(REPO_ROOT)),
+        str(SAMPLE_SCHEDULE.relative_to(REPO_ROOT)),
         str(GUIDE.relative_to(REPO_ROOT)),
     }
     assert not any("*" in name for name in negated)

@@ -6,6 +6,8 @@ import typing
 from collections.abc import Iterator
 from pathlib import Path
 
+import pytest
+
 from cyrano.services.message_transport import MessageTransport
 from cyrano.services.owner_notifier import OwnerNotifier
 from cyrano.services.repositories import SenderStateRepository
@@ -18,9 +20,14 @@ USERBOT_PACKAGE = "userbot"
 BOT_PACKAGE = "bot"
 OWNER_CHAT_MODULES = {"bot/sender.py", "bot/notifier.py"}
 TRANSPORT_METHOD = "send_text"
+TYPING_METHOD = "show_typing"
+READ_METHOD = "mark_read"
+TRANSPORT_METHODS = frozenset({TRANSPORT_METHOD, TYPING_METHOD, READ_METHOD})
+ADAPTER_WRITE_METHODS = frozenset({"send_message", "send_read_acknowledge", "action"})
 RESCHEDULE_METHOD = "reschedule"
 FLOOD_WAIT_HANDLER = "_handle_flood_wait"
 LIMIT_HANDLER = "_hold_for_limit"
+OUTSIDE_HOURS_HANDLER = "_hold_outside_hours"
 PAUSE_METHOD = "pause_until"
 STOP_METHOD = "stop"
 RESUME_METHOD = "resume"
@@ -111,8 +118,8 @@ def _members(protocol: type) -> set[str]:
     return set(typing.get_protocol_members(protocol))
 
 
-def test_the_transport_has_exactly_one_method() -> None:
-    assert _members(MessageTransport) == {TRANSPORT_METHOD}
+def test_the_transport_has_exactly_three_methods() -> None:
+    assert _members(MessageTransport) == {"send_text", "show_typing", "mark_read"}
 
 
 def test_the_notifier_has_exactly_one_method() -> None:
@@ -132,30 +139,30 @@ def test_the_sender_calls_the_notifier_in_one_place_behind_the_deadline() -> Non
 def test_the_read_client_protocol_has_no_write_member() -> None:
     members = _members(UserbotClient)
 
-    assert TRANSPORT_METHOD not in members
+    assert members.isdisjoint(TRANSPORT_METHODS)
     assert "__call__" not in members
     assert {member for member in members if WRITE_LOOKING_MEMBER.match(member)} == set()
     assert members & TELETHON_WRITE_METHODS == set()
 
 
-def test_only_the_sender_calls_the_transport() -> None:
+@pytest.mark.parametrize("method", sorted(TRANSPORT_METHODS))
+def test_only_the_sender_calls_the_transport(method: str) -> None:
     callers = {
         name
         for name, tree in _modules()
-        if TRANSPORT_METHOD in _called_attributes(tree)
-        or TRANSPORT_METHOD in _names_passed_to_getattr(tree)
+        if method in _called_attributes(tree) or method in _names_passed_to_getattr(tree)
     }
 
     assert callers == {SENDER_MODULE}
 
 
-def test_only_the_adapter_and_the_protocol_define_a_send_text() -> None:
+@pytest.mark.parametrize("method", sorted(TRANSPORT_METHODS))
+def test_only_the_adapter_and_the_protocol_define_a_transport_method(method: str) -> None:
     definers = {
         name
         for name, tree in _modules()
         if any(
-            isinstance(node, ast.AsyncFunctionDef | ast.FunctionDef)
-            and node.name == TRANSPORT_METHOD
+            isinstance(node, ast.AsyncFunctionDef | ast.FunctionDef) and node.name == method
             for node in ast.walk(tree)
         )
     }
@@ -172,7 +179,21 @@ def test_only_the_adapter_uses_a_telethon_write_method() -> None:
         if used:
             users[name] = used
 
-    assert users == {ADAPTER_MODULE: {"send_message"}}
+    assert users == {ADAPTER_MODULE: set(ADAPTER_WRITE_METHODS), SENDER_MODULE: {READ_METHOD}}
+
+
+def test_the_sender_reaches_the_read_mark_only_through_the_transport() -> None:
+    tree = ast.parse((SOURCE_ROOT / SENDER_MODULE).read_text())
+    receivers = {
+        node.func.value.attr
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Attribute)
+        and node.func.attr in TRANSPORT_METHODS
+        and isinstance(node.func.value, ast.Attribute)
+    }
+
+    assert receivers == {"_transport"}
 
 
 def test_inside_the_bot_package_only_the_owner_chat_modules_send() -> None:
@@ -186,10 +207,20 @@ def test_inside_the_bot_package_only_the_owner_chat_modules_send() -> None:
     assert senders == OWNER_CHAT_MODULES
 
 
-def test_the_adapter_never_asks_for_a_write_beyond_send_message() -> None:
+def test_the_adapter_never_asks_for_a_write_beyond_its_three() -> None:
     tree = ast.parse((SOURCE_ROOT / ADAPTER_MODULE).read_text())
 
-    assert _telethon_write_uses(tree) == {"send_message"}
+    assert _telethon_write_uses(tree) == set(ADAPTER_WRITE_METHODS)
+
+
+def test_the_typing_action_and_the_read_acknowledge_are_used_only_by_the_adapter() -> None:
+    users = {
+        name
+        for name, tree in _modules()
+        if {"send_read_acknowledge", "action"} & _telethon_write_uses(tree)
+    }
+
+    assert users == {ADAPTER_MODULE}
 
 
 def test_telethon_requests_are_imported_only_by_the_adapter_and_only_from_the_allowlist() -> None:
@@ -263,14 +294,14 @@ def _callers_in_module(tree: ast.AST, attribute: str) -> set[str]:
     }
 
 
-def test_only_a_flood_wait_and_a_reached_limit_put_a_row_back_automatically() -> None:
+def test_only_a_flood_wait_a_reached_limit_and_a_closed_window_put_a_row_back() -> None:
     modules = {
         name: _callers_in_module(tree, RESCHEDULE_METHOD)
         for name, tree in _modules()
         if RESCHEDULE_METHOD in _called_attributes(tree)
     }
 
-    assert modules == {SENDER_MODULE: {FLOOD_WAIT_HANDLER, LIMIT_HANDLER}}
+    assert modules == {SENDER_MODULE: {FLOOD_WAIT_HANDLER, LIMIT_HANDLER, OUTSIDE_HOURS_HANDLER}}
 
 
 def test_the_state_repository_has_exactly_its_four_methods() -> None:
@@ -348,6 +379,9 @@ def test_the_scans_catch_what_they_look_for() -> None:
         "    await state.stop('FakeKind')\n"
         "    await state.pause_until(until, 'FakeKind', now=now)\n"
         "    await bot.stop()\n"
+        "    await client.send_read_acknowledge(1)\n"
+        "    await transport.show_typing(1, 2)\n"
+        "    await getattr(transport, 'mark_read')(1)\n"
     )
 
     assert {"send_file", "action", "send_message"} <= _telethon_write_uses(bad)
@@ -355,6 +389,9 @@ def test_the_scans_catch_what_they_look_for() -> None:
     assert "send_file" in _attributes_used(bad)
     assert "send_message" in _names_passed_to_getattr(bad)
     assert TRANSPORT_METHOD in _called_attributes(bad)
+    assert TYPING_METHOD in _called_attributes(bad)
+    assert READ_METHOD in _names_passed_to_getattr(bad)
+    assert "send_read_acknowledge" in _telethon_write_uses(bad)
     assert len(_calls_with_arguments(bad, STOP_METHOD)) == 1
     assert PAUSE_METHOD in _called_attributes(bad)
     assert ("telethon.tl.functions.messages", "SendMessageRequest") in set(_imported(bad))

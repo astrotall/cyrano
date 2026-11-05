@@ -109,6 +109,7 @@ class MessageRow(Base):
 
 PERSONA_ROW_ID = 1
 SENDER_STATE_ROW_ID = 1
+SCHEDULE_PROFILE_ROW_ID = 1
 
 
 class PersonaRow(Base):
@@ -196,6 +197,17 @@ class SenderStateRow(Base):
     pause_reason: Mapped[str | None] = mapped_column(Text)
     stopped: Mapped[bool] = mapped_column(Boolean, server_default=false())
     stop_reason: Mapped[str | None] = mapped_column(Text)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
+    )
+
+
+class ScheduleProfileRow(Base):
+    __tablename__ = "schedule_profile"
+    __table_args__ = (CheckConstraint(f"id = {SCHEDULE_PROFILE_ROW_ID}", name="single_row"),)
+
+    id: Mapped[int] = mapped_column(SmallInteger, primary_key=True, autoincrement=False)
+    data: Mapped[dict[str, object]] = mapped_column(JSONB)
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
     )

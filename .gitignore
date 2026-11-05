@@ -5,8 +5,10 @@ media/
 data/
 persona*.md
 style-examples*.json
+schedule*.json
 !examples/persona.sample.md
 !examples/style-examples.sample.json
+!examples/schedule.sample.json
 !.claude/docs/persona-and-examples.md
 
 .venv/

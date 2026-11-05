@@ -26,6 +26,7 @@ CANCEL_REASON_SEND_REJECTED = "send_rejected"
 ERROR_INTERRUPTED = "interrupted"
 ERROR_UNCERTAIN = "uncertain"
 ERROR_RATE_LIMITED = "rate_limited"
+ERROR_OUTSIDE_HOURS = "outside_hours"
 CAUSE_SEND_DEADLINE = "SendDeadlinePassed"
 
 ROW_STALE_AFTER_SECONDS = 6 * 3600

@@ -6,6 +6,7 @@ import argparse
 import asyncio
 import contextlib
 import logging
+import random
 import signal
 import sys
 from collections.abc import Callable, Sequence
@@ -24,6 +25,7 @@ from cyrano.db.repositories import (
     SqlModeRepository,
     SqlOutboxRepository,
     SqlPersonaRepository,
+    SqlScheduleProfileRepository,
     SqlSenderStateRepository,
     SqlStyleExampleRepository,
 )
@@ -47,9 +49,17 @@ from cyrano.reply_cli import (
     add_reply_preview_parser,
     reply_preview_request,
 )
+from cyrano.schedule_cli import (
+    ScheduleCommands,
+    ScheduleRequest,
+    ScheduleUsageError,
+    add_schedule_parser,
+    schedule_request,
+)
 from cyrano.services.card_actions import CardActions
 from cyrano.services.card_announcer import CardAnnouncer
 from cyrano.services.contact_events import InMemoryContactEvents
+from cyrano.services.humanization import HumanizationPlanner, ScheduleService
 from cyrano.services.intake import IntakeService
 from cyrano.services.llm_check import check_llm
 from cyrano.services.llm_client import LLMClient
@@ -59,6 +69,7 @@ from cyrano.services.persona_service import PersonaService
 from cyrano.services.profile_collector import ProfileCollector
 from cyrano.services.prompt_builder import PromptBuilder
 from cyrano.services.reply_generator import ReplyGenerator
+from cyrano.services.schedule_files import ScheduleImporter
 from cyrano.services.send_guard import SendGuard
 from cyrano.services.send_limiter import SendLimiter
 from cyrano.services.style_examples import ExampleSelector
@@ -81,6 +92,7 @@ EXIT_LLM_ERROR = 1
 EXIT_STYLE_ERROR = 1
 EXIT_REPLY_PREVIEW_ERROR = 1
 EXIT_OUTBOX_ERROR = 1
+EXIT_SCHEDULE_ERROR = 1
 LOGIN_CANCELLED_MESSAGE = "Login cancelled. Nothing was saved."
 POLLING_ENDED_REASON = "polling ended unexpectedly"
 STORAGE_FAILED_MESSAGE = "storage failed: {error}"
@@ -164,6 +176,7 @@ async def run(
         contacts,
         SqlSenderStateRepository(session_factory),
         SendLimiter(messages, settings),
+        ScheduleService(SqlScheduleProfileRepository(session_factory), settings.timezone),
         access.transport,
         control_bot.notifier,
         SendGuard(settings),
@@ -317,6 +330,27 @@ async def _run_outbox_command(settings: Settings, request: OutboxRequest) -> int
         await engine.dispose()
 
 
+async def _run_schedule_command(settings: Settings, request: ScheduleRequest) -> int:
+    engine = build_engine(settings)
+    session_factory = build_session_factory(engine)
+    profiles = SqlScheduleProfileRepository(session_factory)
+    service = ScheduleService(profiles, settings.timezone)
+    commands = ScheduleCommands(
+        ScheduleImporter(profiles),
+        service,
+        HumanizationPlanner(SqlMessageRepository(session_factory), service, random.SystemRandom()),
+        profiles,
+        clock=lambda: datetime.now(UTC),
+    )
+    try:
+        return await commands.run(request)
+    except (SQLAlchemyError, OSError) as exc:
+        print(STORAGE_FAILED_MESSAGE.format(error=type(exc).__name__), file=sys.stderr)
+        return EXIT_SCHEDULE_ERROR
+    finally:
+        await engine.dispose()
+
+
 def _parse_args(argv: Sequence[str] | None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(prog="python -m cyrano", description=__doc__)
     commands = parser.add_subparsers(dest="command")
@@ -325,6 +359,7 @@ def _parse_args(argv: Sequence[str] | None) -> argparse.Namespace:
     add_convert_parser(add_style_parsers(commands))
     add_reply_preview_parser(commands)
     add_outbox_parser(commands)
+    add_schedule_parser(commands)
     return parser.parse_args(argv)
 
 
@@ -339,6 +374,11 @@ def main(argv: Sequence[str] | None = None) -> int:
         print(exc, file=sys.stderr)
         return EXIT_OUTBOX_ERROR
     try:
+        schedule = schedule_request(args)
+    except ScheduleUsageError as exc:
+        print(exc, file=sys.stderr)
+        return EXIT_SCHEDULE_ERROR
+    try:
         settings = load_settings()
     except ConfigError as exc:
         print(exc, file=sys.stderr)
@@ -348,6 +388,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         return asyncio.run(_run_llm_check_command(settings))
     if outbox is not None:
         return asyncio.run(_run_outbox_command(settings, outbox))
+    if schedule is not None:
+        return asyncio.run(_run_schedule_command(settings, schedule))
     preview = reply_preview_request(args)
     if preview is not None:
         return asyncio.run(_run_reply_preview_command(settings, preview))

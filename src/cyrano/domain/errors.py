@@ -192,3 +192,23 @@ class SendFloodWait(SendFailure):
     def __init__(self, error_class: str, seconds: int) -> None:
         super().__init__(error_class)
         self.seconds = seconds
+
+
+class PlanNotPossible(DomainError):
+    def __init__(self, contact_id: int, message_id: int) -> None:
+        super().__init__(
+            f"message {message_id} of contact {contact_id} is not an incoming message "
+            "in the recent history"
+        )
+        self.contact_id = contact_id
+        self.message_id = message_id
+
+
+class StoredScheduleInvalid(DomainError):
+    def __init__(self) -> None:
+        super().__init__("the stored schedule profile is invalid; import it again")
+
+
+class ScheduleTimezoneUnresolved(DomainError):
+    def __init__(self) -> None:
+        super().__init__("the schedule profile has no time zone; read it through ScheduleService")

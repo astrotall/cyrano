@@ -11,6 +11,7 @@ from cyrano.domain.errors import OutboxRowNotFound, OutboxStateConflict
 from cyrano.domain.models import DEFAULT_MODE_NAME, Contact, ContactCreate
 from cyrano.domain.outbox import ScheduledMessage, SenderState, SentMessage
 from cyrano.domain.schedule import ScheduleProfile
+from cyrano.domain.stop_triggers import HandOverNotice
 from cyrano.services.humanization import ScheduleService
 
 FAKE_NOW = datetime(2025, 3, 4, 5, 6, 7, tzinfo=UTC)
@@ -181,6 +182,31 @@ class HangingManualPauseNotifier:
         self.cancelled = 0
 
     async def notify_manual_pause(self, contact_id: int) -> None:
+        self.calls += 1
+        try:
+            await asyncio.sleep(3600)
+        except asyncio.CancelledError:
+            self.cancelled += 1
+            raise
+
+
+class RecordingHandOverNotifier:
+    def __init__(self, error: Exception | None = None) -> None:
+        self.notices: list[HandOverNotice] = []
+        self._error = error
+
+    async def notify_hand_over(self, notice: HandOverNotice) -> None:
+        self.notices.append(notice)
+        if self._error is not None:
+            raise self._error
+
+
+class HangingHandOverNotifier:
+    def __init__(self) -> None:
+        self.calls = 0
+        self.cancelled = 0
+
+    async def notify_hand_over(self, notice: HandOverNotice) -> None:
         self.calls += 1
         try:
             await asyncio.sleep(3600)

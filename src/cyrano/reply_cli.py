@@ -27,6 +27,7 @@ PERSONAL_DATA_WARNING = "warning: the prompt below contains personal data; do no
 FAILURE_LINE = "reply-preview failed: {error}"
 FAILURE_HINT_LINE = "reply-preview failed: {error} ({hint})"
 PROMPT_MESSAGE_LABEL = "[{role}]"
+NEEDS_OWNER_LINE = "needs owner (model signal)"
 STATS_LINE = (
     "model={model} input_tokens={input_tokens} output_tokens={output_tokens} "
     "examples={examples_kept}/{examples_offered} messages={messages_kept}/{messages_offered} "
@@ -100,7 +101,7 @@ class ReplyPreviewCommand:
         except DomainError as exc:
             print(_failure_line(exc), file=sys.stderr)
             return EXIT_ERROR
-        print(reply.text)
+        print(NEEDS_OWNER_LINE if reply.needs_owner else reply.text)
         print(
             STATS_LINE.format(
                 model=self._model,

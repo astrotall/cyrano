@@ -225,13 +225,99 @@ async def test_revision_0006_creates_an_empty_table_and_downgrades_to_0005(
     assert SCHEDULE_PROFILE_TABLE in await _tables(database_url)
 
 
-async def test_revision_0007_is_the_head_and_follows_0006(alembic_config: Config) -> None:
+async def test_revision_0007_follows_0006(alembic_config: Config) -> None:
     script = ScriptDirectory.from_config(alembic_config)
 
-    assert script.get_heads() == ["0007"]
     revision = script.get_revision("0007")
     assert revision is not None
     assert revision.down_revision == "0006"
+
+
+async def test_revision_0008_is_the_head_and_follows_0007(alembic_config: Config) -> None:
+    script = ScriptDirectory.from_config(alembic_config)
+
+    assert script.get_heads() == ["0008"]
+    revision = script.get_revision("0008")
+    assert revision is not None
+    assert revision.down_revision == "0007"
+
+
+async def _check_definition(url: URL) -> str:
+    rows = await fetch_all(
+        url,
+        "SELECT pg_get_constraintdef(oid) FROM pg_constraint "
+        "WHERE conname = 'ck_contacts_pause_reason_allowed'",
+    )
+    [(definition,)] = rows
+    return str(definition)
+
+
+async def test_revision_0008_lets_the_check_accept_stop_trigger_and_keeps_the_rows(
+    database_url: URL, alembic_config: Config
+) -> None:
+    await asyncio.to_thread(command.upgrade, alembic_config, "0007")
+    await execute(
+        database_url,
+        "INSERT INTO contacts (tg_id, status, pause_reason) "  # noqa: S608
+        f"VALUES ({FAKE_TELEGRAM_ID}, 'paused', 'manual_message')",
+    )
+    with pytest.raises(DBAPIError, match="ck_contacts_pause_reason_allowed"):
+        await execute(
+            database_url,
+            "INSERT INTO contacts (tg_id, status, pause_reason) "  # noqa: S608
+            f"VALUES ({FAKE_TELEGRAM_ID + 1}, 'paused', 'stop_trigger')",
+        )
+
+    await asyncio.to_thread(command.upgrade, alembic_config, "0008")
+    await execute(
+        database_url,
+        "INSERT INTO contacts (tg_id, status, pause_reason) "  # noqa: S608
+        f"VALUES ({FAKE_TELEGRAM_ID + 1}, 'paused', 'stop_trigger')",
+    )
+
+    assert "stop_trigger" in await _check_definition(database_url)
+    assert await fetch_all(
+        database_url, "SELECT tg_id, pause_reason FROM contacts ORDER BY tg_id"
+    ) == [(FAKE_TELEGRAM_ID, "manual_message"), (FAKE_TELEGRAM_ID + 1, "stop_trigger")]
+
+
+async def test_revision_0008_downgrade_turns_stop_trigger_into_owner_and_restores_the_check(
+    database_url: URL, alembic_config: Config
+) -> None:
+    await asyncio.to_thread(command.upgrade, alembic_config, "head")
+    for offset, reason in enumerate(["stop_trigger", "manual_message", "stop_trigger"]):
+        await execute(
+            database_url,
+            "INSERT INTO contacts (tg_id, status, pause_reason) "  # noqa: S608
+            f"VALUES ({FAKE_TELEGRAM_ID + offset}, 'paused', '{reason}')",
+        )
+
+    await asyncio.to_thread(command.downgrade, alembic_config, "0007")
+
+    assert await fetch_all(
+        database_url, "SELECT tg_id, pause_reason FROM contacts ORDER BY tg_id"
+    ) == [
+        (FAKE_TELEGRAM_ID, "owner"),
+        (FAKE_TELEGRAM_ID + 1, "manual_message"),
+        (FAKE_TELEGRAM_ID + 2, "owner"),
+    ]
+    assert "stop_trigger" not in await _check_definition(database_url)
+    with pytest.raises(DBAPIError, match="ck_contacts_pause_reason_allowed"):
+        await execute(
+            database_url,
+            "INSERT INTO contacts (tg_id, status, pause_reason) "  # noqa: S608
+            f"VALUES ({FAKE_TELEGRAM_ID + 9}, 'paused', 'stop_trigger')",
+        )
+
+    await asyncio.to_thread(command.upgrade, alembic_config, "head")
+    assert "stop_trigger" in await _check_definition(database_url)
+
+
+async def test_the_check_matches_the_pause_reasons_of_the_domain(migrated_url: URL) -> None:
+    definition = await _check_definition(migrated_url)
+
+    for reason in PauseReason:
+        assert f"'{reason.value}'" in definition
 
 
 async def _pause_reason_columns(url: URL) -> list[tuple[object, ...]]:
@@ -295,7 +381,7 @@ async def test_the_check_refuses_an_unknown_pause_reason(migrated_url: URL) -> N
         await execute(
             migrated_url,
             "INSERT INTO contacts (tg_id, status, pause_reason) "  # noqa: S608
-            f"VALUES ({FAKE_TELEGRAM_ID}, 'paused', 'stop_trigger')",
+            f"VALUES ({FAKE_TELEGRAM_ID}, 'paused', 'not_a_reason')",
         )
 
 

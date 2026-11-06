@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from cyrano.domain.enums import TriggerClass
+
 START_TEXT = (
     "Привет! Я пульт управления Cyrano. Когда в аккаунт придёт новый контакт, "
     "я пришлю его карточку с кнопками."
@@ -43,6 +45,39 @@ MANUAL_PAUSE_NOTICE = (
 RESUME_BUTTON = "Возобновить автоответы"
 RESUMED_TEXT = "Автоответы для контакта #{contact_id} возобновлены."
 ALERT_RESUME_REFUSED = "Автоответы для этого контакта сейчас возобновить нельзя."
+
+HAND_OVER_TITLE = "Нужно ваше решение: контакт #{contact_id}"
+HAND_OVER_NAME = "Имя: {name}"
+HAND_OVER_PAUSED = (
+    "Разговор передан вам: автоответы для контакта приостановлены, запланированные ответы "
+    "отменены. Контакту ничего не отправлено."
+)
+HAND_OVER_REASON = "Причина: {classes}."
+HAND_OVER_SOURCE_TEXT = "Сработало по тексту сообщения контакта."
+HAND_OVER_SOURCE_MODEL = "Модель попросила передать разговор вам."
+HAND_OVER_NO_CLASSES = "тема, на которую ассистент не отвечает сам"
+HAND_OVER_LINES_TITLE = "Последние сообщения:"
+HAND_OVER_NO_LINES = "Сообщения недоступны."
+HAND_OVER_LINE = "{number}. {speaker}: {text}"
+HAND_OVER_SPEAKER_CONTACT = "Контакт"
+HAND_OVER_SPEAKER_OWNER = "Вы"
+HAND_OVER_EMPTY_TEXT = "[без текста]"
+HAND_OVER_DECIDE = "Ответьте контакту сами или выберите действие кнопкой."
+TRIGGER_CLASS_NAMES = {
+    TriggerClass.MEETING: "предложение встретиться",
+    TriggerClass.CONTACT_EXCHANGE: "обмен контактами или звонок",
+    TriggerClass.MONEY: "деньги",
+    TriggerClass.PHOTO: "фото или интимное",
+    TriggerClass.BOT_QUESTION: "вопрос, бот ли это",
+    TriggerClass.EXES: "бывшие и прошлые отношения",
+    TriggerClass.CRISIS: "кризисная тема (самоповреждение, суицид)",
+}
+TRIGGER_CLASS_SEPARATOR = ", "
+KEEP_BUTTON = "Оставить на паузе"
+HAND_OVER_IGNORE_BUTTON = "Игнорировать"
+KEPT_TEXT = "Контакт #{contact_id} оставлен на паузе."
+IGNORED_TEXT = "Контакт #{contact_id} теперь игнорируется: автоответов ему больше не будет."
+ALERT_IGNORE_REFUSED = "Этот контакт сейчас нельзя перевести в игнор."
 
 OUTBOX_INTERRUPTED = (
     "Отправка сообщения #{row_id} контакту #{contact_id} прервана ({error}). "

@@ -42,7 +42,7 @@ with a known trigger returns the row already stored, also when two calls race.
 | --- | --- | --- | --- |
 | (none) | `scheduled` | `OutboxService.enqueue` | Text and guard passed |
 | `scheduled` | `sending` | `claim_due` in the sender | The row is due |
-| `scheduled` | `cancelled` | `cancel_scheduled` (the owner's command), `cancel_pending_for_contact` (the sender after a recipient rejection, reason `send_rejected`; the manual-message detector, reason `manual_message`, CYR-21; later CYR-20) | |
+| `scheduled` | `cancelled` | `cancel_scheduled` (the owner's command), `cancel_pending_for_contact` (the sender after a recipient rejection, reason `send_rejected`; the manual-message detector, reason `manual_message`, CYR-21; the hand-over on a stop-trigger, reason `stop_trigger`, CYR-20) | |
 | `sending` | `sent` | `complete_send` in the sender | Telegram accepted the message |
 | `sending` | `scheduled` | `reschedule` in the sender | Flood wait, a reached limit or an autopilot row inside a window, and nothing else |
 | `sending` | `failed` | `mark_failed` in the sender | Certain refusal, account problem, unknown outcome, or `interrupted` |
@@ -447,8 +447,9 @@ and its internal id, because the command takes no contact argument.
 | Stop reminder | The sender is still stopped; sent every 6 h | The same as for the stop notice |
 | Stale summary | Rows were cancelled as `stale` instead of being sent hours late; the notice gives the count and up to 5 contact ids | Nothing is needed. `outbox list --state cancelled` shows them; enqueue again only what you still want sent |
 | Hourly or daily limit | Rows are postponed until a slot frees up; a row more than 6 h past its `due_at` is cancelled as `stale` when it comes back | Usually nothing. `outbox status` shows the counters. Raise the setting only if you mean it |
-| Contact paused after a rejection | This contact cannot be written to; the contact's queue is cancelled | Nothing is needed. The contact is stored as `paused` with the reason `send_rejected` (CYR-21); the Resume button exists only on the manual-pause notice, so the contact stays paused until the owner decides, and a general Resume is CYR-26 |
+| Contact paused after a rejection | This contact cannot be written to; the contact's queue is cancelled | Nothing is needed. The contact is stored as `paused` with the reason `send_rejected` (CYR-21); the Resume button exists only on the manual-pause and the hand-over notices, so the contact stays paused until the owner decides, and a general Resume is CYR-26 |
 | Contact paused by a manual message | You wrote to this contact by hand; the contact's scheduled rows are cancelled with the reason `manual_message` | Press «Возобновить автоответы» on the notice when you want automatic replies again. Nothing is sent before that |
+| Contact handed over on a stop-trigger | The contact wrote about a topic the assistant never answers itself (see [stop-triggers.md](stop-triggers.md)); the contact is paused and its scheduled rows are cancelled with the reason `stop_trigger` | Answer the contact yourself, then press «Возобновить автоответы», «Оставить на паузе» or «Игнорировать» on the notice. Nothing is sent before that |
 
 Any error prints one readable line and exits with 1, a bad command line included; an invalid
 configuration exits with 2 like every command. A text that starts with `-` goes after `--`. The text
@@ -467,4 +468,3 @@ its message, because PostgreSQL can quote row values in it.
 | --- | --- |
 | The autopilot: generating replies, asking the planner for the time and writing `autopilot` rows | CYR-17 |
 | Splitting a reply into several messages | CYR-36 |
-| Stop-triggers, which will use `cancel_pending_for_contact` | CYR-20 |

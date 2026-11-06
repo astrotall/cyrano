@@ -563,3 +563,170 @@ async def test_resume_logs_carry_only_the_internal_id_and_the_outcome(
     assert handled.__dict__["outcome"] == "applied"
     logged = "".join(f"{r.getMessage()} {r.__dict__}" for r in caplog.records)
     assert_absent(OWNER_ID, logged)
+
+
+HAND_OVER_NOTICE = "Нужно ваше решение: контакт #17"
+
+
+async def _stop_trigger_rig(**kwargs: object) -> Rig:
+    return await _rig(
+        status=ContactStatus.PAUSED,
+        mode_id=2,
+        pause_reason=PauseReason.STOP_TRIGGER,
+        **kwargs,  # type: ignore[arg-type]
+    )
+
+
+async def _press_pause(rig: Rig, action: PauseAction, **kwargs: object) -> None:
+    data = PauseCallback(action=action, contact_id=rig.contact.id).pack()
+    await rig.feed(callback_update(OWNER_ID, data, card_text=HAND_OVER_NOTICE, **kwargs))  # type: ignore[arg-type]
+
+
+async def test_resume_from_a_hand_over_notice_activates_and_clears_the_stop_trigger() -> None:
+    rig = await _stop_trigger_rig()
+
+    await _press_pause(rig, PauseAction.RESUME)
+
+    current = await rig.current()
+    assert (current.status, current.mode_id, current.pause_reason) == (
+        ContactStatus.ACTIVE,
+        2,
+        None,
+    )
+    [edit] = rig.session.calls_of(EditMessageText)
+    assert edit.text == messages.RESUMED_TEXT.format(contact_id=rig.contact.id)
+    assert edit.reply_markup is None
+    _assert_only_the_owner_is_addressed(rig.session)
+
+
+async def test_ignore_moves_the_paused_contact_to_ignored_and_edits_the_notice() -> None:
+    rig = await _stop_trigger_rig()
+
+    await _press_pause(rig, PauseAction.IGNORE)
+
+    current = await rig.current()
+    assert (current.status, current.pause_reason) == (ContactStatus.IGNORED, None)
+    [edit] = rig.session.calls_of(EditMessageText)
+    assert edit.text == messages.IGNORED_TEXT.format(contact_id=rig.contact.id)
+    assert edit.reply_markup is None
+    [answer] = rig.session.calls_of(AnswerCallbackQuery)
+    assert answer.text is None
+    _assert_only_the_owner_is_addressed(rig.session)
+
+
+async def test_a_double_click_on_ignore_changes_the_status_once_and_answers_both() -> None:
+    rig = await _stop_trigger_rig()
+
+    await _press_pause(rig, PauseAction.IGNORE)
+    await _press_pause(rig, PauseAction.IGNORE, update_id=3)
+
+    assert rig.contacts.status_changes == [(rig.contact.id, ContactStatus.IGNORED)]
+    assert len(rig.session.calls_of(EditMessageText)) == 2
+    assert [a.text for a in rig.session.calls_of(AnswerCallbackQuery)] == [None, None]
+
+
+@pytest.mark.parametrize("status", [ContactStatus.NEW, ContactStatus.PENDING, ContactStatus.ACTIVE])
+async def test_ignore_of_a_contact_that_is_not_paused_gets_an_alert_and_changes_nothing(
+    status: ContactStatus,
+) -> None:
+    rig = await _rig(status=status, mode_id=2)
+
+    await _press_pause(rig, PauseAction.IGNORE)
+
+    assert (await rig.current()).status is status
+    assert rig.contacts.status_changes == []
+    [answer] = rig.session.calls_of(AnswerCallbackQuery)
+    assert (answer.text, answer.show_alert) == (messages.ALERT_IGNORE_REFUSED, True)
+    assert rig.session.calls_of(EditMessageText) == []
+
+
+async def test_ignore_of_an_unknown_contact_gets_a_not_found_alert() -> None:
+    rig = await _stop_trigger_rig()
+    unknown = PauseCallback(action=PauseAction.IGNORE, contact_id=9999)
+
+    await rig.feed(callback_update(OWNER_ID, unknown.pack()))
+
+    [answer] = rig.session.calls_of(AnswerCallbackQuery)
+    assert (answer.text, answer.show_alert) == (messages.ALERT_NOT_FOUND, True)
+    assert (await rig.current()).status is ContactStatus.PAUSED
+
+
+async def test_keep_only_marks_the_notice_and_changes_nothing() -> None:
+    rig = await _stop_trigger_rig()
+    before = await rig.current()
+
+    await _press_pause(rig, PauseAction.KEEP)
+    await _press_pause(rig, PauseAction.KEEP, update_id=3)
+
+    assert await rig.current() == before
+    assert rig.contacts.status_changes == []
+    first, second = rig.session.calls_of(EditMessageText)
+    assert first.text == second.text == messages.KEPT_TEXT.format(contact_id=rig.contact.id)
+    assert first.reply_markup is None
+    assert [a.text for a in rig.session.calls_of(AnswerCallbackQuery)] == [None, None]
+    _assert_only_the_owner_is_addressed(rig.session)
+
+
+async def test_keep_on_an_unknown_contact_changes_nothing_and_is_answered() -> None:
+    rig = await _stop_trigger_rig()
+    unknown = PauseCallback(action=PauseAction.KEEP, contact_id=9999)
+
+    await rig.feed(callback_update(OWNER_ID, unknown.pack()))
+
+    assert rig.contacts.status_changes == []
+    assert len(rig.session.calls_of(AnswerCallbackQuery)) == 1
+
+
+@pytest.mark.parametrize("action", list(PauseAction))
+async def test_a_pause_button_from_a_stranger_changes_nothing_and_is_not_answered(
+    action: PauseAction,
+) -> None:
+    rig = await _stop_trigger_rig()
+    data = PauseCallback(action=action, contact_id=rig.contact.id).pack()
+
+    await rig.feed(callback_update(STRANGER_ID, data, chat_id=STRANGER_ID))
+
+    assert rig.session.calls == []
+    assert (await rig.current()).status is ContactStatus.PAUSED
+    assert rig.contacts.status_changes == []
+
+
+@pytest.mark.parametrize("action", list(PauseAction))
+async def test_a_failing_pause_action_is_always_answered_with_the_failure_alert(
+    action: PauseAction,
+) -> None:
+    class _Broken(InMemoryContacts):
+        async def get_by_id(self, contact_id: int) -> Contact | None:
+            raise RuntimeError("fake storage failure")
+
+    session = RecordingSession(
+        {EditMessageText: [TelegramBadRequest(EditMessageText(text="x"), "fake")]}
+    )
+    rig = await _stop_trigger_rig(contacts=_Broken(), session=session)
+
+    await _press_pause(rig, action)
+
+    [answer] = rig.session.calls_of(AnswerCallbackQuery)
+    if action is PauseAction.KEEP:
+        assert answer.text is None
+    else:
+        assert (answer.text, answer.show_alert) == (messages.ALERT_FAILED, True)
+
+
+async def test_pause_button_logs_carry_only_the_id_the_action_and_the_outcome(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    rig = await _stop_trigger_rig()
+
+    with caplog.at_level(logging.DEBUG):
+        await _press_pause(rig, PauseAction.KEEP)
+        await _press_pause(rig, PauseAction.IGNORE, update_id=3)
+
+    handled = [r for r in caplog.records if r.getMessage() == "pause button handled"]
+    assert [(r.__dict__["action"], r.__dict__["outcome"]) for r in handled] == [
+        ("keep", "kept"),
+        ("ignore", "applied"),
+    ]
+    logged = "".join(f"{r.getMessage()} {r.__dict__}" for r in caplog.records)
+    assert_absent(OWNER_ID, logged)
+    assert HAND_OVER_NOTICE not in logged

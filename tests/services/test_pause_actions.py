@@ -16,7 +16,14 @@ from cyrano.db.repositories import (
     SqlSenderStateRepository,
 )
 from cyrano.db.session import SessionFactory
-from cyrano.domain.enums import ContactStatus, OutboxSource, OutboxState, PauseReason, ResumeOutcome
+from cyrano.domain.enums import (
+    ContactStatus,
+    IgnoreOutcome,
+    OutboxSource,
+    OutboxState,
+    PauseReason,
+    ResumeOutcome,
+)
 from cyrano.domain.errors import InvalidStatusTransition
 from cyrano.domain.models import Contact, StatusChange
 from cyrano.domain.outbox import REFUSED_CONTACT_NOT_ACTIVE
@@ -226,3 +233,124 @@ async def test_after_a_resume_the_sender_guard_allows_sending_again(
     assert sent is not None
     assert sent.state is OutboxState.SENT
     assert transport.calls == [(paused.tg_id, QUEUED_TEXT)]
+
+
+async def _paused_by_stop_trigger(
+    contacts: SqlContactRepository, modes: SqlModeRepository
+) -> Contact:
+    contact = await _contact(contacts, modes, ContactStatus.ACTIVE)
+    await contacts.set_status(
+        contact.id, ContactStatus.PAUSED, pause_reason=PauseReason.STOP_TRIGGER
+    )
+    found = await contacts.get_by_id(contact.id)
+    assert found is not None
+    return found
+
+
+async def test_resume_after_a_stop_trigger_activates_and_clears_the_reason(
+    actions: PauseActions, contacts: SqlContactRepository, modes: SqlModeRepository
+) -> None:
+    paused = await _paused_by_stop_trigger(contacts, modes)
+
+    outcome = await actions.resume(paused.id)
+
+    assert outcome is ResumeOutcome.APPLIED
+    resumed = await contacts.get_by_id(paused.id)
+    assert resumed is not None
+    assert (resumed.status, resumed.mode_id, resumed.pause_reason) == (
+        ContactStatus.ACTIVE,
+        paused.mode_id,
+        None,
+    )
+
+
+@pytest.mark.parametrize(
+    "reason", [PauseReason.STOP_TRIGGER, PauseReason.MANUAL_MESSAGE, PauseReason.SEND_REJECTED]
+)
+async def test_ignore_moves_a_paused_contact_to_ignored_and_clears_the_reason(
+    actions: PauseActions,
+    contacts: SqlContactRepository,
+    modes: SqlModeRepository,
+    reason: PauseReason,
+) -> None:
+    contact = await _contact(contacts, modes, ContactStatus.ACTIVE)
+    await contacts.set_status(contact.id, ContactStatus.PAUSED, pause_reason=reason)
+
+    outcome = await actions.ignore(contact.id)
+
+    assert outcome is IgnoreOutcome.APPLIED
+    ignored = await contacts.get_by_id(contact.id)
+    assert ignored is not None
+    assert (ignored.status, ignored.pause_reason) == (ContactStatus.IGNORED, None)
+
+
+async def test_a_second_ignore_is_already_applied_and_changes_nothing(
+    actions: PauseActions, contacts: SqlContactRepository, modes: SqlModeRepository
+) -> None:
+    paused = await _paused_by_stop_trigger(contacts, modes)
+    await actions.ignore(paused.id)
+    before = await contacts.get_by_id(paused.id)
+
+    outcome = await actions.ignore(paused.id)
+
+    assert outcome is IgnoreOutcome.ALREADY_APPLIED
+    assert await contacts.get_by_id(paused.id) == before
+
+
+@pytest.mark.parametrize("status", [ContactStatus.NEW, ContactStatus.PENDING, ContactStatus.ACTIVE])
+async def test_ignore_is_refused_for_a_contact_that_is_not_paused(
+    actions: PauseActions,
+    contacts: SqlContactRepository,
+    modes: SqlModeRepository,
+    status: ContactStatus,
+) -> None:
+    contact = await _contact(contacts, modes, status)
+
+    outcome = await actions.ignore(contact.id)
+
+    assert outcome is IgnoreOutcome.REFUSED
+    assert await contacts.get_by_id(contact.id) == contact
+
+
+async def test_ignore_of_a_missing_contact_is_not_found(actions: PauseActions) -> None:
+    assert await actions.ignore(MISSING_ID) is IgnoreOutcome.NOT_FOUND
+
+
+async def test_a_refused_transition_during_the_ignore_is_refused(
+    contacts: SqlContactRepository, modes: SqlModeRepository
+) -> None:
+    paused = await _paused_by_stop_trigger(contacts, modes)
+
+    class _Raced(SqlContactRepository):
+        async def set_status(
+            self,
+            contact_id: int,
+            status: ContactStatus,
+            *,
+            mode_id: int | None = None,
+            pause_reason: PauseReason | None = None,
+        ) -> StatusChange:
+            raise InvalidStatusTransition(ContactStatus.IGNORED, status)
+
+    outcome = await PauseActions(_Raced(contacts._session_factory)).ignore(paused.id)
+
+    assert outcome is IgnoreOutcome.REFUSED
+
+
+async def test_simultaneous_ignore_clicks_apply_once(
+    actions: PauseActions, contacts: SqlContactRepository, modes: SqlModeRepository
+) -> None:
+    paused = await _paused_by_stop_trigger(contacts, modes)
+
+    outcomes = await asyncio.gather(*(actions.ignore(paused.id) for _ in range(5)))
+
+    assert sorted(outcomes) == sorted([IgnoreOutcome.APPLIED] + [IgnoreOutcome.ALREADY_APPLIED] * 4)
+
+
+async def test_an_ignored_contact_cannot_be_resumed(
+    actions: PauseActions, contacts: SqlContactRepository, modes: SqlModeRepository
+) -> None:
+    paused = await _paused_by_stop_trigger(contacts, modes)
+    await actions.ignore(paused.id)
+
+    assert await actions.resume(paused.id) is ResumeOutcome.REFUSED

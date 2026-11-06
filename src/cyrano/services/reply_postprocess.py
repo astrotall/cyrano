@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import re
+import string
 
 from cyrano.domain.errors import ReplyInvalid
 from cyrano.domain.reply import (
@@ -11,7 +12,7 @@ from cyrano.domain.reply import (
     REPLY_HEADER_REASON,
     REPLY_MAX_CHARS,
 )
-from cyrano.prompts.texts import DIALOGUE_BOUNDARY, LAYER_HEADERS
+from cyrano.prompts.texts import DIALOGUE_BOUNDARY, LAYER_HEADERS, NEEDS_OWNER_SIGNAL
 
 QUOTE_PAIRS = (('"', '"'), ("“", "”"), ("«", "»"))
 SPEAKER_NAMES = ("Me", "Я", "Assistant", "Ответ")
@@ -32,6 +33,12 @@ SENTENCE_END = re.compile(r"[.!?…]+[\"'”»)]*(?=\s)")
 LINE_BREAK = "\n"
 WINDOWS_LINE_BREAK = "\r\n"
 OLD_MAC_LINE_BREAK = "\r"
+SIGNAL_WORD_SEPARATOR = "_"
+NEEDS_OWNER_ANYWHERE = re.compile(
+    r"[\s_\-]?".join(re.escape(part) for part in NEEDS_OWNER_SIGNAL.split(SIGNAL_WORD_SEPARATOR)),
+    re.IGNORECASE,
+)
+SIGNAL_WRAPPERS = string.whitespace + string.punctuation + "«»“”„‘’…"
 
 
 def _unwrap_quotes(text: str) -> tuple[str, bool]:
@@ -91,6 +98,14 @@ def _leak_reason(text: str) -> str | None:
     if any(header in text for header in LAYER_HEADERS):
         return REPLY_HEADER_REASON
     return None
+
+
+def is_bare_needs_owner(raw: str) -> bool:
+    return raw.strip(SIGNAL_WRAPPERS).casefold() == NEEDS_OWNER_SIGNAL.casefold()
+
+
+def contains_needs_owner(raw: str) -> bool:
+    return NEEDS_OWNER_ANYWHERE.search(raw) is not None
 
 
 def clean_reply(raw: str, limit: int = REPLY_MAX_CHARS) -> str:

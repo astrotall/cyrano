@@ -58,6 +58,7 @@ select = [
 "src/cyrano/services/humanization.py" = ["S311"]  # the night boundaries are deterministic per date, not a secret
 "src/cyrano/bot/messages.py" = ["RUF001"]  # the owner-facing texts are Russian
 "src/cyrano/services/reply_postprocess.py" = ["RUF001"]  # the speaker prefixes and quotes are not ASCII
+"src/cyrano/stop_trigger_patterns.py" = ["RUF001"]  # the stop-trigger patterns are Russian
 
 [tool.mypy]
 python_version = "3.14"

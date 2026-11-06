@@ -1,16 +1,19 @@
-"""Plain notifications to the owner chat, the only chat this module can address."""
+"""Notifications to the owner chat, the only chat this module can address."""
 
 from __future__ import annotations
 
 import logging
 
 from aiogram import Bot
+from aiogram.enums import ParseMode
 from aiogram.exceptions import TelegramAPIError
 from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 
 from cyrano.bot import messages
 from cyrano.bot.callbacks import PauseAction, PauseCallback
+from cyrano.bot.rendering import hand_over_keyboard, render_hand_over
 from cyrano.domain.enums import LimitScope, LimitWindow
+from cyrano.domain.stop_triggers import HandOverNotice
 from cyrano.services.outbox_sender import SenderNotices
 
 logger = logging.getLogger("cyrano.bot.notifier")
@@ -64,3 +67,20 @@ class TelegramManualPauseNotifier:
             )
         except TelegramAPIError as exc:
             logger.warning("manual pause notice was not sent", extra={"error": type(exc).__name__})
+
+
+class TelegramHandOverNotifier:
+    def __init__(self, bot: Bot, owner_id: int) -> None:
+        self._bot = bot
+        self._owner_id = owner_id
+
+    async def notify_hand_over(self, notice: HandOverNotice) -> None:
+        try:
+            await self._bot.send_message(
+                chat_id=self._owner_id,
+                text=render_hand_over(notice),
+                parse_mode=ParseMode.HTML,
+                reply_markup=hand_over_keyboard(notice.contact_id),
+            )
+        except TelegramAPIError as exc:
+            logger.warning("hand-over notice was not sent", extra={"error": type(exc).__name__})

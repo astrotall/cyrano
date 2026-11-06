@@ -31,7 +31,9 @@ and account-level stop (CYR-22) and the humanization (CYR-18: the send time plan
 app yet, the schedule profile, and the read mark, typing and availability check in the sender) exist.
 and the pause on a manual message
 of the owner (CYR-21: the outgoing handler and the detector in the running app, the notice with its Resume
-button). Everything
+button) and the stop-triggers (CYR-20: the detector and the hand-over on incoming messages in the
+running app, the notice with its three buttons, the `NEEDS_OWNER` model signal in the generator, not
+used by the app yet, and the `stop-check` command). Everything
 else is planned and marked with its ticket key.
 Never describe planned behaviour as existing.
 
@@ -77,22 +79,24 @@ Changing any of these is a large change (see Workflow expectations). Reasons:
 .
 ├── CLAUDE.md, CONTRIBUTING.md, README.md
 ├── pyproject.toml, uv.lock, .python-version
-├── Makefile                      includes login, login-docker, llm-check, persona-import, examples-import, examples-stats, examples-convert, reply-preview, outbox-enqueue, outbox-list, outbox-cancel, outbox-retry, outbox-status, outbox-resume, schedule-import, schedule-show, schedule-check, schedule-plan and setup-hooks
+├── Makefile                      includes login, login-docker, llm-check, persona-import, examples-import, examples-stats, examples-convert, reply-preview, outbox-enqueue, outbox-list, outbox-cancel, outbox-retry, outbox-status, outbox-resume, schedule-import, schedule-show, schedule-check, schedule-plan, stop-check and setup-hooks
 ├── Dockerfile, docker-compose.yml, docker-compose.override.yml
 ├── .env.example, .dockerignore, .gitignore
 ├── alembic.ini
 ├── migrations/                   async env.py, versions/
 ├── examples/                     invented sample persona, style examples and schedule (real files go to data/)
-├── .claude/docs/                 architecture, contact-lifecycle, safety-rules, decisions, persona-and-examples, reply-generation, outbox-and-sender, humanization
+├── .claude/docs/                 architecture, contact-lifecycle, safety-rules, decisions, persona-and-examples, reply-generation, outbox-and-sender, humanization, stop-triggers
 ├── .githooks/                    pre-commit (runs make check and make test; enabled by make setup-hooks)
 ├── .github/                      dependabot.yml, workflows/ci.yml
 ├── src/cyrano/
-│   ├── __main__.py, main.py      entrypoint (composition root), signals, heartbeat, subcommands login, llm-check, persona (import, show), examples (import, stats, convert), reply-preview, outbox (enqueue, list, cancel, retry, status, resume), schedule (import, show, check, plan)
+│   ├── __main__.py, main.py      entrypoint (composition root), signals, heartbeat, subcommands login, llm-check, persona (import, show), examples (import, stats, convert), reply-preview, outbox (enqueue, list, cancel, retry, status, resume), schedule (import, show, check, plan), stop-check
 │   ├── style_cli.py              the persona and examples commands
 │   ├── convert_cli.py            the examples convert command (chat export to a draft)
 │   ├── reply_cli.py              the reply-preview command
 │   ├── outbox_cli.py             the outbox enqueue, list, cancel, retry, status and resume commands
 │   ├── schedule_cli.py           the schedule import, show, check and plan commands
+│   ├── stop_check_cli.py         the stop-check command (a dry run of the detector)
+│   ├── stop_trigger_patterns.py  the stop-trigger pattern data (imports only domain)
 │   ├── config.py                 Settings, load_settings, ConfigError
 │   ├── logging.py                JSON-lines logging
 │   ├── health.py                 heartbeat file and the app healthcheck
@@ -104,7 +108,8 @@ Changing any of these is a large change (see Workflow expectations). Reasons:
 │   │                             style_examples, chat_export_reader, chat_redaction, chat_dialogues,
 │   │                             chat_export_converter, contact_facts, prompt_builder,
 │   │                             reply_postprocess, reply_generator, send_guard, send_limiter, outbox_service, outbox_sender,
-│   │                             message_transport, owner_notifier, humanization, schedule_files; the rest is planned
+│   │                             message_transport, owner_notifier, humanization, schedule_files, stop_triggers,
+│   │                             hand_over, hand_over_notifier; the rest is planned
 │   ├── userbot/                  Telethon: protocols, filters, handler, client, adapter, login, runner, errors,
 │   │                             profile_source, leomatch_source, leomatch_match
 │   ├── bot/                      aiogram: app, middleware, handlers, rendering, callbacks, sender, notifier, messages, errors
@@ -216,6 +221,19 @@ now storing `send_rejected`, `MessageRepository.exists`, `OutboxRepository.has_s
 `IncomingEvent` gained the read members `chat_id` and `get_chat`), `TelegramManualPauseNotifier` in
 `bot/notifier.py`, the `PauseCallback` and the resume handler, the new owner texts, the wiring in `main.py`,
 and the tests, with the new scans in `tests/test_one_sender.py`.
+CYR-20 added the stop-triggers: the `TriggerClass`, `TriggerSource`, `HandOverOutcome` and `IgnoreOutcome`
+enums, `PauseReason.STOP_TRIGGER` and `CANCEL_REASON_STOP_TRIGGER`, migration `0008` (the check constraint
+on `contacts.pause_reason` accepts `stop_trigger`; the downgrade turns it into `owner`),
+`domain/stop_triggers.py` (`StopDecision`, `DialogueLine`, `HandOverNotice`, the limits),
+`stop_trigger_patterns.py` (the pattern data), `services/stop_triggers.py` (the pure detector),
+`services/hand_over.py` (`HandOverService`) and `hand_over_notifier.py` (the one-method `HandOverNotifier`
+Protocol), the gate in `IntakeService` (the optional `hand_over` keyword), `PauseActions.ignore`, the
+`NEEDS_OWNER_SIGNAL` instruction in `prompts/texts.py`, `GeneratedReply.needs_owner` and the signal check in
+`reply_postprocess.py` and `reply_generator.py`, the `needs owner (model signal)` line of `reply-preview`,
+`TelegramHandOverNotifier` with the notice rendering and the keep and ignore buttons, the new owner texts,
+the wiring in `main.py` (the control bot is built before the intake), `stop_check_cli.py` with the
+`stop-check` command and its Makefile target, and the tests, with the phrase lists in
+`tests/services/stop_trigger_phrases.py` and the new scans in `tests/test_one_sender.py`.
 
 ## Detailed guides
 
@@ -234,6 +252,9 @@ and the tests, with the new scans in `tests/test_one_sender.py`.
   commands, what is not built yet.
 - [humanization.md](.claude/docs/humanization.md): the schedule profile, the planner rules with worked
   examples, the pre-send sequence, the safety net, the commands.
+- [stop-triggers.md](.claude/docs/stop-triggers.md): the stop-trigger classes, the normalisation and the
+  pattern syntax, where it is checked, the model signal, the hand-over, the notice and its buttons,
+  `stop-check`, the known false positives and limits.
 - [decisions.md](.claude/docs/decisions.md): what is decided and why; open questions.
 - [CONTRIBUTING.md](CONTRIBUTING.md): branches, commits, Jira, pull requests, checks.
 

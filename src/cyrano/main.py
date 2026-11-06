@@ -59,6 +59,7 @@ from cyrano.schedule_cli import (
 from cyrano.services.card_actions import CardActions
 from cyrano.services.card_announcer import CardAnnouncer
 from cyrano.services.contact_events import InMemoryContactEvents
+from cyrano.services.hand_over import HandOverService
 from cyrano.services.humanization import HumanizationPlanner, ScheduleService
 from cyrano.services.intake import IntakeService
 from cyrano.services.llm_check import check_llm
@@ -76,6 +77,13 @@ from cyrano.services.send_guard import SendGuard
 from cyrano.services.send_limiter import SendLimiter
 from cyrano.services.style_examples import ExampleSelector
 from cyrano.services.style_import import ExamplesImporter, PersonaImporter
+from cyrano.stop_check_cli import (
+    StopCheckCommands,
+    StopCheckUsageError,
+    add_stop_check_parser,
+    run_text_check,
+    stop_check_request,
+)
 from cyrano.style_cli import StyleCommands, StyleRequest, add_style_parsers, style_request
 from cyrano.userbot.client import UserbotAccess, build_access, ensure_session_exists
 from cyrano.userbot.errors import UserbotError
@@ -95,6 +103,7 @@ EXIT_STYLE_ERROR = 1
 EXIT_REPLY_PREVIEW_ERROR = 1
 EXIT_OUTBOX_ERROR = 1
 EXIT_SCHEDULE_ERROR = 1
+EXIT_STOP_CHECK_ERROR = 1
 LOGIN_CANCELLED_MESSAGE = "Login cancelled. Nothing was saved."
 POLLING_ENDED_REASON = "polling ended unexpectedly"
 STORAGE_FAILED_MESSAGE = "storage failed: {error}"
@@ -160,8 +169,9 @@ async def run(
     new_contacts = InMemoryContactEvents[NewContactEvent]()
     ready_contacts = InMemoryContactEvents[ContactReadyEvent]()
     outbox = SqlOutboxRepository(session_factory)
-    intake = IntakeService(contacts, messages, new_contacts)
     control_bot = ControlBot(settings, CardActions(contacts, modes), PauseActions(contacts))
+    hand_over = HandOverService(contacts, messages, outbox, control_bot.hand_over_notifier)
+    intake = IntakeService(contacts, messages, new_contacts, hand_over=hand_over)
     detector = ManualMessageDetector(contacts, messages, outbox, control_bot.manual_pause_notifier)
     access = client_factory(settings)
     client = access.client
@@ -355,6 +365,21 @@ async def _run_schedule_command(settings: Settings, request: ScheduleRequest) ->
         await engine.dispose()
 
 
+async def _run_stop_check_command(settings: Settings, contact_id: int) -> int:
+    engine = build_engine(settings)
+    session_factory = build_session_factory(engine)
+    commands = StopCheckCommands(
+        SqlContactRepository(session_factory), SqlMessageRepository(session_factory)
+    )
+    try:
+        return await commands.run_contact(contact_id)
+    except (SQLAlchemyError, OSError) as exc:
+        print(STORAGE_FAILED_MESSAGE.format(error=type(exc).__name__), file=sys.stderr)
+        return EXIT_STOP_CHECK_ERROR
+    finally:
+        await engine.dispose()
+
+
 def _parse_args(argv: Sequence[str] | None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(prog="python -m cyrano", description=__doc__)
     commands = parser.add_subparsers(dest="command")
@@ -364,6 +389,7 @@ def _parse_args(argv: Sequence[str] | None) -> argparse.Namespace:
     add_reply_preview_parser(commands)
     add_outbox_parser(commands)
     add_schedule_parser(commands)
+    add_stop_check_parser(commands)
     return parser.parse_args(argv)
 
 
@@ -383,6 +409,13 @@ def main(argv: Sequence[str] | None = None) -> int:
         print(exc, file=sys.stderr)
         return EXIT_SCHEDULE_ERROR
     try:
+        stop_check = stop_check_request(args)
+    except StopCheckUsageError as exc:
+        print(exc, file=sys.stderr)
+        return EXIT_STOP_CHECK_ERROR
+    if stop_check is not None and stop_check.text is not None:
+        return run_text_check(stop_check.text)
+    try:
         settings = load_settings()
     except ConfigError as exc:
         print(exc, file=sys.stderr)
@@ -394,6 +427,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         return asyncio.run(_run_outbox_command(settings, outbox))
     if schedule is not None:
         return asyncio.run(_run_schedule_command(settings, schedule))
+    if stop_check is not None and stop_check.contact_id is not None:
+        return asyncio.run(_run_stop_check_command(settings, stop_check.contact_id))
     preview = reply_preview_request(args)
     if preview is not None:
         return asyncio.run(_run_reply_preview_command(settings, preview))

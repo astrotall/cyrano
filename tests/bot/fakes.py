@@ -28,7 +28,11 @@ from cyrano.services.card_actions import CardActions
 from cyrano.services.pause_actions import PauseActions
 from tests.privacy import FAKE_OWNER_TELEGRAM_ID, FAKE_STRANGER_TELEGRAM_ID
 from tests.services.fakes import FakeCardSender
-from tests.services.outbox_fakes import RecordingManualPauseNotifier, RecordingNotifier
+from tests.services.outbox_fakes import (
+    RecordingHandOverNotifier,
+    RecordingManualPauseNotifier,
+    RecordingNotifier,
+)
 
 OWNER_ID = FAKE_OWNER_TELEGRAM_ID
 STRANGER_ID = FAKE_STRANGER_TELEGRAM_ID
@@ -193,6 +197,7 @@ class FakeControlBot:
         self.sender = sender if sender is not None else FakeCardSender()
         self.notifier = RecordingNotifier()
         self.manual_pause_notifier = RecordingManualPauseNotifier()
+        self.hand_over_notifier = RecordingHandOverNotifier()
         self._poll_error = poll_error
         self._poll_returns = poll_returns
 

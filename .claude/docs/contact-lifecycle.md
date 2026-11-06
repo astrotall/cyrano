@@ -21,8 +21,8 @@ automatically yet.
 | `new` | Registered by the userbot from an unknown sender | Never | userbot (CYR-10, exists) |
 | `pending` | A card was delivered to the owner, waiting for a decision | No | card announcer (CYR-12, exists) |
 | `active` | The owner pressed Reply and chose a mode | Yes, via the sender only (the sender exists, CYR-19; the autopilot is CYR-17, so nothing replies automatically yet) | owner (CYR-12 exists, modes CYR-15) |
-| `paused` | Stopped by Telegram refusing to deliver to the contact, by a stop-trigger, by a manual message of the owner, by two unanswered proactive messages, or by the owner. The column `pause_reason` says which | No | sender (CYR-22, exists), manual-message detector (CYR-21, exists), system (CYR-20, CYR-23) or owner |
-| `ignored` | The owner pressed Ignore | Never; silence forever | owner (CYR-12, exists) |
+| `paused` | Stopped by Telegram refusing to deliver to the contact, by a stop-trigger, by a manual message of the owner, by two unanswered proactive messages, or by the owner. The column `pause_reason` says which | No | sender (CYR-22, exists), manual-message detector (CYR-21, exists), hand-over on a stop-trigger (CYR-20, exists), system (CYR-23) or owner |
+| `ignored` | The owner pressed Ignore on the card or on the hand-over notice | Never; silence forever | owner (CYR-12, CYR-20, exist) |
 
 Only `active` is allowed to receive an automatic reply. See [S1](safety-rules.md).
 
@@ -40,13 +40,13 @@ The triggers marked "exists" are implemented; the others are planned. Changing t
 | `pending` | `active` | Owner presses Reply and chooses a mode | owner, through the card | CYR-12 (exists), modes CYR-15 |
 | `pending` | `ignored` | Owner presses Ignore | owner, through the card | CYR-12 (exists) |
 | `active` | `paused` | Telegram refused a send because of the recipient (blocked, privacy, deactivated, not found, forbidden) | sender | CYR-22 (exists) |
-| `active` | `paused` | A stop-trigger fires | system | CYR-20 |
+| `active` | `paused` | A stop-trigger fires on a new incoming message (`pause_reason = stop_trigger`) | `HandOverService` | CYR-20 (exists) |
 | `active` | `paused` | The owner writes a manual message in the chat from the second account | manual-message detector | CYR-21 (exists) |
 | `active` | `paused` | Two proactive messages in a row stay unanswered | system | CYR-23 |
 | `active` | `paused` | The owner pauses the contact | owner | none yet |
 | `active` | `ignored` | The owner ignores the contact | owner | none yet |
-| `paused` | `active` | Owner presses Resume on the manual-pause notice | owner, through `PauseActions` | CYR-21 (exists) |
-| `paused` | `ignored` | The owner ignores the contact | owner | none yet |
+| `paused` | `active` | Owner presses Resume on the manual-pause or the hand-over notice | owner, through `PauseActions` | CYR-21, CYR-20 (exist) |
+| `paused` | `ignored` | Owner presses Ignore on the hand-over notice | owner, through `PauseActions.ignore` | CYR-20 (exists) |
 
 Rules:
 
@@ -60,13 +60,13 @@ Rules:
   `ActivationWithoutMode`, a subclass of `InvalidStatusTransition`, is raised. A `mode_id` that does
   not exist raises `ModeNotFound`.
 - `mode_id` is applied only by a call that really activates the contact; other calls ignore it.
-- `pause_reason` (`manual_message`, `send_rejected`, `owner`) may be passed only together with
+- `pause_reason` (`manual_message`, `send_rejected`, `stop_trigger`, `owner`) may be passed only together with
   `paused`; with any other status `PauseReasonRefused` is raised. It is stored by a call that really
   moves the contact into `paused` and cleared by every call that moves it out of `paused`. A
   same-status request is a no-op, so a second pause keeps the first reason. A contact paused before
   CYR-21 has no reason (`NULL`). `set_status` returns the contact plus a `changed` flag, true only
   when the status really changed; a caller that must act once per real change (the notice of a
-  manual pause) uses that flag.
+  manual pause, the hand-over notice) uses that flag.
 
 A contact may keep a mode that is later disabled. The mode is resolved when it is used:
 `ModeRepository.resolve_by_id` and `resolve_by_name` return the requested mode if it is enabled and
@@ -83,15 +83,15 @@ otherwise the `default` mode. If `default` itself is missing or disabled they ra
 | 4 | On Reply the contact becomes `active` with the chosen mode; on Ignore it becomes `ignored`. Exists | CYR-12 |
 | 5 | Each incoming message from an `active` contact schedules one delayed Arq job; a burst of messages is debounced into one job | CYR-17, CYR-19 |
 | 6 | When the job runs it re-checks the status; anything but `active` ends the job with no reply | CYR-19 |
-| 7 | Stop-triggers: on a hit the contact becomes `paused`, the owner is notified and no reply is sent | CYR-20 |
+| 7 | Stop-triggers: the new incoming message of an `active` contact is checked right after it is stored; on a hit the contact becomes `paused`, its scheduled rows are cancelled, the owner is notified and no reply is sent. Exists, see [Stop-triggers](#stop-triggers-cyr-20). The model signal is checked after step 9 by the generator; the autopilot that acts on it is CYR-17 | CYR-20 |
 | 8 | The layered prompt is built: persona, mode fragment with few-shot examples, contact summary, last N messages | CYR-14, CYR-15, CYR-16, CYR-25 |
 | 9 | The LLM is called through the LLM interface; the response is validated | CYR-13 |
 | 10 | The reply goes through the sender: status guard, FloodWait handling, rate limits, the read mark, typing and quiet hours (exist, see [outbox-and-sender.md](outbox-and-sender.md)); the delayed send time comes from the planner (exists, see [humanization.md](humanization.md)), which the autopilot will call (CYR-17); splitting (CYR-36) | CYR-19, CYR-22, CYR-18, CYR-17, CYR-36 |
 | 11 | Background: contact summaries, proactive messages, reminders for undecided cards | CYR-25, CYR-23, CYR-24 |
 
-How stop-triggers are detected (lists, model output, both) and at which step each one is
-evaluated is an open question in [decisions.md](decisions.md). Low model confidence can only be
-known after step 9.
+Stop-triggers are detected twice: by the pattern detector on the incoming text (step 7) and by the
+model's `NEEDS_OWNER` signal in the generated reply (after step 9). Low model confidence is that
+signal; there is no numeric threshold.
 
 ## Registration (CYR-10)
 
@@ -300,8 +300,8 @@ cancelled first on shutdown. It talks to the owner only through the `CardSender`
   `mode_unavailable` it shows a short alert; if the contact is no longer `pending`, the buttons are
   removed. A card that can no longer be edited is only answered.
 - **Not yet.** Nothing replies to an `active` contact automatically. The autopilot (CYR-17) must also answer
-  messages that arrived while the contact was `pending`. Pausing and resuming from the card, and the
-  stop-trigger notification, are CYR-26 and CYR-20.
+  messages that arrived while the contact was `pending`. Pausing and resuming from the card is
+  CYR-26; the stop-trigger notice exists (CYR-20).
 
 ## Manual intervention (CYR-21)
 
@@ -367,6 +367,19 @@ removes the button; otherwise it shows a short alert. A contact paused by a reci
 a message sent from another client is indistinguishable from the owner's by hand: both pause. Because
 Telethon runs handlers one after another (`sequential_updates`), the settle wait can delay the
 processing of other updates by up to 15.75 s when a row is `sending`.
+
+## Stop-triggers (CYR-20)
+
+Exists. `IntakeService` checks the text of each new incoming message of an `active` contact right
+after storing it; older messages are never re-checked, and no other status is checked. A hit calls
+`HandOverService.hand_over`: an `active` contact becomes `paused` with `pause_reason = stop_trigger`;
+only a real status change cancels its scheduled rows (reason `stop_trigger`) and sends the owner ONE
+notice with the classes, the source, the last 5 lines and three buttons: «Возобновить автоответы»
+(`PauseActions.resume`, back to `active` with the same mode), «Оставить на паузе» (only edits the
+notice) and «Игнорировать» (`PauseActions.ignore`, `paused` to `ignored`). A contact already paused
+keeps its first reason and gets no second notice. A failing notice never undoes the pause, and the
+gate never raises into the intake. Nothing is ever sent to the contact. Details:
+[stop-triggers.md](stop-triggers.md).
 
 ## What is stored per contact
 

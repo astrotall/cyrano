@@ -5,7 +5,7 @@ from __future__ import annotations
 import logging
 from dataclasses import dataclass
 
-from cyrano.domain.enums import MessageDirection
+from cyrano.domain.enums import ContactStatus, MessageDirection, TriggerSource
 from cyrano.domain.errors import ContactAlreadyExists
 from cyrano.domain.models import (
     Contact,
@@ -15,8 +15,10 @@ from cyrano.domain.models import (
     NewContactEvent,
 )
 from cyrano.services.contact_events import ContactEventPublisher
+from cyrano.services.hand_over import HandOverService
 from cyrano.services.repositories import ContactRepository, MessageRepository
 from cyrano.services.sanitize import sanitize_incoming
+from cyrano.services.stop_triggers import detect
 
 logger = logging.getLogger("cyrano.services.intake")
 
@@ -34,10 +36,13 @@ class IntakeService:
         contacts: ContactRepository,
         messages: MessageRepository,
         events: ContactEventPublisher[NewContactEvent],
+        *,
+        hand_over: HandOverService | None = None,
     ) -> None:
         self._contacts = contacts
         self._messages = messages
         self._events = events
+        self._hand_over = hand_over
 
     async def handle(self, incoming: IncomingMessage) -> IntakeResult:
         incoming = sanitize_incoming(incoming)
@@ -51,12 +56,27 @@ class IntakeService:
             )
         )
         await self._contacts.touch_last_message_at(contact.id, incoming.sent_at)
+        if contact.status is ContactStatus.ACTIVE:
+            await self._check_stop_triggers(contact.id, incoming.text)
         if created:
             logger.info("contact registered", extra={"contact_id": contact.id})
             await self._events.publish(
                 NewContactEvent(contact_id=contact.id, message_id=message.id)
             )
         return IntakeResult(contact_id=contact.id, message_id=message.id, contact_created=created)
+
+    async def _check_stop_triggers(self, contact_id: int, text: str) -> None:
+        if self._hand_over is None:
+            return
+        try:
+            decision = detect(text)
+            if decision.triggered:
+                await self._hand_over.hand_over(contact_id, decision.classes, TriggerSource.TEXT)
+        except Exception as exc:
+            logger.warning(
+                "stop-trigger check failed",
+                extra={"contact_id": contact_id, "error": type(exc).__name__},
+            )
 
     async def _find_or_create(self, incoming: IncomingMessage) -> tuple[Contact, bool]:
         existing = await self._contacts.get_by_tg_id(incoming.tg_id)

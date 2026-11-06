@@ -1,4 +1,4 @@
-"""Contact statuses, message directions, LLM, dialogue, outbox and schedule vocabulary."""
+"""Contact statuses, directions, LLM, dialogue, outbox, schedule and stop-trigger vocabulary."""
 
 from __future__ import annotations
 
@@ -17,6 +17,7 @@ class PauseReason(StrEnum):
     MANUAL_MESSAGE = "manual_message"
     SEND_REJECTED = "send_rejected"
     OWNER = "owner"
+    STOP_TRIGGER = "stop_trigger"
 
 
 class MessageDirection(StrEnum):
@@ -38,6 +39,13 @@ class CardOutcome(StrEnum):
 
 
 class ResumeOutcome(StrEnum):
+    APPLIED = "applied"
+    ALREADY_APPLIED = "already_applied"
+    REFUSED = "refused"
+    NOT_FOUND = "not_found"
+
+
+class IgnoreOutcome(StrEnum):
     APPLIED = "applied"
     ALREADY_APPLIED = "already_applied"
     REFUSED = "refused"
@@ -117,3 +125,25 @@ class PlanReason(StrEnum):
     POSTPONED_NIGHT = "postponed_night"
     POSTPONED_BUSY = "postponed_busy"
     EXHAUSTED = "exhausted"
+
+
+class TriggerClass(StrEnum):
+    MEETING = "meeting"
+    CONTACT_EXCHANGE = "contact_exchange"
+    MONEY = "money"
+    PHOTO = "photo"
+    BOT_QUESTION = "bot_question"
+    EXES = "exes"
+    CRISIS = "crisis"
+
+
+class TriggerSource(StrEnum):
+    TEXT = "text"
+    MODEL = "model"
+
+
+class HandOverOutcome(StrEnum):
+    HANDED_OVER = "handed_over"
+    NOT_ACTIVE = "not_active"
+    ALREADY_PAUSED = "already_paused"
+    NOT_FOUND = "not_found"

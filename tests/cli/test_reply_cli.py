@@ -14,7 +14,12 @@ from cyrano.domain.models import ModeCreate
 from cyrano.llm.factory import LLMClientFactory
 from cyrano.main import main
 from cyrano.prompts.texts import DIALOGUE_BOUNDARY
-from cyrano.reply_cli import PERSONAL_DATA_WARNING, ReplyPreviewCommand, ReplyPreviewRequest
+from cyrano.reply_cli import (
+    NEEDS_OWNER_LINE,
+    PERSONAL_DATA_WARNING,
+    ReplyPreviewCommand,
+    ReplyPreviewRequest,
+)
 from tests.db.conftest import execute
 from tests.llm.fakes import Script, completion_response, error_response
 from tests.privacy import FAKE_TELEGRAM_ID, assert_absent
@@ -466,3 +471,21 @@ def test_main_reports_an_unreachable_database_and_exits_with_one(
     assert code == 1
     assert "storage failed" in captured.err
     assert "pw-secret" not in captured.out + captured.err
+
+
+@pytest.mark.parametrize("raw", ["NEEDS_OWNER", "`needs_owner`", f"{REPLY_MARKER} NEEDS_OWNER"])
+async def test_the_model_signal_prints_the_needs_owner_line_and_the_stats_and_exits_zero(
+    repos: Repositories, capsys: pytest.CaptureFixture[str], raw: str
+) -> None:
+    contact = await ready_contact(repos)
+
+    code = await _command(repos, ScriptedLLMClient(raw)).run(ReplyPreviewRequest(contact.id))
+
+    captured = capsys.readouterr()
+    lines = captured.out.splitlines()
+    assert code == 0
+    assert captured.err == ""
+    assert lines[0] == NEEDS_OWNER_LINE == "needs owner (model signal)"
+    assert lines[1].startswith(STATS_PATTERN)
+    assert len(lines) == 2
+    assert_absent(REPLY_MARKER, captured.out)

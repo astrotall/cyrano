@@ -41,6 +41,7 @@ class BuiltPrompt(_Frozen):
 class GeneratedReply(_Frozen):
     text: str
     usage: LLMUsage
+    needs_owner: bool = False
     examples_offered: int = Field(ge=0)
     examples_kept: int = Field(ge=0)
     messages_offered: int = Field(ge=0)

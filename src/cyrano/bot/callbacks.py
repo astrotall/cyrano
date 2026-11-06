@@ -1,4 +1,4 @@
-"""Callback data of the card buttons."""
+"""Callback data of the card buttons and of the pause notice buttons."""
 
 from __future__ import annotations
 
@@ -25,6 +25,8 @@ PAUSE_CALLBACK_PREFIX = "pause"
 
 class PauseAction(StrEnum):
     RESUME = "resume"
+    KEEP = "keep"
+    IGNORE = "ignore"
 
 
 class PauseCallback(CallbackData, prefix=PAUSE_CALLBACK_PREFIX):

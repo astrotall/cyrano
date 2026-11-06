@@ -32,8 +32,9 @@ Key principles:
   handling live in the sender, not in callers. The delayed send time comes from one planner. Message
   splitting will join them (CYR-36).
 - **Stop-triggers hand over.** Meeting or date proposals, phone and contact exchange, money,
-  photo requests, a direct question whether it is a bot or AI, and low model confidence stop the
-  conversation and notify the owner. The assistant does not answer those itself.
+  photo requests, a direct question whether it is a bot or AI, the owner's exes, self-harm, and a
+  message the model cannot answer without inventing facts stop the conversation and notify the
+  owner. The assistant does not answer those itself (see [When a contact touches a sensitive topic](#when-a-contact-touches-a-sensitive-topic)).
 - **Style comes from a persona and examples, not training.** A common persona text, a prompt
   fragment per mode and few-shot examples from the owner's real chats. No model is trained.
 - **Personal data stays local.** Persona, examples, sessions, media and messages never go to git.
@@ -46,7 +47,9 @@ Key principles:
 > exist; these last four are not used by the running app, only by the `llm-check`, `persona`,
 > `examples` and `reply-preview` commands. The outbox with the one guarded sender (CYR-19) and its
 > limits, pause and stop (CYR-22) exist too, and only the owner's test command can add a message to it: nothing is sent automatically. The pause
-> on a message the owner writes by hand (CYR-21) exists. The flow below is the plan.
+> on a message the owner writes by hand (CYR-21) exists. The stop-triggers on incoming messages with
+> the hand-over notice (CYR-20) exist; the model's hand-over signal is recognised by the reply
+> generator, which the running app does not use yet. The flow below is the plan.
 
 ## Architecture diagram
 
@@ -207,6 +210,34 @@ Good to know:
 
 Details: [.claude/docs/contact-lifecycle.md](.claude/docs/contact-lifecycle.md#manual-intervention-cyr-21).
 
+### When a contact touches a sensitive topic
+
+Some topics are yours alone: a proposal to meet, a phone number, a handle or another way to get in
+touch, money or a card number, a request for photos, a question whether you are a bot or an AI, your
+exes, self-harm or suicide. When a contact in status `active` writes about one of them:
+
+- the contact becomes `paused` (the reason is stored as `stop_trigger`) and its planned messages are
+  cancelled. **Nothing is sent to the contact**;
+- you get **one** message in the control bot: «Нужно ваше решение: контакт #<id>», with the contact's
+  name, the topic, and the last 5 messages of the chat (each cut to 200 characters);
+- the message has three buttons: **Возобновить автоответы** (back to `active` with the same mode),
+  **Оставить на паузе** (nothing changes, the buttons go away) and **Игнорировать** (the contact
+  becomes `ignored`, silence forever).
+
+Answer the contact yourself first, then press a button. Only the new message is checked, so resuming
+does not fire again on the old one; a new message on a sensitive topic does. A contact that is
+already paused gets no second notice. The check is a word list: it sometimes fires on a harmless
+message («я работаю в кафе»), which only costs you a button press. To see what a phrase would
+trigger, without changing anything:
+
+```sh
+make stop-check TEXT="давай встретимся"   # classes: meeting
+make stop-check CONTACT=<id>              # the classes of the contact's last 3 incoming messages
+```
+
+It prints class names only, never a message text. The lists, the rules and the known false positives:
+[.claude/docs/stop-triggers.md](.claude/docs/stop-triggers.md).
+
 ### The outbox and the sender
 
 Every message to a contact goes through one table and one sender. A message is a row in the outbox
@@ -352,7 +383,7 @@ What exists now:
 ├── pyproject.toml                # dependencies, Ruff, mypy, pytest config
 ├── uv.lock
 ├── .python-version               # 3.14
-├── Makefile                      # install, check, test, fmt, up, down, logs, migrate, revision, db-up, login, login-docker, llm-check, persona-import, examples-import, examples-stats, examples-convert, reply-preview, outbox-enqueue, outbox-list, outbox-cancel, outbox-retry, outbox-status, outbox-resume
+├── Makefile                      # install, check, test, fmt, up, down, logs, migrate, revision, db-up, login, login-docker, llm-check, persona-import, examples-import, examples-stats, examples-convert, reply-preview, outbox-enqueue, outbox-list, outbox-cancel, outbox-retry, outbox-status, outbox-resume, stop-check
 ├── Dockerfile                    # multi-stage, non-root runtime
 ├── docker-compose.yml            # app, worker, one-shot migrate, postgres, redis
 ├── docker-compose.override.yml   # dev: Postgres and Redis on 127.0.0.1, media in ./data/media
@@ -370,6 +401,7 @@ What exists now:
 │   ├── persona-and-examples.md   # persona and style examples: formats, limits, commands, privacy
 │   ├── humanization.md           # schedule profile, planner rules, pre-send sequence, commands
 │   ├── reply-generation.md       # the layered prompt, the budget, the reply cleaning, reply-preview
+│   ├── stop-triggers.md          # stop-trigger classes, patterns, the hand-over, the notice, stop-check
 │   ├── outbox-and-sender.md      # the outbox, the one sender, the guard, limits, pause and stop, errors, owner commands
 │   ├── safety-rules.md           # S1..S10
 │   └── decisions.md              # decided and open
@@ -377,18 +409,20 @@ What exists now:
 │   ├── dependabot.yml            # weekly: Actions, Docker, Compose, uv
 │   └── workflows/ci.yml
 ├── src/cyrano/
-│   ├── __main__.py               # python -m cyrano [login | llm-check | persona ... | examples ... | reply-preview ... | outbox ... | schedule ...]
-│   ├── main.py                   # app entrypoint, signals, heartbeat, subcommands login, llm-check, persona (import, show), examples (import, stats, convert), reply-preview, outbox (enqueue, list, cancel, retry, status, resume), schedule (import, show, check, plan)
+│   ├── __main__.py               # python -m cyrano [login | llm-check | persona ... | examples ... | reply-preview ... | outbox ... | schedule ... | stop-check ...]
+│   ├── main.py                   # app entrypoint, signals, heartbeat, subcommands login, llm-check, persona (import, show), examples (import, stats, convert), reply-preview, outbox (enqueue, list, cancel, retry, status, resume), schedule (import, show, check, plan), stop-check
 │   ├── style_cli.py              # the persona and examples commands
 │   ├── convert_cli.py            # examples convert: Telegram Desktop export to a draft examples file
 │   ├── reply_cli.py              # reply-preview: generate one reply for a stored conversation
 │   ├── outbox_cli.py             # outbox enqueue, list, cancel, retry, status, resume: the owner's commands
 │   ├── schedule_cli.py           # schedule import, show, check, plan: the owner's commands
+│   ├── stop_check_cli.py         # stop-check: the stop-trigger classes of a phrase or a contact, a dry run
+│   ├── stop_trigger_patterns.py  # the stop-trigger pattern data
 │   ├── config.py                 # Settings, load_settings, ConfigError
 │   ├── logging.py                # JSON-lines logging
 │   ├── health.py                 # heartbeat file and the app healthcheck
 │   ├── userbot/                  # Telethon: protocols, filters, handler, client, adapter (the only send), login, runner, profile and Leomatch readers
-│   ├── bot/                      # aiogram: owner-only middleware, handlers, card rendering, card sender, owner notifier, polling
+│   ├── bot/                      # aiogram: owner-only middleware, handlers, card rendering, card sender, owner notifiers (outbox, manual pause, hand-over), polling
 │   ├── llm/                      # DeepSeek client, retrying transport, factory (the only package that imports httpx)
 │   ├── prompts/                  # prompt texts and their pure rendering (imports only domain)
 │   ├── domain/                   # enums, status transition rules, errors, Pydantic models
@@ -397,7 +431,7 @@ What exists now:
 │   │   ├── repositories.py       # repository Protocols
 │   │   ├── llm_client.py         # LLMClient Protocol
 │   │   ├── llm_check.py          # the request behind llm-check
-│   │   ├── intake.py             # IntakeService: register contact and message
+│   │   ├── intake.py             # IntakeService: register contact and message, the stop-trigger gate
 │   │   ├── sanitize.py           # NUL-byte removal, text cleaning
 │   │   ├── contact_events.py     # generic ContactEventPublisher, bounded in-memory queue
 │   │   ├── profile_source.py     # ProfileSource, LeomatchSource Protocols, ProfileSourceError
@@ -429,7 +463,10 @@ What exists now:
 │   │   ├── owner_notifier.py     # OwnerNotifier Protocol: notify
 │   │   ├── manual_intervention.py # ManualMessageDetector: a manual message pauses an active contact
 │   │   ├── manual_pause_notifier.py # ManualPauseNotifier Protocol: notify_manual_pause
-│   │   └── pause_actions.py      # PauseActions: Resume of a paused contact
+│   │   ├── pause_actions.py      # PauseActions: Resume and Ignore of a paused contact
+│   │   ├── stop_triggers.py      # the pure stop-trigger detector
+│   │   ├── hand_over.py          # HandOverService: pause, cancel, one notice to the owner
+│   │   └── hand_over_notifier.py # HandOverNotifier Protocol: notify_hand_over
 │   └── worker/
 │       └── settings.py           # Arq WorkerSettings, placeholder job
 └── tests/                        # mirrors src/cyrano; database tests need a real PostgreSQL
@@ -609,6 +646,7 @@ The app connects to Telegram as the userbot and polls the control bot, and conne
 | `make reply-preview CONTACT=... [MODE=...]` | Generate one reply for a stored conversation and print it with a stats line; sends nothing, writes nothing (see [Previewing a reply](#previewing-a-reply)) |
 | `make outbox-enqueue CONTACT=... TEXT="..." [IN=...]`, `make outbox-list [STATE=...] [LIMIT=...]`, `make outbox-cancel ID=...`, `make outbox-retry ID=... [IN=...] [YES=1]`, `make outbox-status`, `make outbox-resume [YES=1]` | The owner's commands for the outbox (see [The outbox and the sender](#the-outbox-and-the-sender)) |
 | `make schedule-import FILE=...`, `make schedule-show`, `make schedule-check [AT="YYYY-MM-DD HH:MM"]`, `make schedule-plan CONTACT=...` | The owner's commands for the schedule profile (see [Humanization and the schedule](#humanization-and-the-schedule)) |
+| `make stop-check TEXT="..."` or `make stop-check CONTACT=...` | Print the stop-trigger classes of a phrase (no `.env` needed) or of the contact's last 3 incoming messages; changes nothing, prints no text (see [When a contact touches a sensitive topic](#when-a-contact-touches-a-sensitive-topic)) |
 | `make llm-check` | Send one tiny request to DeepSeek with the `reply` settings and print the result (see [Checking the LLM key](#checking-the-llm-key)) |
 
 ### Checking the LLM key
@@ -684,8 +722,9 @@ line (model, tokens, examples and messages kept of offered, prompt characters). 
 judge the style before any autopilot exists. It needs a complete `.env` with `DEEPSEEK_API_KEY`, the
 database up and an imported persona. It sends nothing to Telegram and writes nothing to the
 database. `--show-prompt` prints the two messages of the prompt first, with a warning: they contain
-personal data. Errors print one line with the error class and exit with 1. Layers, budget, cleaning
-and what the prompt contains: [.claude/docs/reply-generation.md](.claude/docs/reply-generation.md).
+personal data. If the model asks to hand the conversation over (a sensitive topic, see above), the
+first line is `needs owner (model signal)` instead of a reply. Errors print one line with the error
+class and exit with 1. Layers, budget, cleaning and what the prompt contains: [.claude/docs/reply-generation.md](.claude/docs/reply-generation.md).
 
 ### Migrations
 

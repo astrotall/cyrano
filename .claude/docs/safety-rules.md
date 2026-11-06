@@ -4,7 +4,8 @@
 and S2 are enforced since CYR-19: one guarded sender is the only way to a contact, and nothing
 writes to the outbox except the owner's explicit test command, so nothing is sent automatically.
 S8 is enforced since CYR-12. S5 is enforced since CYR-22. S4 is enforced since CYR-21. S6 is enforced since CYR-18, except the
-splitting (CYR-36). The other rules are
+splitting (CYR-36). S3 and S10 are enforced since CYR-20 for incoming texts; the model signal exists in
+the generator, which no app code calls yet (CYR-17). The other rules are
 not enforced by code yet; they are the contract that the tickets must implement and test. Changing or dropping a rule is a large change (see [CLAUDE.md](../../CLAUDE.md)) and ships
 with the code and the test ([CONTRIBUTING.md](../../CONTRIBUTING.md)). Statuses:
 [contact-lifecycle.md](contact-lifecycle.md).
@@ -63,14 +64,45 @@ only.
 ## S3. Stop-triggers hand over
 
 - **Rule:** meeting or date proposals, phone and contact exchange, money, photo requests, a direct
-  question whether it is a bot or AI (see S10), and low model confidence stop the conversation:
-  the contact becomes `paused` and the owner is notified. The assistant does not answer these
-  itself.
+  question whether it is a bot or AI (see S10), the owner's exes or past relationships, self-harm
+  or suicide, and a message the model cannot answer without inventing facts stop the conversation:
+  the contact becomes `paused` with `pause_reason = stop_trigger` and the owner is notified. The
+  assistant does not answer these itself.
 - **Why:** these are the points where a wrong answer costs the owner something real.
-- **Enforced where:** stop-trigger handling (CYR-20); trigger lists live in config or a dedicated
-  module (hard rule 4); the paused status is honoured by S1.
-- **How it is tested:** one case per trigger category, a message that looks close to a trigger but
-  is not, invalid LLM JSON, and confidence below the threshold.
+- **Enforced where:** exists (CYR-20). `IntakeService` runs the pure detector
+  (`services/stop_triggers.py`, pattern data in `stop_trigger_patterns.py`, hard rule 4) on every
+  new incoming message of an `active` contact, right after storing it; a hit calls
+  `HandOverService.hand_over`, which pauses only an `active` contact, and only a real status change
+  cancels the scheduled rows (reason `stop_trigger`) and sends the owner ONE notice with the last 5
+  lines and the buttons resume, keep and ignore, under a 15 s deadline. A failing notice never undoes
+  the pause; the gate never raises into the intake. A row already `sending` is refused by the
+  sender's second guard; the paused status is honoured by S1. The reply instructions tell the model
+  to answer with exactly `NEEDS_OWNER` on the same topics; the generator turns the signal (exact or
+  embedded) into `needs_owner` with an empty text, so no text of such a reply can be sent. Low model
+  confidence has no numeric threshold; it is this signal. The autopilot that will hand over on the
+  signal is CYR-17. Details: [stop-triggers.md](stop-triggers.md).
+- **How it is tested:** exists. `tests/services/test_stop_triggers.py` with
+  `tests/services/stop_trigger_phrases.py`: at least 15 positive and 15 close but harmless phrases
+  per class, the accepted false positives, case, `ё`, repeats, punctuation, emoji, invisible and
+  combining characters, spaced letters, phone formats and separators, card runs, e-mails, handles,
+  links, messenger names only with a verb, several texts, huge and odd input and a seeded fuzz, and
+  the validity of the pattern data. `tests/services/test_hand_over.py` on real PostgreSQL: the pause
+  with its reason, only the contact's rows cancelled with the reason, one notice with the lines in
+  order and truncated, nothing reaching the contact through a real `OutboxSender` with a transport
+  that fails on any call, non-active and paused contacts left alone without a status write, a
+  second trigger and a lost race without a notice, failing and hung notifiers, failing cancel and
+  history steps, and the privacy of the logs at DEBUG. `tests/services/test_intake_stop_triggers.py`:
+  the gate for each status, only the new message checked, a replay handed over once, a failing
+  hand-over or detector without a raise or a retry of the userbot handler.
+  `tests/services/test_reply_needs_owner.py` and `tests/cli/test_reply_cli.py`: the signal in every
+  case and wrapping, embedded, a normal reply untouched, the usage kept, the log flags.
+  `tests/bot/test_hand_over_notice.py` and `tests/bot/test_handlers.py`: the notice to the owner only,
+  escaping, the line limit, the three buttons, keep and ignore, double clicks, strangers.
+  `tests/test_one_sender.py` proves that `HandOverNotifier` has one method, is implemented only in
+  `bot/`, is called only by `services/hand_over.py` behind the deadline, that the hand-over, the
+  intake, the detector and the `stop-check` command touch no transport method, that only
+  `services/hand_over.py` sets `STOP_TRIGGER`, and that the detector imports only the domain and its
+  data.
 
 ## S4. A manual message of the owner pauses the contact
 
@@ -203,6 +235,11 @@ only.
   passes `--allow-any-path`.
   Owner notifications about the outbox (CYR-19, CYR-22) carry internal ids, class names, seconds and counts only.
   The manual-pause notice (CYR-21) carries the internal contact id only.
+  The hand-over notice (CYR-20) is the one exception: it carries the display name (at most 60
+  characters) and the last 5 message texts (at most 200 characters each), HTML-escaped, because the
+  owner must see what to decide on. It goes only to the owner chat through the owner-only control
+  bot and is never logged; the hand-over logs the contact id, the class values and the source, and
+  the `stop-check` command prints class names only.
 - **Why:** the data belongs to real people.
 - **Enforced where:** exists today: `.gitignore` and `.dockerignore` exclude `.env`, `*.session`,
   `media/` and `data/` (profile photos live under `MEDIA_DIR`, `.env.example` and compose put it
@@ -242,6 +279,9 @@ only.
 - **Rule:** when a contact asks directly whether it is a bot or AI, the assistant does not answer.
   It stops the conversation and notifies the owner. This is a stop-trigger (S3).
 - **Why:** a wrong or evasive answer is worse than silence, and the owner decides what to say.
-- **Enforced where:** stop-triggers (CYR-20).
-- **How it is tested:** direct questions in different phrasings stop the conversation, no reply is
-  generated, the contact is `paused` and the owner is notified.
+- **Enforced where:** exists (CYR-20): the class `bot_question` of the detector, and the reply
+  instructions, which tell the model to answer such a question with `NEEDS_OWNER` and never to
+  claim to be human or deny being an AI.
+- **How it is tested:** exists. Direct questions in many phrasings and spellings fire
+  `bot_question`, an active contact is `paused` and the owner notified, and nothing is sent; the
+  prompt tests pin the instruction and that no instruction claims a human identity.

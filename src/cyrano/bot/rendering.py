@@ -1,16 +1,25 @@
-"""Pure functions that turn a card and a decision into Telegram text and buttons."""
+"""Pure functions that turn a card, a hand-over notice and a decision into text and buttons."""
 
 from __future__ import annotations
 
+import re
 from html import escape
 
 from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 
 from cyrano.bot import messages
-from cyrano.bot.callbacks import CardAction, CardCallback
-from cyrano.domain.enums import CardOutcome, ContactStatus, LeomatchNameSource
+from cyrano.bot.callbacks import CardAction, CardCallback, PauseAction, PauseCallback
+from cyrano.domain.enums import (
+    CardOutcome,
+    ContactStatus,
+    LeomatchNameSource,
+    MessageDirection,
+    TriggerSource,
+)
 from cyrano.domain.models import CardActionResult, CardLeomatch, ContactCard
+from cyrano.domain.outbox import UTF16_BYTES_PER_UNIT, UTF16_CODEC, UTF16_ERROR_POLICY
+from cyrano.domain.stop_triggers import DialogueLine, HandOverNotice
 
 TELEGRAM_TEXT_LIMIT = 4096
 CARD_TEXT_BUDGET = 3500
@@ -18,6 +27,16 @@ SECTION_SEPARATOR = "\n\n"
 LINE_SEPARATOR = "\n"
 MESSAGE_BULLET = "• "
 FIELD_SEPARATOR = ", "
+WHITESPACE_RUN = re.compile(r"\s+")
+WORD_SEPARATOR = " "
+HAND_OVER_SPEAKERS = {
+    MessageDirection.INCOMING: messages.HAND_OVER_SPEAKER_CONTACT,
+    MessageDirection.OUTGOING: messages.HAND_OVER_SPEAKER_OWNER,
+}
+HAND_OVER_SOURCES = {
+    TriggerSource.TEXT: messages.HAND_OVER_SOURCE_TEXT,
+    TriggerSource.MODEL: messages.HAND_OVER_SOURCE_MODEL,
+}
 
 
 def _escaped(value: str) -> str:
@@ -139,3 +158,67 @@ def alert_text(outcome: CardOutcome) -> str | None:
             return messages.ALERT_MODE_UNAVAILABLE
         case CardOutcome.APPLIED | CardOutcome.ALREADY_APPLIED:
             return None
+
+
+def telegram_length(text: str) -> int:
+    return len(text.encode(UTF16_CODEC, UTF16_ERROR_POLICY)) // UTF16_BYTES_PER_UNIT
+
+
+def _one_line(text: str) -> str:
+    return WHITESPACE_RUN.sub(WORD_SEPARATOR, text).strip()
+
+
+def _hand_over_head(notice: HandOverNotice) -> str:
+    title = messages.HAND_OVER_TITLE.format(contact_id=notice.contact_id)
+    lines = [f"<b>{title}</b>"]
+    if notice.name:
+        lines.append(messages.HAND_OVER_NAME.format(name=_escaped(_one_line(notice.name))))
+    names = [messages.TRIGGER_CLASS_NAMES[trigger] for trigger in notice.classes]
+    reason = messages.TRIGGER_CLASS_SEPARATOR.join(names) or messages.HAND_OVER_NO_CLASSES
+    lines.extend(
+        [
+            messages.HAND_OVER_PAUSED,
+            messages.HAND_OVER_REASON.format(classes=reason),
+            HAND_OVER_SOURCES[notice.source],
+        ]
+    )
+    return LINE_SEPARATOR.join(lines)
+
+
+def _dialogue_line(number: int, line: DialogueLine) -> str:
+    text = _one_line(line.text)
+    return messages.HAND_OVER_LINE.format(
+        number=number,
+        speaker=HAND_OVER_SPEAKERS[line.direction],
+        text=_escaped(text) if text else messages.HAND_OVER_EMPTY_TEXT,
+    )
+
+
+def _dialogue_section(lines: tuple[DialogueLine, ...]) -> str:
+    if not lines:
+        return messages.HAND_OVER_NO_LINES
+    rendered = [_dialogue_line(number, line) for number, line in enumerate(lines, start=1)]
+    return _titled(messages.HAND_OVER_LINES_TITLE, rendered)
+
+
+def render_hand_over(notice: HandOverNotice, limit: int = TELEGRAM_TEXT_LIMIT) -> str:
+    lines = notice.lines
+    while True:
+        text = SECTION_SEPARATOR.join(
+            [_hand_over_head(notice), _dialogue_section(lines), messages.HAND_OVER_DECIDE]
+        )
+        if telegram_length(text) <= limit or not lines:
+            return text
+        lines = lines[1:]
+
+
+def hand_over_keyboard(contact_id: int) -> InlineKeyboardMarkup:
+    builder = InlineKeyboardBuilder()
+    for action, label in (
+        (PauseAction.RESUME, messages.RESUME_BUTTON),
+        (PauseAction.KEEP, messages.KEEP_BUTTON),
+        (PauseAction.IGNORE, messages.HAND_OVER_IGNORE_BUTTON),
+    ):
+        callback = PauseCallback(action=action, contact_id=contact_id)
+        builder.row(InlineKeyboardButton(text=label, callback_data=callback.pack()))
+    return builder.as_markup()

@@ -8,6 +8,7 @@ from pathlib import Path
 
 import pytest
 
+from cyrano.services.hand_over_notifier import HandOverNotifier
 from cyrano.services.manual_pause_notifier import ManualPauseNotifier
 from cyrano.services.message_transport import MessageTransport
 from cyrano.services.owner_notifier import OwnerNotifier
@@ -25,6 +26,17 @@ MANUAL_PAUSE_METHOD = "notify_manual_pause"
 MANUAL_PAUSE_PROTOCOL_MODULE = "services/manual_pause_notifier.py"
 MANUAL_PAUSE_NOTIFIER_MODULE = "bot/notifier.py"
 RESUME_PAUSE_METHOD = "resume"
+IGNORE_PAUSE_METHOD = "ignore"
+HAND_OVER_METHOD = "notify_hand_over"
+HAND_OVER_PROTOCOL_MODULE = "services/hand_over_notifier.py"
+HAND_OVER_NOTIFIER_MODULE = "bot/notifier.py"
+HAND_OVER_MODULE = "services/hand_over.py"
+INTAKE_MODULE = "services/intake.py"
+STOP_TRIGGER_DETECTOR_MODULE = "services/stop_triggers.py"
+STOP_CHECK_MODULE = "stop_check_cli.py"
+STORAGE_WRITE_METHODS = frozenset(
+    {"set_status", "append", "enqueue", "cancel_pending_for_contact", "commit", "update_identity"}
+)
 PAUSE_HANDLER_MODULE = "bot/handlers.py"
 PAUSE_ACTIONS_NAME = "pause_actions"
 TRANSPORT_METHOD = "send_text"
@@ -191,6 +203,90 @@ def test_only_the_bot_handlers_resume_a_paused_contact() -> None:
     callers = {name for name, tree in _modules() if _resume_calls_on(tree, PAUSE_ACTIONS_NAME)}
 
     assert callers == {PAUSE_HANDLER_MODULE}
+
+
+def test_the_hand_over_notifier_has_exactly_one_method() -> None:
+    assert _members(HandOverNotifier) == {HAND_OVER_METHOD}
+
+
+def test_the_hand_over_notifier_is_implemented_only_in_the_bot_package() -> None:
+    definers = {
+        name
+        for name, tree in _modules()
+        if any(
+            isinstance(node, ast.AsyncFunctionDef | ast.FunctionDef)
+            and node.name == HAND_OVER_METHOD
+            for node in ast.walk(tree)
+        )
+    }
+
+    assert definers == {HAND_OVER_PROTOCOL_MODULE, HAND_OVER_NOTIFIER_MODULE}
+
+
+def test_only_the_hand_over_service_calls_its_notifier_and_only_behind_the_deadline() -> None:
+    callers = {name for name, tree in _modules() if HAND_OVER_METHOD in _called_attributes(tree)}
+    source = (SOURCE_ROOT / HAND_OVER_MODULE).read_text()
+
+    assert callers == {HAND_OVER_MODULE}
+    assert len(re.findall(r"\.notify_hand_over\(", source)) == 1
+    assert re.search(
+        r"asyncio\.timeout\(self\._notify_deadline\):\s+"
+        r"await self\._notifier\.notify_hand_over\(",
+        source,
+    )
+
+
+def test_only_the_bot_handlers_ignore_a_paused_contact() -> None:
+    callers = {
+        name
+        for name, tree in _modules()
+        if any(
+            isinstance(call.func, ast.Attribute)
+            and isinstance(call.func.value, ast.Name)
+            and call.func.value.id == PAUSE_ACTIONS_NAME
+            for call in _calls_named(tree, IGNORE_PAUSE_METHOD)
+        )
+    }
+
+    assert callers == {PAUSE_HANDLER_MODULE}
+
+
+@pytest.mark.parametrize(
+    "module",
+    [HAND_OVER_MODULE, INTAKE_MODULE, STOP_TRIGGER_DETECTOR_MODULE, STOP_CHECK_MODULE],
+)
+def test_the_stop_trigger_path_never_touches_the_transport(module: str) -> None:
+    tree = ast.parse((SOURCE_ROOT / module).read_text())
+
+    assert _called_attributes(tree).isdisjoint(TRANSPORT_METHODS | TELETHON_WRITE_METHODS)
+    assert _attributes_used(tree).isdisjoint(TRANSPORT_METHODS | TELETHON_WRITE_METHODS)
+
+
+def test_the_stop_trigger_pause_reason_is_set_only_by_the_hand_over_service() -> None:
+    users = {
+        name
+        for name, tree in _modules()
+        if "STOP_TRIGGER" in _attributes_used(tree) and name != "domain/enums.py"
+    }
+
+    assert users == {HAND_OVER_MODULE}
+
+
+def test_the_stop_check_command_writes_nothing() -> None:
+    tree = ast.parse((SOURCE_ROOT / STOP_CHECK_MODULE).read_text())
+
+    assert _called_attributes(tree).isdisjoint(STORAGE_WRITE_METHODS)
+
+
+def test_the_stop_trigger_detector_imports_only_the_domain_and_its_pattern_data() -> None:
+    tree = ast.parse((SOURCE_ROOT / STOP_TRIGGER_DETECTOR_MODULE).read_text())
+    project = {module for module, _ in _imported(tree) if module.startswith("cyrano")}
+
+    assert project
+    assert all(
+        module.startswith("cyrano.domain") or module == "cyrano.stop_trigger_patterns"
+        for module in project
+    ), project
 
 
 def test_the_detector_never_touches_the_transport() -> None:

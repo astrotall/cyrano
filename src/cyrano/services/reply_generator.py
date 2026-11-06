@@ -11,7 +11,7 @@ from cyrano.services.contact_facts import build_contact_facts
 from cyrano.services.llm_client import LLMClient
 from cyrano.services.persona_service import PersonaService
 from cyrano.services.prompt_builder import PromptBuilder
-from cyrano.services.reply_postprocess import clean_reply
+from cyrano.services.reply_postprocess import clean_reply, contains_needs_owner, is_bare_needs_owner
 from cyrano.services.repositories import ContactRepository, MessageRepository, ModeRepository
 from cyrano.services.style_examples import ExampleSelector
 
@@ -70,7 +70,8 @@ class ReplyGenerator:
 
     async def complete(self, prompt: BuiltPrompt) -> GeneratedReply:
         result = await self._client.complete(prompt.messages)
-        text = clean_reply(result.text)
+        needs_owner = contains_needs_owner(result.text)
+        text = "" if needs_owner else clean_reply(result.text)
         logger.info(
             "reply generated",
             extra={
@@ -79,11 +80,14 @@ class ReplyGenerator:
                 "prompt_characters": prompt.characters,
                 "input_tokens": result.usage.input_tokens,
                 "output_tokens": result.usage.output_tokens,
+                "needs_owner": needs_owner,
+                "needs_owner_leaked": needs_owner and not is_bare_needs_owner(result.text),
             },
         )
         return GeneratedReply(
             text=text,
             usage=result.usage,
+            needs_owner=needs_owner,
             examples_offered=prompt.examples_offered,
             examples_kept=prompt.examples_kept,
             messages_offered=prompt.messages_offered,

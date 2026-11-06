@@ -16,7 +16,11 @@ from aiogram.utils.token import TokenValidationError
 from cyrano.bot.errors import BotTokenRejected, PollingFailed
 from cyrano.bot.handlers import build_router
 from cyrano.bot.middleware import OwnerOnlyMiddleware
-from cyrano.bot.notifier import TelegramManualPauseNotifier, TelegramOwnerNotifier
+from cyrano.bot.notifier import (
+    TelegramHandOverNotifier,
+    TelegramManualPauseNotifier,
+    TelegramOwnerNotifier,
+)
 from cyrano.bot.sender import TelegramCardSender
 from cyrano.config import Settings
 from cyrano.services.card_actions import CardActions
@@ -61,6 +65,7 @@ class ControlBot:
         self._manual_pause_notifier = TelegramManualPauseNotifier(
             self._bot, settings.owner_telegram_id
         )
+        self._hand_over_notifier = TelegramHandOverNotifier(self._bot, settings.owner_telegram_id)
 
     @property
     def sender(self) -> TelegramCardSender:
@@ -73,6 +78,10 @@ class ControlBot:
     @property
     def manual_pause_notifier(self) -> TelegramManualPauseNotifier:
         return self._manual_pause_notifier
+
+    @property
+    def hand_over_notifier(self) -> TelegramHandOverNotifier:
+        return self._hand_over_notifier
 
     async def poll(self) -> None:
         try:

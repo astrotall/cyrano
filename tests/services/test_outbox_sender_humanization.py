@@ -299,6 +299,7 @@ class Rig:
         return OutboxSender(
             self.outbox,
             self.contacts,
+            self.messages,
             self.state,
             SendLimiter(self.messages, limits if limits is not None else FakeLimits()),
             schedule

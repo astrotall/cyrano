@@ -6,7 +6,7 @@ from collections.abc import Sequence
 from datetime import datetime
 
 from pydantic import ValidationError
-from sqlalchemy import delete, exists, func, or_, select, update
+from sqlalchemy import delete, exists, func, or_, select, tuple_, update
 from sqlalchemy.dialects.postgresql import distinct_on, insert
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -634,6 +634,31 @@ class SqlOutboxRepository:
             .returning(ScheduledMessageRow.id)
         )
         async with self._session_factory.begin() as session:
+            return len((await session.scalars(statement)).all())
+
+    async def cancel_superseded_autopilot_rows(
+        self, contact_id: int, trigger_message_id: int, reason: str
+    ) -> int:
+        async with self._session_factory.begin() as session:
+            trigger = await session.get(MessageRow, trigger_message_id)
+            if trigger is None or trigger.contact_id != contact_id:
+                return 0
+            older_triggers = select(MessageRow.id).where(
+                MessageRow.contact_id == contact_id,
+                tuple_(MessageRow.created_at, MessageRow.id)
+                < tuple_(trigger.created_at, trigger.id),
+            )
+            statement = (
+                update(ScheduledMessageRow)
+                .where(
+                    ScheduledMessageRow.contact_id == contact_id,
+                    ScheduledMessageRow.source == OutboxSource.AUTOPILOT,
+                    ScheduledMessageRow.state == OutboxState.SCHEDULED,
+                    ScheduledMessageRow.trigger_message_id.in_(older_triggers),
+                )
+                .values(state=OutboxState.CANCELLED, cancel_reason=reason)
+                .returning(ScheduledMessageRow.id)
+            )
             return len((await session.scalars(statement)).all())
 
     async def has_sending_row(self, contact_id: int) -> bool:

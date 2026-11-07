@@ -21,13 +21,15 @@ from cyrano.domain.errors import (
     OutboxRowNotFound,
     OutboxStateConflict,
 )
-from cyrano.domain.models import Contact
+from cyrano.domain.models import Contact, Message, MessageCreate
 from cyrano.domain.outbox import ScheduledMessage
 from tests.db.conftest import execute, fetch_all
 from tests.privacy import FAKE_INTERNAL_ID, FAKE_TELEGRAM_ID
 from tests.services.outbox_fakes import FAKE_NOW, stored_contact
 
 TEXT = "fake outbox text"
+SUPERSEDED = "superseded"
+FIRST_FAKE_MESSAGE_NUMBER = 91000
 TRIGGER = 41
 EARLIER = FAKE_NOW - timedelta(minutes=5)
 LATER = FAKE_NOW + timedelta(minutes=5)
@@ -702,3 +704,150 @@ async def test_cancelling_pending_rows_leaves_a_sending_row_alone(
     assert sending.state is OutboxState.SENDING
     assert scheduled is not None
     assert (scheduled.state, scheduled.cancel_reason) == (OutboxState.CANCELLED, "manual_message")
+
+
+async def _message(
+    messages: SqlMessageRepository, contact: Contact, number: int, at: datetime
+) -> Message:
+    return await messages.append(
+        MessageCreate(
+            contact_id=contact.id,
+            direction=MessageDirection.INCOMING,
+            text=TEXT,
+            tg_message_id=FIRST_FAKE_MESSAGE_NUMBER + number,
+            created_at=at,
+        )
+    )
+
+
+async def _autopilot_row(
+    outbox: SqlOutboxRepository,
+    contact: Contact,
+    trigger: Message | None,
+    source: OutboxSource = OutboxSource.AUTOPILOT,
+    send_at: datetime = LATER,
+) -> int:
+    row = await outbox.enqueue(
+        contact.id, TEXT, send_at, source, None if trigger is None else trigger.id
+    )
+    return row.id
+
+
+async def _state_of(outbox: SqlOutboxRepository, row_id: int) -> tuple[OutboxState, str | None]:
+    row = await outbox.get(row_id)
+    assert row is not None
+    return row.state, row.cancel_reason
+
+
+async def test_superseding_cancels_older_scheduled_autopilot_rows_of_the_contact(
+    outbox: SqlOutboxRepository,
+    messages: SqlMessageRepository,
+    contacts: SqlContactRepository,
+    modes: SqlModeRepository,
+    contact: Contact,
+) -> None:
+    other = await stored_contact(contacts, modes, ContactStatus.ACTIVE, tg_id=FAKE_TELEGRAM_ID + 1)
+    first = await _message(messages, contact, 1, EARLIER)
+    second = await _message(messages, contact, 2, FAKE_NOW)
+    third = await _message(messages, contact, 3, LATER)
+    foreign = await _message(messages, other, 4, EARLIER)
+    older_id = await _autopilot_row(outbox, contact, first)
+    same_id = await _autopilot_row(outbox, contact, second)
+    newer_id = await _autopilot_row(outbox, contact, third)
+    foreign_id = await _autopilot_row(outbox, other, foreign)
+
+    cancelled = await outbox.cancel_superseded_autopilot_rows(contact.id, second.id, SUPERSEDED)
+
+    assert cancelled == 1
+    assert await _state_of(outbox, older_id) == (OutboxState.CANCELLED, SUPERSEDED)
+    assert await _state_of(outbox, same_id) == (OutboxState.SCHEDULED, None)
+    assert await _state_of(outbox, newer_id) == (OutboxState.SCHEDULED, None)
+    assert await _state_of(outbox, foreign_id) == (OutboxState.SCHEDULED, None)
+
+
+async def test_superseding_leaves_manual_test_sending_sent_and_cancelled_rows_alone(
+    outbox: SqlOutboxRepository, messages: SqlMessageRepository, contact: Contact
+) -> None:
+    trigger = await _message(messages, contact, 10, LATER)
+    sending_message = await _message(messages, contact, 11, EARLIER)
+    sent_message = await _message(messages, contact, 12, EARLIER)
+    cancelled_message = await _message(messages, contact, 13, EARLIER)
+    manual_message = await _message(messages, contact, 14, EARLIER)
+    sending_id = await _autopilot_row(outbox, contact, sending_message, send_at=EARLIER)
+    sent_id = await _autopilot_row(outbox, contact, sent_message, send_at=EARLIER - timedelta(1))
+    cancelled_id = await _autopilot_row(outbox, contact, cancelled_message)
+    manual_id = await _autopilot_row(outbox, contact, manual_message, OutboxSource.MANUAL_TEST)
+    claimed = await outbox.claim_due(FAKE_NOW)
+    assert claimed is not None
+    assert claimed.id == sent_id
+    await outbox.complete_send(sent_id, contact.id, TEXT, TG_MESSAGE_ID, SENT_AT)
+    claimed = await outbox.claim_due(FAKE_NOW)
+    assert claimed is not None
+    assert claimed.id == sending_id
+    await outbox.cancel_scheduled(cancelled_id, "cancelled_by_owner")
+
+    cancelled = await outbox.cancel_superseded_autopilot_rows(contact.id, trigger.id, SUPERSEDED)
+
+    assert cancelled == 0
+    assert await _state_of(outbox, sending_id) == (OutboxState.SENDING, None)
+    assert await _state_of(outbox, sent_id) == (OutboxState.SENT, None)
+    assert await _state_of(outbox, cancelled_id) == (OutboxState.CANCELLED, "cancelled_by_owner")
+    assert await _state_of(outbox, manual_id) == (OutboxState.SCHEDULED, None)
+
+
+async def test_superseding_decides_by_time_and_then_by_id(
+    outbox: SqlOutboxRepository, messages: SqlMessageRepository, contact: Contact
+) -> None:
+    trigger = await _message(messages, contact, 20, FAKE_NOW)
+    later_id_older_time = await _message(messages, contact, 21, EARLIER)
+    same_time_larger_id = await _message(messages, contact, 22, FAKE_NOW)
+    later_id_newer_time = await _message(messages, contact, 23, LATER)
+    older_id = await _autopilot_row(outbox, contact, later_id_older_time)
+    same_larger_id = await _autopilot_row(outbox, contact, same_time_larger_id)
+    newer_id = await _autopilot_row(outbox, contact, later_id_newer_time)
+
+    cancelled = await outbox.cancel_superseded_autopilot_rows(contact.id, trigger.id, SUPERSEDED)
+
+    assert cancelled == 1
+    assert await _state_of(outbox, older_id) == (OutboxState.CANCELLED, SUPERSEDED)
+    assert await _state_of(outbox, same_larger_id) == (OutboxState.SCHEDULED, None)
+    assert await _state_of(outbox, newer_id) == (OutboxState.SCHEDULED, None)
+
+
+async def test_superseding_with_an_equal_time_cancels_only_the_smaller_id(
+    outbox: SqlOutboxRepository, messages: SqlMessageRepository, contact: Contact
+) -> None:
+    smaller = await _message(messages, contact, 30, FAKE_NOW)
+    trigger = await _message(messages, contact, 31, FAKE_NOW)
+    smaller_row = await _autopilot_row(outbox, contact, smaller)
+    trigger_row = await _autopilot_row(outbox, contact, trigger)
+
+    await outbox.cancel_superseded_autopilot_rows(contact.id, trigger.id, SUPERSEDED)
+
+    assert await _state_of(outbox, smaller_row) == (OutboxState.CANCELLED, SUPERSEDED)
+    assert await _state_of(outbox, trigger_row) == (OutboxState.SCHEDULED, None)
+
+
+async def test_superseding_ignores_rows_without_a_trigger_and_unknown_triggers(
+    outbox: SqlOutboxRepository,
+    messages: SqlMessageRepository,
+    contacts: SqlContactRepository,
+    modes: SqlModeRepository,
+    contact: Contact,
+) -> None:
+    other = await stored_contact(contacts, modes, ContactStatus.ACTIVE, tg_id=FAKE_TELEGRAM_ID + 2)
+    foreign_trigger = await _message(messages, other, 40, LATER)
+    trigger = await _message(messages, contact, 41, LATER)
+    without_trigger = await _autopilot_row(outbox, contact, None)
+    older = await _message(messages, contact, 42, EARLIER)
+    older_row = await _autopilot_row(outbox, contact, older)
+
+    unknown = await outbox.cancel_superseded_autopilot_rows(contact.id, 999_999, SUPERSEDED)
+    foreign = await outbox.cancel_superseded_autopilot_rows(
+        contact.id, foreign_trigger.id, SUPERSEDED
+    )
+    real = await outbox.cancel_superseded_autopilot_rows(contact.id, trigger.id, SUPERSEDED)
+
+    assert (unknown, foreign, real) == (0, 0, 1)
+    assert await _state_of(outbox, without_trigger) == (OutboxState.SCHEDULED, None)
+    assert await _state_of(outbox, older_row) == (OutboxState.CANCELLED, SUPERSEDED)

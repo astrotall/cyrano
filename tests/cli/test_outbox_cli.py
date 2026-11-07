@@ -417,6 +417,7 @@ def _sender(
     return OutboxSender(
         outbox,
         contacts,
+        SqlMessageRepository(factory),
         SqlSenderStateRepository(factory),
         SendLimiter(SqlMessageRepository(factory), LIMITS),
         free_schedule(),

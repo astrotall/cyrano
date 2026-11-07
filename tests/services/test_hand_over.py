@@ -160,6 +160,7 @@ def _sender(rig: Rig, transport: ExplodingTransport) -> OutboxSender:
     return OutboxSender(
         rig.outbox,
         rig.contacts,
+        rig.messages,
         rig.state,
         SendLimiter(rig.messages, FakeLimits()),
         free_schedule(),

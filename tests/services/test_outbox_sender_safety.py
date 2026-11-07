@@ -195,6 +195,7 @@ class Rig:
         return OutboxSender(
             self.outbox,
             self.contacts,
+            self.messages,
             self.state,
             SendLimiter(self.messages, limits if limits is not None else FakeLimits()),
             free_schedule(),
@@ -1063,6 +1064,7 @@ async def test_the_running_loop_claims_nothing_during_a_pause_and_goes_on_after_
     sender = OutboxSender(
         rig.outbox,
         rig.contacts,
+        rig.messages,
         rig.state,
         SendLimiter(rig.messages, FakeLimits()),
         free_schedule(),

@@ -202,6 +202,7 @@ async def test_after_a_resume_the_sender_guard_allows_sending_again(
     sender = OutboxSender(
         outbox,
         contacts,
+        messages,
         sender_state,
         SendLimiter(messages, FakeLimits()),
         free_schedule(),

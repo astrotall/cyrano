@@ -34,8 +34,24 @@ HAND_OVER_MODULE = "services/hand_over.py"
 INTAKE_MODULE = "services/intake.py"
 STOP_TRIGGER_DETECTOR_MODULE = "services/stop_triggers.py"
 STOP_CHECK_MODULE = "stop_check_cli.py"
+SUPERSEDE_METHOD = "cancel_superseded_autopilot_rows"
+SUPERSEDE_CHECK = "_cancel_if_superseded"
+SUPERSEDE_REASON = "CANCEL_REASON_SUPERSEDED"
+DOMAIN_OUTBOX_MODULE = "domain/outbox.py"
+DELIVER_METHOD = "_deliver"
+BEFORE_SEND_METHOD = "_before_send"
+GUARD_METHOD = "_guarded_contact"
+ENQUEUE_METHOD = "enqueue"
 STORAGE_WRITE_METHODS = frozenset(
-    {"set_status", "append", "enqueue", "cancel_pending_for_contact", "commit", "update_identity"}
+    {
+        "set_status",
+        "append",
+        "enqueue",
+        "cancel_pending_for_contact",
+        SUPERSEDE_METHOD,
+        "commit",
+        "update_identity",
+    }
 )
 PAUSE_HANDLER_MODULE = "bot/handlers.py"
 PAUSE_ACTIONS_NAME = "pause_actions"
@@ -139,6 +155,10 @@ def _imported(tree: ast.AST) -> Iterator[tuple[str, str]]:
         elif isinstance(node, ast.ImportFrom) and node.module is not None:
             for alias in node.names:
                 yield node.module, alias.name
+
+
+def _imported_names(tree: ast.AST) -> set[str]:
+    return {name for _, name in _imported(tree)}
 
 
 def _members(protocol: type) -> set[str]:
@@ -647,6 +667,47 @@ def test_only_the_owner_command_takes_a_failed_row_back() -> None:
     callers = {name for name, tree in _modules() if RETRY_METHOD in _called_attributes(tree)}
 
     assert callers == {OWNER_COMMAND_MODULE}
+
+
+def _call_lines(tree: ast.AST, function_name: str, attribute: str) -> list[int]:
+    function = next(
+        node
+        for node in ast.walk(tree)
+        if isinstance(node, ast.AsyncFunctionDef | ast.FunctionDef) and node.name == function_name
+    )
+    return sorted(
+        node.lineno
+        for node in ast.walk(function)
+        if isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Attribute)
+        and node.func.attr == attribute
+    )
+
+
+def test_only_the_reply_job_cancels_superseded_rows_and_only_before_it_enqueues() -> None:
+    callers = {name for name, tree in _modules() if SUPERSEDE_METHOD in _called_attributes(tree)}
+    tree = ast.parse((SOURCE_ROOT / REPLY_JOB_MODULE).read_text())
+
+    assert callers == {REPLY_JOB_MODULE}
+    [cancel_line] = _call_lines(tree, "_enqueue", SUPERSEDE_METHOD)
+    [enqueue_line] = _call_lines(tree, "_enqueue", ENQUEUE_METHOD)
+    assert cancel_line < enqueue_line
+
+
+def test_the_superseded_reason_is_used_only_by_the_domain_the_reply_job_and_the_sender() -> None:
+    users = {name for name, tree in _modules() if SUPERSEDE_REASON in _imported_names(tree)}
+
+    assert users == {REPLY_JOB_MODULE, SENDER_MODULE}
+
+
+def test_the_sender_checks_supersession_before_the_pre_send_steps_and_before_the_send() -> None:
+    tree = ast.parse((SOURCE_ROOT / SENDER_MODULE).read_text())
+
+    first, second = _call_lines(tree, DELIVER_METHOD, SUPERSEDE_CHECK)
+    [pre_send] = _call_lines(tree, DELIVER_METHOD, BEFORE_SEND_METHOD)
+    guards = _call_lines(tree, DELIVER_METHOD, GUARD_METHOD)
+    [send] = _call_lines(tree, DELIVER_METHOD, TRANSPORT_METHOD)
+    assert first < pre_send < guards[-1] <= second < send
 
 
 def test_the_scans_catch_what_they_look_for() -> None:

@@ -30,6 +30,7 @@ from cyrano.domain.models import Contact
 from cyrano.domain.outbox import (
     CANCEL_REASON_SEND_REJECTED,
     CANCEL_REASON_STALE,
+    CANCEL_REASON_SUPERSEDED,
     CAUSE_SEND_DEADLINE,
     ERROR_INTERRUPTED,
     ERROR_OUTSIDE_HOURS,
@@ -49,6 +50,7 @@ from cyrano.services.message_transport import MessageTransport
 from cyrano.services.owner_notifier import OwnerNotifier
 from cyrano.services.repositories import (
     ContactRepository,
+    MessageRepository,
     OutboxRepository,
     SenderStateRepository,
 )
@@ -133,6 +135,7 @@ class OutboxSender:
         self,
         outbox: OutboxRepository,
         contacts: ContactRepository,
+        messages: MessageRepository,
         state: SenderStateRepository,
         limiter: SendLimiter,
         schedule: ScheduleService,
@@ -148,6 +151,7 @@ class OutboxSender:
     ) -> None:
         self._outbox = outbox
         self._contacts = contacts
+        self._messages = messages
         self._state = state
         self._limiter = limiter
         self._schedule = schedule
@@ -251,6 +255,8 @@ class OutboxSender:
             return
         if row.source is OutboxSource.AUTOPILOT and await self._hold_outside_hours(row, now):
             return
+        if await self._cancel_if_superseded(row):
+            return
         try:
             await self._before_send(row, contact.tg_id)
         except (SendFloodWait, SendAccountBlocked) as exc:
@@ -258,7 +264,7 @@ class OutboxSender:
             await self._handle_failure(row, exc)
             return
         contact = await self._guarded_contact(row)
-        if contact is None:
+        if contact is None or await self._cancel_if_superseded(row):
             self._log_step(row, SendStep.SEND, StepOutcome.SKIPPED)
             return
         deadline = asyncio.timeout(self._timings.send_deadline)
@@ -284,6 +290,28 @@ class OutboxSender:
             row.id, row.contact_id, row.text, sent.tg_message_id, sent.sent_at
         )
         logger.info("outbox row sent", extra={"row_id": row.id, "contact_id": row.contact_id})
+
+    async def _is_superseded(self, row: ScheduledMessage) -> bool:
+        if row.source is not OutboxSource.AUTOPILOT or row.trigger_message_id is None:
+            return False
+        trigger = await self._messages.get(row.trigger_message_id)
+        if trigger is None:
+            return False
+        latest = await self._messages.list_last(row.contact_id, 1)
+        return bool(latest) and (latest[0].created_at, latest[0].id) > (
+            trigger.created_at,
+            trigger.id,
+        )
+
+    async def _cancel_if_superseded(self, row: ScheduledMessage) -> bool:
+        if not await self._is_superseded(row):
+            return False
+        await self._outbox.mark_cancelled(row.id, CANCEL_REASON_SUPERSEDED)
+        logger.info(
+            "outbox row superseded by a newer message",
+            extra={"row_id": row.id, "contact_id": row.contact_id},
+        )
+        return True
 
     async def _hold_outside_hours(self, row: ScheduledMessage, now: datetime) -> bool:
         block = await self._schedule.blocked_until(now)

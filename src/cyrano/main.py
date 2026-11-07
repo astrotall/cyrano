@@ -229,6 +229,7 @@ async def run(
     sender = OutboxSender(
         outbox,
         contacts,
+        messages,
         SqlSenderStateRepository(session_factory),
         SendLimiter(messages, settings),
         ScheduleService(SqlScheduleProfileRepository(session_factory), settings.timezone),

@@ -151,7 +151,7 @@ async def test_a_manual_message_of_the_owner_in_between_cancels_the_reply(
     await pipeline.receive(contact, "how was the invented trip", 502)
     await pipeline.run_jobs()
     detector = ManualMessageDetector(
-        rig.contacts, rig.messages, rig.outbox, RecordingManualPauseNotifier()
+        rig.contacts, rig.messages, rig.outbox, RecordingManualPauseNotifier(), clock=rig.clock
     )
 
     outcome = await detector.handle(

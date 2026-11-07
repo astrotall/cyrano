@@ -21,25 +21,37 @@ owner, and pacing and limits are enforced centrally.
 Contact statuses: `new -> pending -> active -> paused / ignored`. Meaning and transitions:
 [contact-lifecycle.md](.claude/docs/contact-lifecycle.md).
 
-The skeleton (CYR-8), the storage layer (CYR-9), the userbot intake (CYR-10), the profile
-collection (CYR-11), the control bot with the contact card (CYR-12), the LLM client (CYR-13, used
-by the worker, not by the app process), the persona and style examples import (CYR-14) and
-the layered reply prompt with the reply generator and the `reply-preview` command (CYR-16, used by
-the worker since CYR-17) and the outbox with the one sender and the status guard (CYR-19; the owner's
-test command and, with the switch on, the autopilot write rows) with its limits, flood-wait pause
-and account-level stop (CYR-22) and the humanization (CYR-18: the send time planner, called by the
-autopilot job, the schedule profile, and the read mark, typing and availability check in the sender) exist.
-and the pause on a manual message
-of the owner (CYR-21: the outgoing handler and the detector in the running app, the notice with its Resume
-button) and the stop-triggers (CYR-20: the detector and the hand-over on incoming messages in the
-running app, the notice with its three buttons, the `NEEDS_OWNER` model signal in the generator, and
-the `stop-check` command) and the autopilot (CYR-17, behind `AUTOPILOT_ENABLED`, default off: the app
-enqueues one Arq job per incoming message of an `active` contact, the worker generates one reply per
-burst with the persona, the examples and the reply generator and writes an `autopilot` outbox row,
-the app's sender sends it; the sweeper, `reply_after`, the autopilot stop and cooldown, and the
-`autopilot` command; incoming messages are stored with Telegram's send time, clamped to now when it is
-more than 5 minutes ahead, and "newer" is decided by `(created_at, id)`). Everything
-else is planned and marked with its ticket key.
+What exists now:
+
+- The skeleton (CYR-8) and the storage layer (CYR-9): typed configuration, JSON logging, the app
+  process with a heartbeat, the Arq worker, Docker Compose, CI, the schema with its migrations and
+  the repositories.
+- The userbot intake (CYR-10): unknown private senders become `new` contacts and their messages are
+  stored with Telegram's send time (a missing or naive time, and a time more than 5 minutes ahead of the
+  clock, becomes now; CYR-40 applies the same rule to the owner's own messages); "newer" is decided by
+  `(created_at, id)`.
+- The profile collection (CYR-11) and the control bot with the contact card and its Reply and Ignore
+  buttons (CYR-12).
+- The LLM client (CYR-13), the persona and the style examples with their import (CYR-14) and the
+  chat export converter (CYR-34). The layered reply prompt, the reply generator and the
+  `reply-preview` command (CYR-16).
+- The outbox with the one sender and the status guard (CYR-19), its limits, flood-wait pause and
+  account-level stop (CYR-22) and the humanization: the send time planner, the schedule profile, and
+  the read mark, typing and availability check in the sender (CYR-18).
+- The pause on a manual message of the owner (CYR-21) and the stop-triggers with the hand-over
+  and the `NEEDS_OWNER` model signal (CYR-20).
+- The autopilot (CYR-17), behind `AUTOPILOT_ENABLED` (default off): the app enqueues one Arq job per
+  incoming message of an `active` contact, the worker generates one reply per burst with the persona,
+  the examples and the reply generator and writes an `autopilot` outbox row, and the app's sender sends
+  it (one reply per burst by supersession, CYR-41). The sweeper, `reply_after`, the autopilot stop and
+  cooldown and the `autopilot` command belong to it.
+- The owner's commands: `login`, `llm-check`, `persona`, `examples`, `reply-preview`, `outbox`,
+  `schedule`, `stop-check` and `autopilot` (the list is in the README).
+
+Still planned, each marked with its ticket key where there is one: conversation modes beyond the
+default one (CYR-15), the rest of the control panel (CYR-26), splitting a reply into several lines
+(CYR-36), proactive messages with their limits (CYR-23), contact summaries (CYR-25), the background
+jobs of the worker (CYR-23, CYR-24, CYR-25) and a catalog of contacts (no ticket yet).
 Never describe planned behaviour as existing.
 
 ## Locked architectural decisions
@@ -53,7 +65,7 @@ Changing any of these is a large change (see Workflow expectations). Reasons:
 | Likes | The owner likes in the matching bot by hand                                                                                                                                                    | No automation of the matching bot, ever |
 | Automatic replies | Only to contacts in status `active`; checked at scheduling time and again right before sending                                                                                                 | A status change between the two checks cancels the reply |
 | One way out | Every outgoing message goes through the sender                                                                                                                                                 | No other code path sends; the status guard lives in the sender |
-| Hand-over | Meeting or date proposals, phone and contact exchange, money, photo requests, a direct question whether it is a bot or AI, and low model confidence stop the conversation and notify the owner | The assistant never answers those itself |
+| Hand-over | Meeting or date proposals, phone and contact exchange, money, photo requests, a direct question whether it is a bot or AI, the owner's exes (an explicit owner decision taken in CYR-20), crisis topics (the same decision) and low model confidence, which the model signals with `NEEDS_OWNER`, stop the conversation and notify the owner. The text check runs at intake for `active` contacts and again on the whole burst in the autopilot job | The assistant never answers those itself |
 | Style | Persona text plus few-shot examples from the owner's real chats; no model training. Modes are a prompt fragment plus examples; the persona is common                                           | Style changes are text and data changes, not code or training |
 | LLM | One interface, DeepSeek first (plain httpx, no SDK), provider replaceable by config                                                                                                            | No provider SDK; the rest of the code sees only the interface |
 | Infra | PostgreSQL, async SQLAlchemy 2.x, Alembic, Redis, Arq, Docker Compose, Python 3.14, uv                                                                                                         | Everything async; schema changes go through Alembic |
@@ -108,15 +120,33 @@ Changing any of these is a large change (see Workflow expectations). Reasons:
 │   ├── health.py                 heartbeat file and the app healthcheck
 │   ├── domain/                   enums, status transition rules, errors, Pydantic models
 │   ├── db/                       SQLAlchemy models, engine and sessions, repositories
-│   ├── services/                 repositories (Protocols), intake, sanitize, contact_events, profile_source,
-│   │                             leomatch, profile_collector, card_sender, card_builder, card_announcer,
-│   │                             card_actions, llm_client, llm_check, style_files, style_import, persona_service,
-│   │                             style_examples, chat_export_reader, chat_redaction, chat_dialogues,
-│   │                             chat_export_converter, contact_facts, prompt_builder,
-│   │                             reply_postprocess, reply_generator, send_guard, send_limiter, outbox_service, outbox_sender,
-│   │                             message_transport, owner_notifier, humanization, schedule_files, stop_triggers,
-│   │                             hand_over, hand_over_notifier, reply_job, autopilot, reply_job_queue;
-│   │                             the rest is planned
+│   ├── services/                 business logic; every module:
+│   │                             repositories (the repository Protocols), intake (registration of incoming messages),
+│   │                             message_time (the one rule for the stored time of a message, both directions),
+│   │                             sanitize (NUL-byte removal), contact_events (the in-memory event queue),
+│   │                             profile_source (the profile reader Protocols), leomatch (the matching-bot card parser),
+│   │                             profile_collector (profile, photo and card per new contact),
+│   │                             card_sender (the CardSender Protocol), card_builder (the owner's card),
+│   │                             card_announcer (card to the owner, new -> pending), card_actions (Reply and Ignore),
+│   │                             pause_actions (Resume and Ignore of a paused contact),
+│   │                             llm_client (the LLMClient Protocol), llm_check (the request behind llm-check),
+│   │                             style_files (persona and examples files), style_import (the importers),
+│   │                             persona_service (the stored persona), style_examples (selection and statistics),
+│   │                             chat_export_reader (Telegram Desktop export), chat_redaction (tokens for private data),
+│   │                             chat_dialogues (dialogue candidates), chat_export_converter (export to a draft file),
+│   │                             contact_facts (the profile facts that may reach a prompt),
+│   │                             prompt_builder (the layered prompt and its budget), reply_postprocess (reply cleaning),
+│   │                             reply_generator (build, call the LLM, clean),
+│   │                             send_guard (the status guard), send_limiter (the six send limits),
+│   │                             outbox_service (validation and enqueue), outbox_sender (the one sender),
+│   │                             message_transport (the write Protocol of the sender), owner_notifier (the owner notice Protocol),
+│   │                             humanization (the send time planner and the schedule service),
+│   │                             schedule_files (the schedule file), manual_intervention (the manual message detector),
+│   │                             manual_pause_notifier (the manual pause notice Protocol),
+│   │                             stop_triggers (the pure detector), hand_over (pause, cancel and one notice),
+│   │                             hand_over_notifier (the hand-over notice Protocol),
+│   │                             reply_job (one generated reply per burst), autopilot (the scheduler and the sweeper),
+│   │                             reply_job_queue (the job queue Protocol)
 │   ├── userbot/                  Telethon: protocols, filters, handler, client, adapter, login, runner, errors,
 │   │                             profile_source, leomatch_source, leomatch_match
 │   ├── bot/                      aiogram: app, middleware, handlers, rendering, callbacks, sender, notifier, messages, errors
@@ -139,7 +169,7 @@ userbot tests with their fakes. CYR-11 added the profile collection: `services/p
 `ProfileSource` and `LeomatchSource` Protocols, `ProfileSourceError`), `services/leomatch.py` (the
 card parser), the read-only Telethon adapters `userbot/profile_source.py`,
 `userbot/leomatch_source.py` and `userbot/leomatch_match.py`, the `ContactProfile`,
-`LeomatchProfile`, `TelegramProfile`, `LeomatchSourceText` and `ContactReadyEvent` models,
+`LeomatchProfile`, `TelegramProfile` and `ContactReadyEvent` models, `LeomatchLookup`,
 `ContactRepository.update_identity`, the generic in-memory event queue (two instances), the
 `LEOMATCH_BOT_USERNAME` setting, and the tests with their fakes. CYR-12 added the `aiogram`
 dependency and the `bot/` package (the only one that imports aiogram: `ControlBot` with the polling,
@@ -156,7 +186,7 @@ reply parsing with validation retries, the constants and prompt texts), `service
 `LLMResult`), the `Role` and `LLMStep` enums, the `LLMError` family in `domain/errors.py`, the
 optional per-step `LLM_*`, `DEEPSEEK_BASE_URL` and `DEEPSEEK_THINKING` settings, the
 `python -m cyrano llm-check` command with `make llm-check`, and the tests with their fakes
-(`httpx.MockTransport` handlers, `FakeLLMClient`). Nothing in the app builds the client yet.
+(`httpx.MockTransport` handlers, `FakeLLMClient`). The app process builds no client; the worker does.
 CYR-14 added the persona and the style examples: `domain/style.py` (models, limits, the content
 hash), the import errors in `domain/errors.py`, `services/style_files.py`, `style_import.py`
 (`PersonaImporter`, `ExamplesImporter`), `persona_service.py` and `style_examples.py`
@@ -164,7 +194,7 @@ hash), the import errors in `domain/errors.py`, `services/style_files.py`, `styl
 `SqlStyleExampleRepository`, migration `0002` (`persona`, `style_examples`), `style_cli.py` with the
 `persona` and `examples` subcommands and their Makefile targets, the optional `STYLE_EXAMPLES_MAX`
 setting, the invented samples in `examples/`, the `.gitignore` rules for real files, and the tests.
-They are stored in PostgreSQL, not read from a path at runtime; nothing in the app uses them yet.
+They are stored in PostgreSQL, not read from a path at runtime; the worker's reply job and `reply-preview` select them.
 CYR-34 added the converter of a Telegram Desktop JSON chat export into a draft examples file:
 `domain/chat_export.py` (limits, vocabulary, report), `services/chat_export_reader.py`,
 `chat_redaction.py`, `chat_dialogues.py`, `chat_export_converter.py`, `convert_cli.py` (the
@@ -187,8 +217,8 @@ migration `0003` (`scheduled_messages`), `SqlOutboxRepository` and the `OutboxRe
 after the userbot and the control bot and cancelled first; the only caller of `send_text`),
 `message_transport.py` (three methods since CYR-18) and `owner_notifier.py` (one method), `userbot/adapter.py`
 (`TelethonAdapter`, the only module with a Telethon write call; the rest of `userbot/` only listens
-and reads), `UserbotAccess` and `build_access` instead of `build_client`, `get_full_user`
-instead of the generic request call on `UserbotClient`, `bot/notifier.py`, `outbox_cli.py` with the
+and reads), `UserbotAccess` and `build_access` (the client with its adapter), `get_full_user` on
+`UserbotClient` (which has no generic request call), `bot/notifier.py`, `outbox_cli.py` with the
 `outbox` commands and their Makefile targets, and the tests, with the structural scans in
 `tests/test_one_sender.py`.
 CYR-22 added the limits, the pause and the stop of the sender: the six optional `SEND_LIMIT_*`
@@ -261,6 +291,13 @@ the Russian texts, the reworded hand-over reason for a model-side hand-over, the
 `autopilot resume` commands and their Makefile targets, the wiring in `main.py` (the pool, the
 scheduler, the sweeper, the shutdown order), and the tests, with the new scans in
 `tests/test_one_sender.py`.
+CYR-41 added the supersession of `autopilot` rows by a newer message, so one reply goes out per burst.
+CYR-40 moved the time rule of a message into `services/message_time.py` (`message_time`, used by the
+intake and by `ManualMessageDetector`, which got an injectable clock), made `OutgoingMessage.sent_at`
+optional like `IncomingMessage.sent_at` (a naive time is read as missing), and added
+`tests/test_message_time_rule.py`. CYR-39 synced this file, the README and the guides with the code
+and added `tests/test_docs_in_sync.py`, which checks the Makefile targets, the subcommands, the
+migrations and the service modules against the README, `architecture.md` and this file.
 
 ## Detailed guides
 

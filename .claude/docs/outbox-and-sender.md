@@ -81,7 +81,7 @@ which stays "the last message from the contact".
 | `active` | `manual_test` | any | allowed |
 
 It runs twice: in `OutboxService.enqueue`, which also validates the text (NUL removed, trimmed, not
-empty, at most `MAX_OUTBOX_TEXT_LENGTH`, 4096 UTF-16 code units, which is how Telegram counts, so
+empty (refused as `text_empty`), at most `MAX_OUTBOX_TEXT_LENGTH` (refused as `text_too_long`), 4096 UTF-16 code units, which is how Telegram counts, so
 2048 emoji fit and 2049 do not) and raises `EnqueueRefused` without storing anything;
 and in the sender, on a contact it has just re-read: once after the claim, so a refused contact is
 never marked as read, and once more after the pre-send part, right before `send_text`, because that

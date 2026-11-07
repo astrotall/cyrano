@@ -10,7 +10,6 @@ from datetime import UTC, datetime
 from cyrano.domain.enums import ContactStatus, MessageDirection, TriggerSource
 from cyrano.domain.errors import ContactAlreadyExists
 from cyrano.domain.models import (
-    MAX_FUTURE_SKEW,
     Contact,
     ContactCreate,
     IncomingMessage,
@@ -20,6 +19,7 @@ from cyrano.domain.models import (
 from cyrano.services.autopilot import AutopilotScheduler
 from cyrano.services.contact_events import ContactEventPublisher
 from cyrano.services.hand_over import HandOverService
+from cyrano.services.message_time import message_time
 from cyrano.services.repositories import ContactRepository, MessageRepository
 from cyrano.services.sanitize import sanitize_incoming
 from cyrano.services.stop_triggers import detect
@@ -29,12 +29,6 @@ logger = logging.getLogger("cyrano.services.intake")
 
 def _utc_now() -> datetime:
     return datetime.now(UTC)
-
-
-def message_time(sent_at: datetime | None, now: datetime) -> datetime:
-    if sent_at is None or sent_at - now > MAX_FUTURE_SKEW:
-        return now
-    return sent_at
 
 
 @dataclass(frozen=True, slots=True)

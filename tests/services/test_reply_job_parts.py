@@ -75,7 +75,7 @@ async def test_a_job_run_again_creates_no_extra_part(rig: AutopilotRig) -> None:
     assert client.calls == 1
 
 
-async def test_a_new_reply_cancels_the_waiting_parts_of_an_older_reply_but_not_its_sent_part(
+async def test_a_new_reply_leaves_every_part_of_an_older_reply_whose_first_part_was_sent(
     rig: AutopilotRig,
 ) -> None:
     contact = await rig.contact()
@@ -95,10 +95,29 @@ async def test_a_new_reply_cancels_the_waiting_parts_of_an_older_reply_but_not_i
     assert stored_sent is not None
     assert stored_waiting is not None
     assert stored_sent.state is OutboxState.SENT
-    assert (stored_waiting.state, stored_waiting.cancel_reason) == (
-        OutboxState.CANCELLED,
-        CANCEL_REASON_SUPERSEDED,
+    assert (stored_waiting.state, stored_waiting.cancel_reason) == (OutboxState.SCHEDULED, None)
+
+
+async def test_a_new_reply_cancels_every_part_of_an_older_reply_that_has_not_started(
+    rig: AutopilotRig,
+) -> None:
+    contact = await rig.contact()
+    older = await rig.say(contact, ago=OLDER_AGO)
+    first, second = await rig.outbox.enqueue_sequence(
+        contact.id, TWO_LINES.splitlines(), rig.clock(), OutboxSource.AUTOPILOT, older.id
     )
+    newer = await rig.say(contact, ago=0)
+
+    result = await rig.runner(SequenceLLMClient(llm_result(TWO_LINES))).run(contact.id, newer.id)
+
+    assert result.outcome is ReplyJobOutcome.QUEUED
+    for part in (first, second):
+        stored = await rig.outbox.get(part.id)
+        assert stored is not None
+        assert (stored.state, stored.cancel_reason) == (
+            OutboxState.CANCELLED,
+            CANCEL_REASON_SUPERSEDED,
+        )
 
 
 async def test_the_finished_line_of_a_queued_job_carries_the_number_of_parts(

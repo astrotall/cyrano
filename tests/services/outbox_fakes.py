@@ -400,11 +400,14 @@ class InMemoryOutbox:
         newest = (self.trigger_times.get(trigger_message_id, FAKE_NOW), trigger_message_id)
         older = []
         for row in self.rows.values():
-            root = await self.root_trigger_id(row.id)
+            first = self._first_part(row.id)
+            root = None if first is None else first.trigger_message_id
             if (
                 row.contact_id == contact_id
                 and row.source is OutboxSource.AUTOPILOT
                 and row.state is OutboxState.SCHEDULED
+                and first is not None
+                and first.state is OutboxState.SCHEDULED
                 and root is not None
                 and (self.trigger_times.get(root, FAKE_NOW), root) < newest
             ):
@@ -440,10 +443,14 @@ class InMemoryOutbox:
             cancelled += len(orphans)
         return cancelled
 
-    async def root_trigger_id(self, row_id: int) -> int | None:
+    def _first_part(self, row_id: int) -> ScheduledMessage | None:
         row = self.rows.get(row_id)
         while row is not None and row.follows_id is not None:
             row = self.rows.get(row.follows_id)
+        return row
+
+    async def root_trigger_id(self, row_id: int) -> int | None:
+        row = self._first_part(row_id)
         return None if row is None else row.trigger_message_id
 
     async def has_sending_row(self, contact_id: int) -> bool:

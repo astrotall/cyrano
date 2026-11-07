@@ -12,7 +12,6 @@ from cyrano.domain.enums import (
     ContactStatus,
     LimitScope,
     LimitWindow,
-    MessageDirection,
     OutboxSource,
     PauseReason,
     RejectionReason,
@@ -71,7 +70,6 @@ OWNER_NOTIFY_DEADLINE = 15.0
 NOTIFIED_LIMIT_WINDOWS = frozenset({LimitWindow.HOUR, LimitWindow.DAY})
 STEP_LOG_MESSAGE = "outbox row step"
 STEP_DURATION_UNIT = timedelta(milliseconds=1)
-FOLLOWER_HISTORY_MESSAGES = 20
 _SYSTEM_RANDOM = random.SystemRandom()
 
 
@@ -274,7 +272,7 @@ class OutboxSender:
             await self._handle_failure(row, exc)
             return
         contact = await self._guarded_contact(row)
-        if contact is None or await self._cancel_if_superseded(row):
+        if contact is None:
             self._log_step(row, SendStep.SEND, StepOutcome.SKIPPED)
             return
         deadline = asyncio.timeout(self._timings.send_deadline)
@@ -304,10 +302,8 @@ class OutboxSender:
         await self._outbox.schedule_followers(row.id, self._clock() + timedelta(seconds=pause))
 
     async def _is_superseded(self, row: ScheduledMessage) -> bool:
-        if row.source is not OutboxSource.AUTOPILOT:
+        if row.source is not OutboxSource.AUTOPILOT or row.follows_id is not None:
             return False
-        if row.follows_id is not None:
-            return await self._is_follower_superseded(row)
         if row.trigger_message_id is None:
             return False
         trigger = await self._messages.get(row.trigger_message_id)
@@ -317,20 +313,6 @@ class OutboxSender:
         return bool(latest) and (latest[0].created_at, latest[0].id) > (
             trigger.created_at,
             trigger.id,
-        )
-
-    async def _is_follower_superseded(self, row: ScheduledMessage) -> bool:
-        root_trigger_id = await self._outbox.root_trigger_id(row.id)
-        if root_trigger_id is None:
-            return False
-        trigger = await self._messages.get(root_trigger_id)
-        if trigger is None:
-            return False
-        recent = await self._messages.list_last(row.contact_id, FOLLOWER_HISTORY_MESSAGES)
-        return any(
-            message.direction is MessageDirection.INCOMING
-            and (message.created_at, message.id) > (trigger.created_at, trigger.id)
-            for message in recent
         )
 
     async def _cancel_if_superseded(self, row: ScheduledMessage) -> bool:

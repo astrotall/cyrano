@@ -345,8 +345,11 @@ The running app picks up an import without a restart. Format, rules and worked e
 ### The autopilot
 
 With `AUTOPILOT_ENABLED=true`, every message of an `active` contact puts one reply job on the Arq
-queue, 12 s later (`AUTOPILOT_DEBOUNCE_SECONDS`). When several messages arrive in a row, only the job
-of the last one writes a reply. The worker checks the contact, the message (not older than 6 h, not
+queue, 12 s later (`AUTOPILOT_DEBOUNCE_SECONDS`), or 4 s later in an ongoing conversation
+(`AUTOPILOT_DEBOUNCE_ONGOING_SECONDS`). When several messages arrive in a row, one job writes the reply
+for the burst; if the contact keeps writing for 30 s (`AUTOPILOT_MAX_BURST_WAIT_SECONDS`), a job answers
+the newest message instead of waiting longer, and a reply whose read mark and typing have begun is always
+sent, all its parts included. The worker checks the contact, the message (not older than 6 h, not
 from before a resume, not answered yet), runs the stop-trigger check on the whole burst, generates the
 reply with your persona and examples, asks the planner for the send time and writes an `autopilot`
 row, or one row per line of a multi-line reply; the app's sender sends them with the usual guard,
@@ -847,7 +850,9 @@ the default applies.
 | `REPLY_HISTORY_MESSAGES` | no | `20` | How many last messages of a contact go into the reply prompt, from 1 to 100 |
 | `REPLY_PROMPT_BUDGET_CHARS` | no | `24000` | Character budget of the whole reply prompt, from 4000 to 200000; over it, examples and then the oldest messages are dropped |
 | `AUTOPILOT_ENABLED` | no | `false` | `true` switches the autopilot on: the app enqueues reply jobs, the worker writes `autopilot` rows and the sender sends them. Restart the app and the worker after a change. The owner's test commands do not consult this switch; the status check applies to both |
-| `AUTOPILOT_DEBOUNCE_SECONDS` | no | `12` | Delay of a reply job after an incoming message, from 0 to 300; the sweep waits twice as long before it enqueues a lost job |
+| `AUTOPILOT_DEBOUNCE_SECONDS` | no | `12` | Delay of a reply job after an incoming message when the conversation is not ongoing, from 0 to 300; the sweep waits twice as long before it enqueues a lost job |
+| `AUTOPILOT_DEBOUNCE_ONGOING_SECONDS` | no | `4` | Delay of a reply job in an ongoing conversation (the last activity before the burst is less than the schedule profile's `ongoing_window_minutes` old), from 0 to 300 and not above `AUTOPILOT_DEBOUNCE_SECONDS` |
+| `AUTOPILOT_MAX_BURST_WAIT_SECONDS` | no | `30` | How long a burst of messages may go unanswered before a reply job answers its newest message instead of waiting for the contact to stop, from 1 to 300 and not below `AUTOPILOT_DEBOUNCE_SECONDS` |
 | `SEND_LIMIT_MINUTE` | no | `4` | Most outgoing messages per minute, all contacts together; at least 1, not above `SEND_LIMIT_HOUR` |
 | `SEND_LIMIT_HOUR` | no | `40` | Most outgoing messages per hour, all contacts together; at least 1, not above `SEND_LIMIT_DAY` |
 | `SEND_LIMIT_DAY` | no | `200` | Most outgoing messages per day, all contacts together; at least 1 |

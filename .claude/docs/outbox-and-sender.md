@@ -48,11 +48,11 @@ runs twice, a retried job and the sweeper never produce a second row or a second
 | --- | --- | --- | --- |
 | (none) | `scheduled` | `OutboxService.enqueue`, or `OutboxService.enqueue_sequence` for every part of a reply | Text and guard passed |
 | `scheduled` | `sending` | `claim_due` in the sender | The row is due |
-| `scheduled` | `cancelled` | `cancel_scheduled` (the owner's command), `cancel_pending_for_contact` (the sender after a recipient rejection, reason `send_rejected`; the manual-message detector, reason `manual_message`, CYR-21; the hand-over on a stop-trigger, reason `stop_trigger`, CYR-20) `cancel_superseded_autopilot_rows` (the reply job, the contact's older `autopilot` rows and the waiting parts of older replies, reason `superseded`, CYR-41, CYR-36) and `cancel_orphaned_followers` (the sender, a part whose predecessor is `failed` or `cancelled`, reason `predecessor`, CYR-36) | |
+| `scheduled` | `cancelled` | `cancel_scheduled` (the owner's command), `cancel_pending_for_contact` (the sender after a recipient rejection, reason `send_rejected`; the manual-message detector, reason `manual_message`, CYR-21; the hand-over on a stop-trigger, reason `stop_trigger`, CYR-20) `cancel_superseded_autopilot_rows` (the reply job, the contact's older `autopilot` replies whose first part is still `scheduled`, with their waiting parts, reason `superseded`, CYR-41, CYR-36, CYR-43) and `cancel_orphaned_followers` (the sender, a part whose predecessor is `failed` or `cancelled`, reason `predecessor`, CYR-36) | |
 | `sending` | `sent` | `complete_send` in the sender | Telegram accepted the message |
 | `sending` | `scheduled` | `reschedule` in the sender | Flood wait, a reached limit or an autopilot row inside a window, and nothing else |
 | `sending` | `failed` | `mark_failed` in the sender | Certain refusal, account problem, unknown outcome, or `interrupted` |
-| `sending` | `cancelled` | `mark_cancelled` in the sender | The row is stale, the guard refused it at send time, or a newer message superseded it (`superseded`, CYR-41) |
+| `sending` | `cancelled` | `mark_cancelled` in the sender | The row is stale, the guard refused it at send time, or a newer message superseded it before its pre-send part (`superseded`, CYR-41, CYR-43) |
 | `failed` | `scheduled` | `retry_failed`, only from the owner's `outbox retry --yes` | The owner checked the chat and decided |
 
 `sent` and `cancelled` are final. `failed` is final for the sender: `claim_due` and `reschedule`
@@ -121,7 +121,6 @@ one in `src` that calls the transport. Strictly sequential: one row at a time, o
 | `FLOOD_WAIT_NOTIFY_ABOVE` | 60 s | A longer wait notifies the owner |
 | `ROW_STALE_AFTER_SECONDS` | 6 h | A row whose `due_at` is older than this is cancelled, not sent |
 | `LIMIT_NOTICE_INTERVAL_SECONDS` | 1 h | At most one limit notice per kind in this time |
-| `FOLLOWER_HISTORY_MESSAGES` | 20 | Messages read for the supersession check of a later part of a reply |
 | `STALE_NOTICE_INTERVAL_SECONDS` | 1 h | At most one stale summary notice in this time |
 | `STALE_NOTICE_CONTACT_IDS_MAX` | 5 | Contact ids listed in a stale summary notice |
 | `STOP_REMINDER_INTERVAL_SECONDS` | 6 h | Time between reminders while the sender is stopped |
@@ -139,10 +138,10 @@ Each poll, in this order:
 4. Re-read the contact and run the guard.
 5. Check the limits. A reached limit puts the row back; see below.
 6. Autopilot rows only, first parts only: the availability check. See below.
-7. Autopilot rows only: the supersession check. See below.
+7. Autopilot rows only, first parts only: the supersession check. See below.
 8. The pre-send part: `mark_read`, a pause, `show_typing`; a later part of a reply only `show_typing`.
    See below.
-9. Re-read the contact and run the guard again, then the supersession check again.
+9. Re-read the contact and run the guard again. There is no supersession check here (CYR-43).
 10. `send_text`, then `complete_send`, then `schedule_followers` for the next part of the reply, if any.
 
 The startup sweep and the stale check of stuck rows keep running while the sender is paused or
@@ -168,32 +167,42 @@ comes back, as for a limit. Why a planned row does not run into this:
 
 ### The supersession check
 
-CYR-41. For rows of source `autopilot` only; a `manual_test` row is never superseded, and neither is a
-first part without a `trigger_message_id`. A first part (or a single row) is superseded when the latest message of its contact, by
-`(created_at, id)` as everywhere else ([Message times](contact-lifecycle.md#message-times)), is newer
-than its trigger message. Any newer message counts, incoming (the contact wrote again) or outgoing (the
-owner or the sender answered). An older message that a catch-up stored later, with a larger id, does not.
+CYR-41, narrowed by CYR-43. For rows of source `autopilot` only; a `manual_test` row is never superseded,
+and neither is a first part without a `trigger_message_id`. A first part (or a single row) is superseded
+when the latest message of its contact, by `(created_at, id)` as everywhere else
+([Message times](contact-lifecycle.md#message-times)), is newer than its trigger message. Any newer
+message counts, incoming (the contact wrote again) or outgoing (the owner or the sender answered). An
+older message that a catch-up stored later, with a larger id, does not.
 
-A later part of a reply (CYR-36) is superseded only by an **incoming** message newer than the trigger of
-its first part (`root_trigger_id`), found among the contact's last `FOLLOWER_HISTORY_MESSAGES` (20)
-messages. Outgoing messages do not count for it: its own predecessor is an outgoing message newer than
-the trigger, and a message the owner writes by hand already cancels every scheduled part through the
-manual pause.
+**Only before the pre-send part.** The check runs once, after the availability check and before
+`mark_read`. A row that passed it is finished: a message that arrives during the read pause or the
+typing no longer cancels the send, and the `send` step is logged as `ok` as usual. The second guard check
+right before `send_text` stays, so a contact that was paused meanwhile (a manual message, a hand-over) is
+still refused with `contact_not_active`.
 
-The check runs twice: after the availability check and before `mark_read`, and again after the pre-send
-part together with the second guard check, right before `send_text`, so a message that arrives during
-the read pause or the typing still cancels the send. A superseded row becomes `cancelled` with the reason
-`superseded` (`CANCEL_REASON_SUPERSEDED`). The owner gets no notice and nothing counts as an attempt: the
-transport was not called for the send. The first check logs the INFO line `outbox row superseded by a
-newer message` (ids only) and no step lines; the second one logs the same line and the `send` step as
-`skipped`. A row that was already sent is never touched: only a row the sender has claimed (`sending`)
-is cancelled, and `sent` is final.
+**A later part is never superseded** (CYR-43): a reply whose first part was sent is completed. A later
+part is still stopped by the orphan rule (its predecessor `failed` or was `cancelled`), by the manual
+pause and the stop-trigger hand-over (both cancel `scheduled` rows through `cancel_pending_for_contact`),
+by the guard, by the limits (it waits), by the stale rule and by any account-level stop or flood pause.
 
-Why: the reaction delay (20 to 120 s) is longer than the debounce window (12 s), so the job of an earlier
-message may have written its row before the next message arrived. Without this check every message
-that came after an earlier job ran got its own reply. The reply job cancels such rows too, see
-[autopilot.md](autopilot.md#one-reply-per-burst); the sender check covers the gap before that job runs,
-a row of a job that failed or lags, and the time spent in the pre-send part.
+A superseded row becomes `cancelled` with the reason `superseded` (`CANCEL_REASON_SUPERSEDED`). The owner
+gets no notice and nothing counts as an attempt: the transport was not called. The check logs the INFO
+line `outbox row superseded by a newer message` (ids only) and no step lines. A row that was already sent
+is never touched: only a row the sender has claimed (`sending`) is cancelled, and `sent` is final.
+
+**The trade-off.** In a fast chat a message that arrives while the reply is typed gets no reply of its
+own from this row; the next job answers it, so a message may get a short reply of its own after the one
+that was being typed. Cancelling during the typing, and cancelling the later parts of a started reply,
+made a contact who writes every 10 to 20 s starve (seen live): a reply in its typing phase was cancelled
+by the next message, and so was the second part of a reply whose first part had been sent. A started reply
+is also never cut in half any more, which the CYR-36 open question asked about.
+
+Why the check exists: the reaction delay (20 to 120 s) is longer than the debounce window (12 s), so the
+job of an earlier message may have written its row before the next message arrived. Without this check
+every message that came after an earlier job ran got its own reply. The reply job cancels such rows too,
+see [autopilot.md](autopilot.md#one-reply-per-burst); the sender check covers the gap before that job
+runs and a row of a job that failed or lags. Since CYR-43 a job whose burst waited the maximum wait writes
+its row for the newest message, so this check does not cancel it.
 
 ### Multi-part replies
 
@@ -211,14 +220,15 @@ line as its own message ([autopilot.md](autopilot.md#the-job)). The parts are ro
   sent, the sender calls `schedule_followers(row_id, now + uniform(split_pause_seconds))`: the next part's
   `send_at` is measured from the actual send, with the injected random generator and the profile's
   `split_pause_seconds` (default 3 to 8 s, [humanization.md](humanization.md#the-profile)).
-- **What a later part skips.** The availability check (a reply that has started is finished), the read
-  mark and the read pause. It still runs the stale check, the guard, the limits, typing, the second guard,
-  the supersession check (its own rule, above) and every error policy below.
+- **What a later part skips.** The availability check (a reply that has started is finished), the
+  supersession check (CYR-43), the read mark and the read pause. It still runs the stale check, the guard,
+  the limits, typing, the second guard and every error policy below.
 - **Orphans.** Once per poll, before the claim, `cancel_orphaned_followers` cancels every `scheduled`
   part whose predecessor is `failed` or `cancelled`, with the reason `predecessor`
   (`CANCEL_REASON_PREDECESSOR`), down the whole chain in one transaction, and returns the count (logged
   as one INFO line with the count). This covers every way a part ends without being sent: a send failure,
-  a stale or superseded cancel, the guard, the owner's `outbox cancel`, the stale check of a stuck row.
+  a stale cancel, a superseded first part, the guard, the owner's `outbox cancel`, the stale check of a
+  stuck row.
   Nothing is sent out of order; a reply can stop after its first part.
 - **A manual message or a hand-over** cancels every `scheduled` part of the contact through
   `cancel_pending_for_contact`, as for any row.
@@ -438,7 +448,7 @@ and shown is the Telethon class name, never the base class of a subclass.
 | Any other exception | Same as `SendUncertain` | `uncertain` | Once |
 | The send deadline passed | Same as `SendUncertain` | `uncertain` | Once |
 | Storing the failure or `complete_send` failed | The row stays `sending`; the stale check fails it | `interrupted` | Once, by the stale check |
-| A newer message than the trigger exists (`autopilot` rows with a trigger only; for a later part of a reply a newer incoming message than the first part's trigger) | `cancelled`, reason `superseded`; nothing is sent, nothing counted | none | None |
+| A newer message than the trigger exists when a first part is claimed, before its read mark (`autopilot` rows with a trigger only; never a later part, never after the read mark, CYR-43) | `cancelled`, reason `superseded`; nothing is sent, nothing counted | none | None |
 | The part before this one is `failed` or `cancelled` | `cancelled` before any claim, reason `predecessor`; nothing is sent | none | None |
 | The row is stale when claimed | `cancelled`, reason `stale`; nothing is sent | none (`cancel_reason = stale`) | A summary with the count, first at once, then at most hourly |
 

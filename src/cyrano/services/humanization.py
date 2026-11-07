@@ -129,9 +129,21 @@ class HumanizationPlanner:
         self._schedule = schedule
         self._rng = rng
 
-    async def plan(self, contact_id: int, trigger_message_id: int, now: datetime) -> SendPlan:
+    async def plan(
+        self,
+        contact_id: int,
+        trigger_message_id: int,
+        now: datetime,
+        *,
+        ongoing: bool | None = None,
+    ) -> SendPlan:
         history = await self._messages.list_last(contact_id, PLANNER_HISTORY_MESSAGES)
-        return await self._plan_from(history, contact_id, trigger_message_id, now)
+        return await self._plan_from(history, contact_id, trigger_message_id, now, ongoing)
+
+    async def conversation_ongoing(self, contact_id: int, message_id: int) -> bool:
+        history = await self._messages.list_last(contact_id, PLANNER_HISTORY_MESSAGES)
+        trigger = _trigger_index(history, contact_id, message_id)
+        return burst_is_ongoing(history, trigger, await self._schedule.get_profile())
 
     async def plan_latest(self, contact_id: int, now: datetime) -> SendPlan:
         history = await self._messages.list_last(contact_id, PLANNER_HISTORY_MESSAGES)
@@ -141,14 +153,24 @@ class HumanizationPlanner:
         raise NoMessagesToReplyTo(contact_id)
 
     async def _plan_from(
-        self, history: Sequence[Message], contact_id: int, trigger_id: int, now: datetime
+        self,
+        history: Sequence[Message],
+        contact_id: int,
+        trigger_id: int,
+        now: datetime,
+        ongoing: bool | None = None,
     ) -> SendPlan:
         trigger = _trigger_index(history, contact_id, trigger_id)
-        first = _burst_start(history, trigger)
-        previous_activity_at = history[first - 1].created_at if first > 0 else None
         profile = await self._schedule.get_profile()
-        ongoing = is_ongoing(history[first].created_at, previous_activity_at, profile)
+        if ongoing is None:
+            ongoing = burst_is_ongoing(history, trigger, profile)
         return plan_send_time(now, history[trigger].created_at, ongoing, profile, self._rng)
+
+
+def burst_is_ongoing(history: Sequence[Message], trigger: int, profile: ScheduleProfile) -> bool:
+    first = _burst_start(history, trigger)
+    previous_activity_at = history[first - 1].created_at if first > 0 else None
+    return is_ongoing(history[first].created_at, previous_activity_at, profile)
 
 
 def _trigger_index(history: Sequence[Message], contact_id: int, trigger_id: int) -> int:

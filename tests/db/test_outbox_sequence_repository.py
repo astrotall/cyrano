@@ -327,7 +327,7 @@ async def test_the_root_trigger_is_found_from_every_part(
     assert await outbox.root_trigger_id(FAKE_INTERNAL_ID) is None
 
 
-async def test_a_new_reply_cancels_the_waiting_followers_of_an_older_reply_but_never_a_sent_part(
+async def test_a_new_reply_never_touches_an_older_reply_whose_first_part_was_sent(
     outbox: SqlOutboxRepository, messages: SqlMessageRepository, contact: Contact
 ) -> None:
     older = await _message(messages, contact, 1, MUCH_EARLIER)
@@ -341,11 +341,29 @@ async def test_a_new_reply_cancels_the_waiting_followers_of_an_older_reply_but_n
         contact.id, newer.id, CANCEL_REASON_SUPERSEDED
     )
 
-    assert cancelled == 2
+    assert cancelled == 0
     assert await _state(outbox, first.id) == (OutboxState.SENT, None)
+    for row in (second, third, *current):
+        assert await _state(outbox, row.id) == (OutboxState.SCHEDULED, None)
+
+
+async def test_a_new_reply_never_touches_an_older_reply_whose_first_part_is_being_sent(
+    outbox: SqlOutboxRepository, messages: SqlMessageRepository, contact: Contact
+) -> None:
+    older = await _message(messages, contact, 1, MUCH_EARLIER)
+    newer = await _message(messages, contact, 2, EARLIER)
+    first, second, third = await _chain(outbox, contact, trigger=older.id)
+    claimed = await outbox.claim_due(FAKE_NOW)
+
+    cancelled = await outbox.cancel_superseded_autopilot_rows(
+        contact.id, newer.id, CANCEL_REASON_SUPERSEDED
+    )
+
+    assert claimed is not None
+    assert claimed.id == first.id
+    assert cancelled == 0
+    assert await _state(outbox, first.id) == (OutboxState.SENDING, None)
     for row in (second, third):
-        assert await _state(outbox, row.id) == (OutboxState.CANCELLED, CANCEL_REASON_SUPERSEDED)
-    for row in current:
         assert await _state(outbox, row.id) == (OutboxState.SCHEDULED, None)
 
 

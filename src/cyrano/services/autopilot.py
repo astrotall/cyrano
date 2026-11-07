@@ -11,6 +11,7 @@ from cyrano.domain.autopilot import (
     SWEEP_INTERVAL_SECONDS,
 )
 from cyrano.domain.enums import ContactStatus
+from cyrano.services.humanization import HumanizationPlanner
 from cyrano.services.reply_job_queue import ReplyJobQueue
 from cyrano.services.repositories import (
     AutopilotStateRepository,
@@ -39,15 +40,19 @@ class AutopilotScheduler:
         state: AutopilotStateRepository,
         queue: ReplyJobQueue,
         switch: GuardSettings,
+        planner: HumanizationPlanner,
         *,
         debounce_seconds: int,
+        ongoing_debounce_seconds: int,
         clock: Callable[[], datetime],
     ) -> None:
         self._contacts = contacts
         self._state = state
         self._queue = queue
         self._switch = switch
+        self._planner = planner
         self._debounce_seconds = debounce_seconds
+        self._ongoing_debounce_seconds = ongoing_debounce_seconds
         self._clock = clock
 
     async def on_incoming(self, contact_id: int, message_id: int) -> bool:
@@ -66,16 +71,28 @@ class AutopilotScheduler:
         contact = await self._contacts.get_by_id(contact_id)
         if contact is None or contact.status is not ContactStatus.ACTIVE:
             return False
-        await self._queue.enqueue(contact_id, message_id, self._debounce_seconds)
+        defer_seconds = await self._debounce(contact_id, message_id)
+        await self._queue.enqueue(contact_id, message_id, defer_seconds)
         logger.info(
             "reply job enqueued",
             extra={
                 "contact_id": contact_id,
                 "trigger_message_id": message_id,
-                "defer_seconds": self._debounce_seconds,
+                "defer_seconds": defer_seconds,
             },
         )
         return True
+
+    async def _debounce(self, contact_id: int, message_id: int) -> int:
+        try:
+            ongoing = await self._planner.conversation_ongoing(contact_id, message_id)
+        except Exception as exc:
+            logger.warning(
+                "the conversation pace was not decided",
+                extra={"contact_id": contact_id, "error": type(exc).__name__},
+            )
+            return self._debounce_seconds
+        return self._ongoing_debounce_seconds if ongoing else self._debounce_seconds
 
 
 class AutopilotSweeper:

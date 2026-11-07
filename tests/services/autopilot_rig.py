@@ -10,6 +10,7 @@ import pytest
 from pydantic import BaseModel
 
 from cyrano.bot.notifier import AUTOPILOT_NOTICES
+from cyrano.config import DEFAULT_AUTOPILOT_MAX_BURST_WAIT_SECONDS
 from cyrano.db.repositories import (
     SqlAutopilotStateRepository,
     SqlContactRepository,
@@ -33,6 +34,7 @@ from cyrano.domain.models import (
 from cyrano.logging import JsonFormatter
 from cyrano.services.hand_over import HandOverService
 from cyrano.services.humanization import HumanizationPlanner
+from cyrano.services.llm_client import LLMClient
 from cyrano.services.outbox_service import OutboxService
 from cyrano.services.persona_service import PersonaService
 from cyrano.services.reply_generator import ReplyGenerator
@@ -129,7 +131,7 @@ class AutopilotRig:
         self.backlog = SqlReplyBacklogRepository(factory)
         self.schedule = free_schedule()
 
-    def generator(self, client: SequenceLLMClient, *, budget: int = 1_000_000) -> ReplyGenerator:
+    def generator(self, client: LLMClient, *, budget: int = 1_000_000) -> ReplyGenerator:
         return ReplyGenerator(
             contacts=self.contacts,
             messages=self.messages,
@@ -149,11 +151,12 @@ class AutopilotRig:
 
     def runner(
         self,
-        client: SequenceLLMClient,
+        client: LLMClient,
         *,
         budget: int = 1_000_000,
         planner: HumanizationPlanner | None = None,
         max_tokens: int = BASE_MAX_TOKENS,
+        max_burst_wait_seconds: int = DEFAULT_AUTOPILOT_MAX_BURST_WAIT_SECONDS,
     ) -> ReplyJobRunner:
         return ReplyJobRunner(
             contacts=self.contacts,
@@ -168,6 +171,7 @@ class AutopilotRig:
             notices=AUTOPILOT_NOTICES,
             switch=self.switch,
             max_tokens=max_tokens,
+            max_burst_wait_seconds=max_burst_wait_seconds,
             clock=self.clock,
         )
 

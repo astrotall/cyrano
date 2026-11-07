@@ -38,6 +38,7 @@ from tests.services.outbox_fakes import (
 )
 
 DEBOUNCE = 12
+ONGOING_DEBOUNCE = 4
 PAUSE_STEP = "pause"
 SEND_DELAY_SECONDS = 600
 OWNER_TG_MESSAGE_ID = 880011
@@ -61,7 +62,9 @@ class _Pipeline:
             rig.state,
             self.queue,
             rig.switch,
+            rig.planner(),
             debounce_seconds=DEBOUNCE,
+            ongoing_debounce_seconds=ONGOING_DEBOUNCE,
             clock=rig.clock,
         )
         self.intake = IntakeService(

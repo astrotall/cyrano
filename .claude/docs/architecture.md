@@ -624,7 +624,7 @@ from the start.
 | `domain/schedule.py`, `domain/enums.py`, `domain/errors.py` | `ScheduleProfile` and its parts, `default_schedule_profile`, `Block`, `SendPlan`, the limits and defaults; `Weekday`, `BlockKind`, `PlanReason`; `PlanNotPossible`, `StoredScheduleInvalid`, `ScheduleTimezoneUnresolved` |
 | `db/models.py`, `db/repositories.py`, migration `0006` | `ScheduleProfileRow`, `SqlScheduleProfileRepository` |
 | `services/repositories.py` | The `ScheduleProfileRepository` Protocol: `get`, `replace` |
-| `services/humanization.py` | The pure `night_window`, `blocked`, `is_ongoing`, `plan_send_time`, `postponed_after`, `typing_seconds`; `ScheduleService`; `HumanizationPlanner` |
+| `services/humanization.py` | The pure `night_window`, `blocked`, `is_ongoing`, `burst_is_ongoing`, `plan_send_time`, `postponed_after`, `typing_seconds`; `ScheduleService`; `HumanizationPlanner` (with `conversation_ongoing`, used by the scheduler for the debounce since CYR-43) |
 | `services/schedule_files.py` | `parse_schedule`, `ScheduleImporter`; the reading and the problem format come from `style_files.py` |
 | `services/outbox_sender.py` | `_hold_outside_hours`, `_before_send`, `_cosmetic`, the second guard |
 | `schedule_cli.py`, `main.py` | The `schedule` commands and the wiring |
@@ -739,7 +739,9 @@ the raw input. `load_settings(env_file=None)` ignores any `.env`.
 | `REPLY_HISTORY_MESSAGES` | no | `20` | how many last messages of a contact the reply prompt loads; 1 to 100; not in the startup log line |
 | `REPLY_PROMPT_BUDGET_CHARS` | no | `24000` | character budget of the whole reply prompt; 4000 to 200000; not in the startup log line |
 | `AUTOPILOT_ENABLED` | no | `false` | boolean; the app enqueues reply jobs, the worker writes `autopilot` rows and the sender sends them only when it is `true`; a `manual_test` row does not consult it; not in the startup log line |
-| `AUTOPILOT_DEBOUNCE_SECONDS` | no | `12` | 0 to 300; delay of a reply job after an incoming message; the sweeper waits twice as long; not in the startup log line |
+| `AUTOPILOT_DEBOUNCE_SECONDS` | no | `12` | 0 to 300; delay of a reply job after an incoming message when the conversation is not ongoing; the sweeper waits twice as long; not in the startup log line |
+| `AUTOPILOT_DEBOUNCE_ONGOING_SECONDS` | no | `4` | 0 to 300, at most `AUTOPILOT_DEBOUNCE_SECONDS`; delay of a reply job in an ongoing conversation (CYR-43); not in the startup log line |
+| `AUTOPILOT_MAX_BURST_WAIT_SECONDS` | no | `30` | 1 to 300, at least `AUTOPILOT_DEBOUNCE_SECONDS`; burst age from which a reply job answers the newest message instead of skipping (CYR-43); not in the startup log line |
 | `SEND_LIMIT_MINUTE`, `SEND_LIMIT_HOUR`, `SEND_LIMIT_DAY` | no | `4`, `40`, `200` | integers from 1; most outgoing messages per window, all contacts together; minute <= hour <= day; not in the startup log line |
 | `SEND_LIMIT_CONTACT_MINUTE`, `SEND_LIMIT_CONTACT_HOUR`, `SEND_LIMIT_CONTACT_DAY` | no | `2`, `15`, `60` | integers from 1; most outgoing messages per window to one contact; minute <= hour <= day, each not above the global value of its window; not in the startup log line |
 | `HEARTBEAT_PATH` | no | `<tmpdir>/cyrano-heartbeat` | liveness file; also read straight from `os.environ` by `cyrano.health`, the one exception to hard rule 3 ([decisions.md](decisions.md)) |
@@ -961,6 +963,15 @@ and the autopilot `cyrano.services.reply_job`, `cyrano.services.autopilot` and `
 - **CYR-39 added**: `tests/test_docs_in_sync.py`, fast, with no database and no `.env`: every Makefile
   target, every subcommand and action of the real argument parsers, every migration revision and every
   module of `services/` must appear in the README, in this file and in `CLAUDE.md` as listed there.
+- **CYR-43 added**: `tests/test_ongoing_rule.py` (the ongoing rule is defined once and both the planner
+  and the scheduler decide through it); the adaptive debounce in `tests/services/test_autopilot.py`;
+  `tests/services/test_reply_job_max_wait.py` (the burst age, the pinned boundary, the effective trigger,
+  two jobs adopting one message, on real PostgreSQL); the sender no longer superseding during the typing or
+  a later part in `test_outbox_sender_supersession.py` and `test_outbox_sender_parts.py`; the job-time
+  cancellation leaving a started reply alone in `tests/db/test_outbox_sequence_repository.py`;
+  `tests/services/test_autopilot_lively.py` (a contact writing every 10 s for 3 minutes, and a short
+  burst, through the real scheduler, job, sweeper and sender with a fake clock, a seeded generator, the
+  default limits and real PostgreSQL); the two settings in `tests/test_config.py`.
 - Failure cases to cover for new behaviour:
   empty input, malformed Telegram event, invalid LLM JSON, status changed between scheduling and
   sending, FloodWait.

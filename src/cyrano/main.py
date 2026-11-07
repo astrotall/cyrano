@@ -196,12 +196,15 @@ async def run(
     hand_over = HandOverService(contacts, messages, outbox, control_bot.hand_over_notifier)
     autopilot_state = SqlAutopilotStateRepository(session_factory)
     reply_jobs = ArqReplyJobQueue(settings)
+    schedule = ScheduleService(SqlScheduleProfileRepository(session_factory), settings.timezone)
     scheduler = AutopilotScheduler(
         contacts,
         autopilot_state,
         reply_jobs,
         settings,
+        HumanizationPlanner(messages, schedule, random.SystemRandom()),
         debounce_seconds=settings.autopilot_debounce_seconds,
+        ongoing_debounce_seconds=settings.autopilot_debounce_ongoing_seconds,
         clock=_utc_now,
     )
     intake = IntakeService(
@@ -233,7 +236,7 @@ async def run(
         messages,
         SqlSenderStateRepository(session_factory),
         SendLimiter(messages, settings),
-        ScheduleService(SqlScheduleProfileRepository(session_factory), settings.timezone),
+        schedule,
         access.transport,
         control_bot.notifier,
         SendGuard(settings),

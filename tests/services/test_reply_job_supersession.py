@@ -14,6 +14,7 @@ FIFTH_AGO = 300
 FOURTH_AGO = 240
 THIRD_AGO = 180
 NEWEST_AGO = 30
+WAIT_LONGER_THAN_THE_BURST = FIFTH_AGO + 1
 
 
 async def _row(
@@ -87,7 +88,11 @@ async def test_a_skipped_job_cancels_nothing(rig: AutopilotRig) -> None:
     newest = await rig.say(contact, ago=NEWEST_AGO)
     other_trigger = await rig.say(contact, ago=THIRD_AGO)
 
-    result = await rig.runner(SequenceLLMClient(llm_result())).run(contact.id, other_trigger.id)
+    runner = rig.runner(
+        SequenceLLMClient(llm_result()), max_burst_wait_seconds=WAIT_LONGER_THAN_THE_BURST
+    )
+
+    result = await runner.run(contact.id, other_trigger.id)
 
     assert newest.id < other_trigger.id
     assert result.reason is ReplyJobReason.SUPERSEDED

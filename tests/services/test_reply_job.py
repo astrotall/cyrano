@@ -6,6 +6,7 @@ from datetime import datetime, timedelta
 import pytest
 from sqlalchemy import text
 
+from cyrano.config import MAX_AUTOPILOT_MAX_BURST_WAIT_SECONDS
 from cyrano.domain.autopilot import (
     JOB_MAX_TRIES,
     PROVIDER_COOLDOWN_SECONDS,
@@ -62,6 +63,7 @@ from tests.services.autopilot_rig import (
 from tests.services.outbox_fakes import RecordingNotifier
 
 MEETING_TEXT = "давай встретимся завтра вечером"
+LONG_MAX_WAIT = MAX_AUTOPILOT_MAX_BURST_WAIT_SECONDS
 OTHER_REPLY_ZQ = "other-reply-autopilot-marker-zq"
 TRANSIENT_ERRORS = (
     LLMRateLimitError("rate limited", status_code=429),
@@ -132,7 +134,7 @@ async def test_a_burst_of_three_produces_one_row_from_the_job_of_the_newest(
     second = await rig.say(contact, ago=20, text="second invented line")
     third = await rig.say(contact, ago=10, text="third invented line")
     client = SequenceLLMClient(llm_result())
-    runner = rig.runner(client)
+    runner = rig.runner(client, max_burst_wait_seconds=LONG_MAX_WAIT)
 
     results = [await runner.run(contact.id, message.id) for message in (first, second, third)]
 
@@ -257,7 +259,9 @@ async def test_a_newer_incoming_message_supersedes_the_trigger(rig: AutopilotRig
     await rig.say(contact, ago=5)
     client = SequenceLLMClient(llm_result())
 
-    result = await rig.runner(client).run(contact.id, trigger.id)
+    result = await rig.runner(client, max_burst_wait_seconds=LONG_MAX_WAIT).run(
+        contact.id, trigger.id
+    )
 
     _skipped(result, ReplyJobReason.SUPERSEDED)
     assert client.calls == 0
@@ -301,7 +305,9 @@ async def test_the_job_of_a_caught_up_older_message_is_superseded_by_the_newer_t
     caught_up = await rig.say(contact, ago=90)
     client = SequenceLLMClient(llm_result())
 
-    result = await rig.runner(client).run(contact.id, caught_up.id)
+    result = await rig.runner(client, max_burst_wait_seconds=LONG_MAX_WAIT).run(
+        contact.id, caught_up.id
+    )
 
     _skipped(result, ReplyJobReason.SUPERSEDED)
     assert client.calls == 0
@@ -314,7 +320,7 @@ async def test_an_outgoing_message_stored_last_but_between_two_incoming_is_order
     first = await rig.say(contact, ago=300, text="first incoming")
     last = await rig.say(contact, ago=60, text="last incoming")
     await rig.say(contact, ago=120, text="owner between", direction=MessageDirection.OUTGOING)
-    runner = rig.runner(SequenceLLMClient(llm_result()))
+    runner = rig.runner(SequenceLLMClient(llm_result()), max_burst_wait_seconds=LONG_MAX_WAIT)
 
     history = await rig.messages.list_last(contact.id, 10)
     _skipped(await runner.run(contact.id, first.id), ReplyJobReason.SUPERSEDED)
@@ -683,7 +689,14 @@ async def test_an_enqueue_refusal_is_a_skip_with_its_reason(rig: AutopilotRig) -
 
 
 class _NoPlan(HumanizationPlanner):
-    async def plan(self, contact_id: int, trigger_message_id: int, now: datetime) -> SendPlan:
+    async def plan(
+        self,
+        contact_id: int,
+        trigger_message_id: int,
+        now: datetime,
+        *,
+        ongoing: bool | None = None,
+    ) -> SendPlan:
         raise PlanNotPossible(contact_id, trigger_message_id)
 
 

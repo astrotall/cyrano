@@ -1,17 +1,17 @@
 # Safety rules
 
-**All rules below are planned until their tickets land, except where a rule says it exists.** S1
-and S2 are enforced since CYR-19: one guarded sender is the only way to a contact. Since CYR-17 the
-autopilot job writes `autopilot` rows too, only with `AUTOPILOT_ENABLED=true`, and the same sender sends
-them.
-S8 is enforced since CYR-12. S5 is enforced since CYR-22. S4 is enforced since CYR-21. S6 is enforced since CYR-18, except the
-splitting (CYR-36). S3 and S10 are enforced since CYR-20 for incoming texts, and since CYR-17 for the
-whole burst in the autopilot job and for the model signal, on which the job hands over. The other rules are
-not enforced by code yet; they are the contract that the tickets must implement and test. Changing or dropping a rule is a large change (see [CLAUDE.md](../../CLAUDE.md)) and ships
-with the code and the test ([CONTRIBUTING.md](../../CONTRIBUTING.md)). Statuses:
+**Every rule below says where it is enforced. All of them exist except S7 (limits on proactive
+messages, CYR-23, planned) and the splitting part of S6 (CYR-36, planned).** S1 and S2 are enforced since
+CYR-19: one guarded sender is the only way to a contact. Since CYR-17 the autopilot job writes `autopilot`
+rows too, only with `AUTOPILOT_ENABLED=true`, and the same sender sends them. S8 is enforced since CYR-12,
+S5 since CYR-22, S4 since CYR-21, and S6 since CYR-18, except the splitting. S3 and S10 are enforced
+since CYR-20 for incoming texts, and since CYR-17 for the whole burst in the autopilot job and for the model
+signal, on which the job hands over. S9 is enforced by ignore files, tests and review. Changing or
+dropping a rule is a large change (see [CLAUDE.md](../../CLAUDE.md)) and ships with the code and the test
+([CONTRIBUTING.md](../../CONTRIBUTING.md)). Statuses:
 [contact-lifecycle.md](contact-lifecycle.md).
 
-Tests named here are planned unless a rule says they exist. They use scripted fakes and fake data
+Tests named here exist unless a rule says they are planned. They use scripted fakes and fake data
 only.
 
 ## S1. Only active contacts get replies
@@ -126,13 +126,15 @@ only.
   cancels the scheduled rows (reason `manual_message`) and sends the owner one notice with a Resume
   button. A contact in any other status only gets the message stored. A row already `sending` cannot
   be cancelled by the detector; the sender's second guard, right before the send call, refuses it
-  because the contact is no longer `active`. A failure of the notice never undoes the pause. Resume
+  because the contact is no longer `active`. A failure of the notice never undoes the pause. A missing or naive time of the event does not
+  stop the pause (CYR-40): the message is stored with the time of the one shared rule
+  (`services/message_time.py`). Resume
   is `PauseActions.resume`, reachable only from the owner-only control bot (S8). Details:
   [contact-lifecycle.md](contact-lifecycle.md#manual-intervention-cyr-21).
 - **How it is tested:** exists. `tests/services/test_manual_intervention.py`, on real PostgreSQL with
   an injected sleep: a manual message to an `active` contact pauses it with the reason, cancels only
-  its scheduled rows, stores the message with Telegram's time without moving `last_message_at` and
-  notifies once; every other status is only stored; an unknown peer changes nothing; the same event
+  its scheduled rows, stores the message with Telegram's time (or with now when the time is missing, naive or more than
+  5 minutes ahead of the injected clock) without moving `last_message_at` and notifies once; every other status is only stored; an unknown peer changes nothing; the same event
   twice pauses and notifies once; the sender's own echo is ignored, also when it arrives before the
   id is stored (each delay position); a manual message during a `sending` row waits every delay and
   pauses; a manual message during the typing action of a real `OutboxSender` makes the second guard

@@ -24,7 +24,14 @@ from cyrano.domain.enums import (
     PauseReason,
 )
 from cyrano.domain.errors import InvalidStatusTransition
-from cyrano.domain.models import Contact, Message, MessageCreate, OutgoingMessage, StatusChange
+from cyrano.domain.models import (
+    MAX_FUTURE_SKEW,
+    Contact,
+    Message,
+    MessageCreate,
+    OutgoingMessage,
+    StatusChange,
+)
 from cyrano.domain.outbox import (
     CANCEL_REASON_MANUAL_MESSAGE,
     REFUSED_CONTACT_NOT_ACTIVE,
@@ -58,6 +65,8 @@ DISPLAY_NAME = "ManualNameMarkerZq"
 QUEUED_TEXT = "queued-text-marker-zq that must never leak"
 MESSAGE_ID = 800100
 SENT_AT = datetime(2025, 3, 4, 5, 6, 7, tzinfo=UTC)
+CLOCK_NOW = datetime(2025, 6, 1, 12, 0, tzinfo=UTC)
+ONE_SECOND = timedelta(seconds=1)
 FAST_DEADLINE = 0.01
 EVERY_DELAY = list(SETTLE_DELAYS_SECONDS)
 NOT_ACTIVE = [
@@ -118,6 +127,7 @@ class Rig:
     state: SqlSenderStateRepository
     notifier: RecordingManualPauseNotifier = field(default_factory=RecordingManualPauseNotifier)
     sleep: RecordingSleep = field(default_factory=RecordingSleep)
+    clock: FakeClock = field(default_factory=lambda: FakeClock(CLOCK_NOW))
 
     def detector(
         self,
@@ -135,6 +145,7 @@ class Rig:
             notifier if notifier is not None else self.notifier,
             sleep=sleep if sleep is not None else self.sleep,
             notify_deadline=notify_deadline,
+            clock=self.clock,
         )
 
     async def contact(self, status: ContactStatus, tg_id: int = FAKE_TELEGRAM_ID) -> Contact:
@@ -179,7 +190,7 @@ def _message(
     tg_id: int = FAKE_TELEGRAM_ID,
     tg_message_id: int = MESSAGE_ID,
     text: str = MANUAL_TEXT,
-    sent_at: datetime = SENT_AT,
+    sent_at: datetime | None = SENT_AT,
 ) -> OutgoingMessage:
     return OutgoingMessage(
         tg_id=contact.tg_id if contact is not None else tg_id,
@@ -240,6 +251,82 @@ async def test_the_owner_message_keeps_its_telegram_time_and_leaves_the_last_mes
     [stored] = await rig.messages.list_last(contact.id, 10)
     assert stored.created_at == SENT_AT
     assert (await rig.reload(contact)).last_message_at == FAKE_TIME
+
+
+@pytest.mark.parametrize(
+    "unusable_time", [None, datetime(2025, 3, 4, 5, 6, 7)], ids=["missing", "naive"]
+)
+async def test_a_manual_message_with_a_missing_or_naive_time_still_pauses_and_is_stored_now(
+    unusable_time: datetime | None, rig: Rig, contacts: SqlContactRepository
+) -> None:
+    contact = await rig.contact(ContactStatus.ACTIVE)
+    await contacts.touch_last_message_at(contact.id, FAKE_TIME)
+
+    outcome = await rig.detector().handle(_message(contact, sent_at=unusable_time))
+
+    assert outcome is ManualMessageOutcome.PAUSED
+    paused = await rig.reload(contact)
+    assert (paused.status, paused.pause_reason) == (
+        ContactStatus.PAUSED,
+        PauseReason.MANUAL_MESSAGE,
+    )
+    assert paused.last_message_at == FAKE_TIME
+    assert rig.notifier.contact_ids == [contact.id]
+    [stored] = await rig.messages.list_last(contact.id, 10)
+    assert (stored.text, stored.tg_message_id, stored.created_at) == (
+        MANUAL_TEXT,
+        MESSAGE_ID,
+        CLOCK_NOW,
+    )
+
+
+@pytest.mark.parametrize("status", [ContactStatus.PAUSED, ContactStatus.NEW])
+async def test_a_stored_only_manual_message_without_a_time_is_stored_now(
+    status: ContactStatus, rig: Rig
+) -> None:
+    contact = await rig.contact(status)
+
+    outcome = await rig.detector().handle(_message(contact, sent_at=None))
+
+    assert outcome is ManualMessageOutcome.STORED
+    [stored] = await rig.messages.list_last(contact.id, 10)
+    assert stored.created_at == CLOCK_NOW
+
+
+@pytest.mark.parametrize(
+    ("offset", "expected"),
+    [
+        (MAX_FUTURE_SKEW, CLOCK_NOW + MAX_FUTURE_SKEW),
+        (MAX_FUTURE_SKEW - ONE_SECOND, CLOCK_NOW + MAX_FUTURE_SKEW - ONE_SECOND),
+        (MAX_FUTURE_SKEW + ONE_SECOND, CLOCK_NOW),
+        (timedelta(days=3), CLOCK_NOW),
+        (-timedelta(hours=8), CLOCK_NOW - timedelta(hours=8)),
+    ],
+    ids=["at-the-skew", "within-the-skew", "beyond-the-skew", "far-future", "past"],
+)
+async def test_the_stored_time_of_a_manual_message_follows_the_clock_skew_rule(
+    offset: timedelta, expected: datetime, rig: Rig
+) -> None:
+    contact = await rig.contact(ContactStatus.ACTIVE)
+
+    await rig.detector().handle(_message(contact, sent_at=CLOCK_NOW + offset))
+
+    [stored] = await rig.messages.list_last(contact.id, 10)
+    assert stored.created_at == expected
+
+
+async def test_a_replayed_event_without_a_time_pauses_and_notifies_once(rig: Rig) -> None:
+    contact = await rig.contact(ContactStatus.ACTIVE)
+    detector = rig.detector()
+
+    first = await detector.handle(_message(contact, sent_at=None))
+    rig.clock.advance(30)
+    second = await detector.handle(_message(contact, sent_at=None))
+
+    assert (first, second) == (ManualMessageOutcome.PAUSED, ManualMessageOutcome.OWN_MESSAGE)
+    assert rig.notifier.contact_ids == [contact.id]
+    [stored] = await rig.messages.list_last(contact.id, 10)
+    assert stored.created_at == CLOCK_NOW
 
 
 async def test_a_second_manual_message_to_a_paused_contact_is_only_stored(rig: Rig) -> None:

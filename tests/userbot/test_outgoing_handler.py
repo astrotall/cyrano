@@ -90,6 +90,17 @@ async def test_the_event_time_is_kept_in_utc() -> None:
     assert detector.received[0].sent_at == datetime(2025, 5, 5, 5, 5, tzinfo=UTC)
 
 
+async def test_a_naive_or_missing_event_time_reaches_the_detector_as_a_missing_time() -> None:
+    detector = FakeDetector()
+    handler = OutgoingHandler(detector)
+
+    await handler.handle(_outgoing(id=11, date=datetime(2025, 1, 1)))
+    await handler.handle(_outgoing(id=12, date=None))
+
+    assert [(m.tg_message_id, m.sent_at) for m in detector.received] == [(11, None), (12, None)]
+    assert (handler.handled, handler.failed) == (2, 0)
+
+
 @pytest.mark.parametrize(
     ("event", "reason"),
     [
@@ -191,11 +202,10 @@ async def test_a_malformed_event_does_not_propagate() -> None:
     detector = FakeDetector()
     handler = OutgoingHandler(detector)
 
-    await handler.handle(_outgoing(date=datetime(2025, 1, 1)))
     await handler.handle(_outgoing(id=0))
     await handler.handle(_outgoing(chat=FakeSender(id=-5)))
 
-    assert handler.failed == 3
+    assert handler.failed == 2
     assert detector.received == []
 
 
@@ -203,7 +213,7 @@ async def test_one_failure_does_not_stop_later_messages() -> None:
     detector = FakeDetector()
     handler = OutgoingHandler(detector)
 
-    await handler.handle(_outgoing(date=datetime(2025, 1, 1)))
+    await handler.handle(_outgoing(id=0))
     await handler.handle(_outgoing(id=79))
 
     assert [m.tg_message_id for m in detector.received] == [79]

@@ -5,18 +5,24 @@ from __future__ import annotations
 import asyncio
 import logging
 from collections.abc import Awaitable, Callable
+from datetime import UTC, datetime
 
 from cyrano.domain.enums import ContactStatus, ManualMessageOutcome, MessageDirection, PauseReason
 from cyrano.domain.errors import InvalidStatusTransition
 from cyrano.domain.models import MessageCreate, OutgoingMessage
 from cyrano.domain.outbox import CANCEL_REASON_MANUAL_MESSAGE
 from cyrano.services.manual_pause_notifier import ManualPauseNotifier
+from cyrano.services.message_time import message_time
 from cyrano.services.outbox_sender import OWNER_NOTIFY_DEADLINE
 from cyrano.services.repositories import ContactRepository, MessageRepository, OutboxRepository
 
 logger = logging.getLogger("cyrano.services.manual_intervention")
 
 SETTLE_DELAYS_SECONDS: tuple[float, ...] = (0.25, 0.5, 1.0, 2.0, 4.0, 8.0)
+
+
+def _utc_now() -> datetime:
+    return datetime.now(UTC)
 
 
 class ManualMessageDetector:
@@ -29,6 +35,7 @@ class ManualMessageDetector:
         *,
         sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
         notify_deadline: float = OWNER_NOTIFY_DEADLINE,
+        clock: Callable[[], datetime] = _utc_now,
     ) -> None:
         self._contacts = contacts
         self._messages = messages
@@ -36,6 +43,7 @@ class ManualMessageDetector:
         self._notifier = notifier
         self._sleep = sleep
         self._notify_deadline = notify_deadline
+        self._clock = clock
 
     async def handle(self, outgoing: OutgoingMessage) -> ManualMessageOutcome:
         contact = await self._contacts.get_by_tg_id(outgoing.tg_id)
@@ -43,11 +51,12 @@ class ManualMessageDetector:
             return ManualMessageOutcome.UNKNOWN_PEER
         if await self._is_our_own(contact.id, outgoing.tg_message_id):
             return ManualMessageOutcome.OWN_MESSAGE
+        sent_at = message_time(outgoing.sent_at, self._clock())
         paused = await self._pause_if_active(contact.id)
         if not paused:
-            await self._store(contact.id, outgoing)
+            await self._store(contact.id, outgoing, sent_at)
             return ManualMessageOutcome.STORED
-        await self._finish_pause(contact.id, outgoing)
+        await self._finish_pause(contact.id, outgoing, sent_at)
         return ManualMessageOutcome.PAUSED
 
     async def _is_our_own(self, contact_id: int, tg_message_id: int) -> bool:
@@ -74,23 +83,25 @@ class ManualMessageDetector:
             return False
         return change.changed
 
-    async def _finish_pause(self, contact_id: int, outgoing: OutgoingMessage) -> None:
+    async def _finish_pause(
+        self, contact_id: int, outgoing: OutgoingMessage, sent_at: datetime
+    ) -> None:
         logger.info("a manual message paused the contact", extra={"contact_id": contact_id})
         await self._guarded("cancel", self._cancel_scheduled(contact_id), contact_id)
-        await self._guarded("store", self._store(contact_id, outgoing), contact_id)
+        await self._guarded("store", self._store(contact_id, outgoing, sent_at), contact_id)
         await self._guarded("notify", self._notify(contact_id), contact_id)
 
     async def _cancel_scheduled(self, contact_id: int) -> None:
         await self._outbox.cancel_pending_for_contact(contact_id, CANCEL_REASON_MANUAL_MESSAGE)
 
-    async def _store(self, contact_id: int, outgoing: OutgoingMessage) -> None:
+    async def _store(self, contact_id: int, outgoing: OutgoingMessage, sent_at: datetime) -> None:
         await self._messages.append(
             MessageCreate(
                 contact_id=contact_id,
                 direction=MessageDirection.OUTGOING,
                 text=outgoing.text,
                 tg_message_id=outgoing.tg_message_id,
-                created_at=outgoing.sent_at,
+                created_at=sent_at,
             )
         )
 

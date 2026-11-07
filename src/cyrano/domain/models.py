@@ -9,9 +9,9 @@ from pydantic import (
     AfterValidator,
     AwareDatetime,
     BaseModel,
+    BeforeValidator,
     ConfigDict,
     Field,
-    field_validator,
     model_validator,
 )
 
@@ -60,7 +60,14 @@ def _to_utc(value: datetime) -> datetime:
     return value.astimezone(UTC)
 
 
+def _naive_time_is_missing(value: object) -> object:
+    if isinstance(value, datetime) and value.utcoffset() is None:
+        return None
+    return value
+
+
 UtcDatetime = Annotated[AwareDatetime, AfterValidator(_to_utc)]
+OptionalMessageTime = Annotated[UtcDatetime | None, BeforeValidator(_naive_time_is_missing)]
 TelegramId = Annotated[int, Field(gt=0, le=MAX_BIGINT)]
 
 
@@ -144,21 +151,14 @@ class IncomingMessage(_Input):
     display_name: str | None = None
     tg_message_id: TelegramId
     text: str
-    sent_at: UtcDatetime | None = None
-
-    @field_validator("sent_at", mode="before")
-    @classmethod
-    def _naive_time_is_missing(cls, value: object) -> object:
-        if isinstance(value, datetime) and value.utcoffset() is None:
-            return None
-        return value
+    sent_at: OptionalMessageTime = None
 
 
 class OutgoingMessage(_Input):
     tg_id: TelegramId
     tg_message_id: TelegramId
     text: str
-    sent_at: UtcDatetime
+    sent_at: OptionalMessageTime = None
 
 
 class NewContactEvent(_Input):

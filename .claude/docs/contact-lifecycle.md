@@ -44,7 +44,7 @@ The triggers marked "exists" are implemented; the others are planned. Changing t
 | `active` | `paused` | A stop-trigger fires on a new incoming message (`pause_reason = stop_trigger`) | `HandOverService` | CYR-20 (exists) |
 | `active` | `paused` | The owner writes a manual message in the chat from the second account | manual-message detector | CYR-21 (exists) |
 | `active` | `paused` | Two proactive messages in a row stay unanswered | system | CYR-23 |
-| `active` | `paused` | The owner pauses the contact | owner | none yet |
+| `active` | `paused` | The owner pauses the contact (`pause_reason = owner` exists in the enum; nothing sets it yet) | owner | none yet |
 | `active` | `ignored` | The owner ignores the contact | owner | none yet |
 | `paused` | `active` | Owner presses Resume on the manual-pause or the hand-over notice; `reply_after` is set to the resume time (CYR-17) | owner, through `PauseActions` | CYR-21, CYR-20 (exist) |
 | `paused` | `ignored` | Owner presses Ignore on the hand-over notice | owner, through `PauseActions.ignore` | CYR-20 (exists) |
@@ -338,7 +338,7 @@ as an outgoing event, and the assistant must not take its own echo for the owner
 | 3 | If it is not stored but a row is `sending`, the echo may have arrived before the sender stored its message id. The detector re-checks the message id after each of the delays 0.25, 0.5, 1, 2, 4 and 8 s (15.75 s in all, injected sleep, early exit as soon as the id appears). Stored by then: own message, ignored |
 | 4 | Otherwise the message is manual. The status is re-read now, because it may have changed during the wait |
 | 5 | Only an `active` contact is paused: `set_status(paused, pause_reason=manual_message)`. Any other status is left as it is (an `ignored` contact stays ignored, an earlier pause keeps its first reason) and the message is only stored |
-| 6 | If the status really changed (the `changed` flag), the contact's scheduled rows are cancelled with the reason `manual_message`, the message is stored, and the owner gets ONE notice. Each of these three steps is guarded on its own: a failure is logged with the step and the error class and never undoes the pause, never blocks the other steps and never reaches the handler |
+| 6 | If the status really changed (the `changed` flag), the contact's scheduled rows are cancelled with the reason `manual_message`, the message is stored with its resolved time ([Message times](#message-times); a missing or naive time does not stop the pause), and the owner gets ONE notice. Each of these three steps is guarded on its own: a failure is logged with the step and the error class and never undoes the pause, never blocks the other steps and never reaches the handler |
 
 The order is pause first, then cancel, store, notify. Storing first and pausing afterwards would let a
 replayed event (a retry, a catch-up after a restart) find the message already stored, take it for
@@ -414,7 +414,7 @@ message: `contact_id`, `direction` (`incoming`, `outgoing`), `text`, `tg_message
 `incoming` rows are written by the registration above, with Telegram's send time as `created_at`; `outgoing` rows by the sender's
 `complete_send`, in one transaction with marking the outbox row sent, with the Telegram message id and
 Telegram's send time (CYR-19), and, for messages the owner wrote by hand, by the manual-message
-detector with Telegram's send time as `created_at` and without moving `last_message_at` (CYR-21).
+detector with the resolved send time (Telegram's, or now by the rule of [Message times](#message-times)) as `created_at` and without moving `last_message_at` (CYR-21, CYR-40).
 The counter of unanswered proactive messages does not exist yet; CYR-23 adds it with a migration.
 
 All timestamps are `timestamptz` stored in UTC. All of it is personal data: it stays in the database
@@ -424,17 +424,20 @@ and the media volume, is never logged at INFO or above and never goes to git
 ## Message times
 
 Both directions store Telegram's send time as `messages.created_at`, never the moment the row was
-inserted. After downtime the userbot catches up on what arrived meanwhile, and an old message must
+inserted, unless the rule below replaces a missing or implausible time with now. After downtime the userbot catches up on what arrived meanwhile, and an old message must
 look old: the stale age of 6 hours, the job's age check, the sweeper, the `reply_after` comparison, the
 planner's burst and ongoing-conversation rules and the history in the prompt all read this time.
 
-- **The rule for an incoming message** (`message_time` in `services/intake.py`): the time Telegram
-  gives (`IncomingMessage.sent_at`) is stored. If it is more than `MAX_FUTURE_SKEW` (5 minutes,
-  `domain/models.py`) ahead of the clock the intake was built with, the clock's `now` is stored
-  instead, because a clock that is wrong must not make a message newer than every reply. A time
-  within the skew is kept as given. A missing time, or a naive one (an `IncomingMessage` turns a naive
-  `datetime` into a missing time), also becomes `now`. `contacts.last_message_at` is touched with the
-  value that ended up stored.
+- **The rule, for both directions** (`message_time` in `services/message_time.py`, CYR-40, used by
+  `IntakeService` for an incoming message and by `ManualMessageDetector` for a message the owner wrote
+  by hand): the time Telegram gives (`IncomingMessage.sent_at`, `OutgoingMessage.sent_at`) is stored. If
+  it is more than `MAX_FUTURE_SKEW` (5 minutes, `domain/models.py`) ahead of the clock the service was
+  built with, the clock's `now` is stored instead, because a clock that is wrong must not make a message
+  newer than every reply. A time within the skew is kept as given. A missing time, or a naive one (both
+  models turn a naive `datetime` into a missing time, and the userbot handlers pass a missing or naive
+  event date on as missing instead of dropping the event), also becomes `now`. For an incoming
+  message `contacts.last_message_at` is touched with the value that ended up stored; a message of the
+  owner never touches it.
 - **A second delivery changes nothing.** The unique `(contact_id, tg_message_id)` keeps the first
   row, so the stored time is the first one even when the second delivery would have been clamped to
   a later `now`; `last_message_at` is touched with the stored time, so it does not move either.

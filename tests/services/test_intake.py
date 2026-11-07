@@ -18,7 +18,8 @@ from cyrano.domain.models import (
     NewContactEvent,
 )
 from cyrano.services.contact_events import InMemoryContactEvents
-from cyrano.services.intake import IntakeResult, IntakeService, message_time
+from cyrano.services.intake import IntakeResult, IntakeService
+from cyrano.services.message_time import message_time
 from tests.privacy import FAKE_TELEGRAM_ID, assert_absent
 from tests.services.outbox_fakes import FakeClock
 

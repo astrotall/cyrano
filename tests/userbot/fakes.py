@@ -77,7 +77,7 @@ class FakeHistoryMessage:
 @dataclass
 class FakeEvent:
     id: int = 77
-    date: datetime = FAKE_SENT_AT
+    date: datetime | None = FAKE_SENT_AT
     out: bool = False
     is_private: bool | None = True
     is_group: bool | None = False

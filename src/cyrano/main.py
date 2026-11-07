@@ -213,7 +213,9 @@ async def run(
         scheduler=scheduler,
         clock=_utc_now,
     )
-    detector = ManualMessageDetector(contacts, messages, outbox, control_bot.manual_pause_notifier)
+    detector = ManualMessageDetector(
+        contacts, messages, outbox, control_bot.manual_pause_notifier, clock=_utc_now
+    )
     access = client_factory(settings)
     client = access.client
     userbot = Userbot(client, intake, detector)

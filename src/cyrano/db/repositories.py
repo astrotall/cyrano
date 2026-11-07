@@ -749,6 +749,7 @@ class SqlOutboxRepository:
                 .where(
                     ScheduledMessageRow.contact_id == contact_id,
                     ScheduledMessageRow.source == OutboxSource.AUTOPILOT,
+                    ScheduledMessageRow.state == OutboxState.SCHEDULED,
                     ScheduledMessageRow.trigger_message_id.in_(older_triggers),
                 )
                 .cte(recursive=True)

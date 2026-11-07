@@ -16,11 +16,12 @@ from cyrano.domain.enums import (
     PauseReason,
 )
 from cyrano.domain.errors import SendUncertain
-from cyrano.domain.models import Contact, Message, OutgoingMessage
+from cyrano.domain.models import Contact, IncomingMessage, Message, OutgoingMessage
 from cyrano.domain.outbox import (
     CANCEL_REASON_MANUAL_MESSAGE,
     CANCEL_REASON_PREDECESSOR,
     CANCEL_REASON_STALE,
+    CANCEL_REASON_STOP_TRIGGER,
     CANCEL_REASON_SUPERSEDED,
     ERROR_OUTSIDE_HOURS,
     ERROR_RATE_LIMITED,
@@ -31,7 +32,9 @@ from cyrano.domain.outbox import (
     SentMessage,
 )
 from cyrano.domain.schedule import ScheduleProfile
+from cyrano.services.contact_events import InMemoryContactEvents
 from cyrano.services.humanization import ScheduleService, typing_seconds
+from cyrano.services.intake import IntakeService
 from cyrano.services.manual_intervention import ManualMessageDetector
 from cyrano.services.outbox_sender import STEP_LOG_MESSAGE, OutboxSender
 from cyrano.services.send_guard import SendGuard
@@ -66,6 +69,8 @@ TRIGGER_AGO = 30
 SEND_TAKES = 2.0
 WIDE_SPLIT_PAUSE = (10, 20)
 MANUAL_TG_MESSAGE_ID = 991_000_222
+HAND_OVER_TG_MESSAGE_ID = 991_000_333
+MEETING_TEXT = "давай встретимся завтра вечером"
 BERLIN = "Europe/Berlin"
 BUSY_WEDNESDAY_NOON = ScheduleProfile.model_validate(
     {
@@ -313,6 +318,60 @@ async def test_a_limit_on_the_second_part_holds_it_while_the_first_stays_sent(
     assert transport.steps.count(READ) == 1
 
 
+async def test_a_follower_held_by_a_limit_is_still_sent_after_newer_incoming_messages(
+    rig: AutopilotRig,
+) -> None:
+    contact, (first, second) = await _ready(rig, TWO_PARTS)
+    transport = ScriptedTransport(clock=rig.clock)
+    sender = _sender(rig, transport, limits=FakeLimits(send_limit_contact_minute=1))
+    await sender.send_next()
+    await _reach(rig, second)
+    await sender.send_next()
+    await rig.say(contact, ago=0)
+    await _reach(rig, second)
+    await rig.say(contact, ago=0)
+
+    await sender.send_next()
+
+    assert await _state(rig, first) == (OutboxState.SENT, None)
+    assert await _state(rig, second) == (OutboxState.SENT, None)
+    assert transport.calls == [(contact.tg_id, TWO_PARTS[0]), (contact.tg_id, TWO_PARTS[1])]
+
+
+async def test_a_stop_trigger_after_the_first_part_cancels_the_waiting_parts(
+    rig: AutopilotRig,
+) -> None:
+    contact, (first, second, third) = await _ready(rig, THREE_PARTS)
+    transport = ScriptedTransport(clock=rig.clock)
+    sender = _sender(rig, transport)
+    await sender.send_next()
+    intake = IntakeService(
+        rig.contacts, rig.messages, InMemoryContactEvents(), hand_over=rig.hand_over()
+    )
+    await intake.handle(
+        IncomingMessage(
+            tg_id=contact.tg_id,
+            tg_message_id=HAND_OVER_TG_MESSAGE_ID,
+            text=MEETING_TEXT,
+            sent_at=rig.clock(),
+        )
+    )
+    await _reach(rig, second)
+
+    await sender.send_next()
+    await sender.send_next()
+
+    reloaded = await rig.reload(contact)
+    assert (reloaded.status, reloaded.pause_reason) == (
+        ContactStatus.PAUSED,
+        PauseReason.STOP_TRIGGER,
+    )
+    assert await _state(rig, first) == (OutboxState.SENT, None)
+    for part in (second, third):
+        assert await _state(rig, part) == (OutboxState.CANCELLED, CANCEL_REASON_STOP_TRIGGER)
+    assert len(transport.calls) == 1
+
+
 async def test_a_newer_incoming_message_before_the_first_part_cancels_the_whole_reply(
     rig: AutopilotRig,
 ) -> None:
@@ -329,7 +388,7 @@ async def test_a_newer_incoming_message_before_the_first_part_cancels_the_whole_
     assert transport.steps == []
 
 
-async def test_a_newer_incoming_message_after_the_first_part_cancels_the_rest(
+async def test_a_newer_incoming_message_after_the_first_part_never_cancels_the_rest(
     rig: AutopilotRig,
 ) -> None:
     contact, (first, second, third) = await _ready(rig, THREE_PARTS)
@@ -338,14 +397,15 @@ async def test_a_newer_incoming_message_after_the_first_part_cancels_the_rest(
     await sender.send_next()
     await rig.say(contact, ago=0)
     await _reach(rig, second)
+    await sender.send_next()
+    await rig.say(contact, ago=0)
+    await _reach(rig, third)
 
     await sender.send_next()
-    await sender.send_next()
 
-    assert await _state(rig, first) == (OutboxState.SENT, None)
-    assert await _state(rig, second) == (OutboxState.CANCELLED, CANCEL_REASON_SUPERSEDED)
-    assert await _state(rig, third) == (OutboxState.CANCELLED, CANCEL_REASON_PREDECESSOR)
-    assert transport.steps == [READ, PAUSE, TYPING, SEND]
+    for part in (first, second, third):
+        assert await _state(rig, part) == (OutboxState.SENT, None)
+    assert transport.steps == [READ, PAUSE, TYPING, SEND, TYPING, SEND, TYPING, SEND]
 
 
 async def test_a_newer_outgoing_message_does_not_supersede_a_follower(rig: AutopilotRig) -> None:

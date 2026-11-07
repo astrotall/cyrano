@@ -95,6 +95,7 @@ def build_worker_resources(
         notices=AUTOPILOT_NOTICES,
         switch=settings,
         max_tokens=settings.llm_reply_max_tokens,
+        max_burst_wait_seconds=settings.autopilot_max_burst_wait_seconds,
         clock=_utc_now,
     )
     return WorkerResources(runner=runner, engine=engine, llm=llm, bot=bot)

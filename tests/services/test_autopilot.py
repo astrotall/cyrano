@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import random
 from datetime import datetime, timedelta
 
 import pytest
@@ -15,28 +16,49 @@ from cyrano.domain.enums import (
     OutboxSource,
     OutboxState,
 )
-from cyrano.domain.models import Contact, ContactCreate, IncomingMessage, Message
+from cyrano.domain.errors import StoredScheduleInvalid
+from cyrano.domain.models import Contact, ContactCreate, IncomingMessage, Message, MessageCreate
+from cyrano.domain.schedule import ScheduleProfile
 from cyrano.services.autopilot import AutopilotScheduler, AutopilotSweeper
 from cyrano.services.contact_events import InMemoryContactEvents
+from cyrano.services.humanization import HumanizationPlanner, ScheduleService, burst_is_ongoing
 from cyrano.services.intake import IntakeResult, IntakeService
 from tests.capped_loop import CappedLoop
 from tests.privacy import FAKE_TELEGRAM_ID
 from tests.services.autopilot_fakes import InMemoryAutopilotState, RecordingQueue
 from tests.services.autopilot_rig import NOW, AutopilotRig, Switch
-from tests.services.outbox_fakes import FakeClock
+from tests.services.outbox_fakes import (
+    ALWAYS_FREE_PROFILE,
+    FREE_TIMEZONE,
+    FakeClock,
+    free_schedule,
+)
 from tests.userbot.fakes import FAKE_SENT_AT, InMemoryContacts, InMemoryMessages
 
 DEBOUNCE = 12
+ONGOING_DEBOUNCE = 4
+PLANNER_SEED = 3
 MEETING_TEXT = "давай встретимся завтра вечером"
+ONGOING_WINDOW = timedelta(minutes=ALWAYS_FREE_PROFILE.reaction.ongoing_window_minutes)
+
+
+class _BrokenProfiles:
+    async def get(self) -> ScheduleProfile | None:
+        raise StoredScheduleInvalid
+
+    async def replace(self, profile: ScheduleProfile) -> ScheduleProfile:
+        return profile
 
 
 class _Scheduler:
     def __init__(self) -> None:
         self.contacts = InMemoryContacts()
+        self.messages = InMemoryMessages()
         self.state = InMemoryAutopilotState()
         self.queue = RecordingQueue()
         self.switch = Switch()
         self.clock = FakeClock(NOW)
+        self.schedule = free_schedule()
 
     def build(self) -> AutopilotScheduler:
         return AutopilotScheduler(
@@ -44,7 +66,9 @@ class _Scheduler:
             self.state,
             self.queue,
             self.switch,
+            HumanizationPlanner(self.messages, self.schedule, random.Random(PLANNER_SEED)),
             debounce_seconds=DEBOUNCE,
+            ongoing_debounce_seconds=ONGOING_DEBOUNCE,
             clock=self.clock,
         )
 
@@ -76,6 +100,129 @@ async def test_the_scheduler_enqueues_an_active_contact_with_the_debounce(
     assert await scheduling.build().on_incoming(contact.id, 41) is True
 
     assert scheduling.queue.jobs == [(contact.id, 41, DEBOUNCE)]
+
+
+async def _said(
+    scheduling: _Scheduler,
+    contact: Contact,
+    ago: timedelta,
+    direction: MessageDirection = MessageDirection.INCOMING,
+) -> Message:
+    return await scheduling.messages.append(
+        MessageCreate(
+            contact_id=contact.id,
+            direction=direction,
+            text="invented pace line",
+            tg_message_id=len(scheduling.messages.stored) + 1,
+            created_at=scheduling.clock() - ago,
+        )
+    )
+
+
+async def test_a_message_in_an_ongoing_conversation_gets_the_short_debounce(
+    scheduling: _Scheduler,
+) -> None:
+    contact = await scheduling.contact()
+    await _said(scheduling, contact, timedelta(minutes=1), MessageDirection.OUTGOING)
+    message = await _said(scheduling, contact, timedelta())
+
+    assert await scheduling.build().on_incoming(contact.id, message.id) is True
+
+    assert scheduling.queue.jobs == [(contact.id, message.id, ONGOING_DEBOUNCE)]
+
+
+async def test_a_first_message_after_a_pause_gets_the_normal_debounce(
+    scheduling: _Scheduler,
+) -> None:
+    contact = await scheduling.contact()
+    await _said(scheduling, contact, ONGOING_WINDOW + timedelta(minutes=1))
+    await _said(scheduling, contact, ONGOING_WINDOW, MessageDirection.OUTGOING)
+    message = await _said(scheduling, contact, timedelta())
+
+    await scheduling.build().on_incoming(contact.id, message.id)
+
+    assert scheduling.queue.jobs == [(contact.id, message.id, DEBOUNCE)]
+
+
+async def test_the_very_first_message_of_a_contact_gets_the_normal_debounce(
+    scheduling: _Scheduler,
+) -> None:
+    contact = await scheduling.contact()
+    message = await _said(scheduling, contact, timedelta())
+
+    await scheduling.build().on_incoming(contact.id, message.id)
+
+    assert scheduling.queue.jobs == [(contact.id, message.id, DEBOUNCE)]
+
+
+@pytest.mark.parametrize(
+    ("gap", "expected"),
+    [
+        (ONGOING_WINDOW - timedelta(seconds=1), ONGOING_DEBOUNCE),
+        (ONGOING_WINDOW, DEBOUNCE),
+        (ONGOING_WINDOW + timedelta(seconds=1), DEBOUNCE),
+    ],
+)
+async def test_the_ongoing_window_boundary_is_the_planner_boundary(
+    scheduling: _Scheduler, gap: timedelta, expected: int
+) -> None:
+    contact = await scheduling.contact()
+    await _said(scheduling, contact, gap, MessageDirection.OUTGOING)
+    message = await _said(scheduling, contact, timedelta())
+
+    await scheduling.build().on_incoming(contact.id, message.id)
+
+    assert scheduling.queue.jobs == [(contact.id, message.id, expected)]
+    profile = await free_schedule().get_profile()
+    history = await scheduling.messages.list_last(contact.id, 20)
+    assert (expected == ONGOING_DEBOUNCE) is burst_is_ongoing(history, len(history) - 1, profile)
+
+
+async def test_a_later_message_of_a_burst_is_judged_by_the_burst_start(
+    scheduling: _Scheduler,
+) -> None:
+    contact = await scheduling.contact()
+    await _said(scheduling, contact, ONGOING_WINDOW * 3, MessageDirection.OUTGOING)
+    await _said(scheduling, contact, ONGOING_WINDOW * 1.5)
+    await _said(scheduling, contact, timedelta(minutes=1))
+    message = await _said(scheduling, contact, timedelta())
+
+    await scheduling.build().on_incoming(contact.id, message.id)
+
+    assert scheduling.queue.jobs == [(contact.id, message.id, DEBOUNCE)]
+
+
+async def test_a_burst_that_started_inside_the_window_keeps_the_short_debounce(
+    scheduling: _Scheduler,
+) -> None:
+    contact = await scheduling.contact()
+    await _said(scheduling, contact, ONGOING_WINDOW, MessageDirection.OUTGOING)
+    await _said(scheduling, contact, timedelta(minutes=2))
+    message = await _said(scheduling, contact, timedelta())
+
+    await scheduling.build().on_incoming(contact.id, message.id)
+
+    assert scheduling.queue.jobs == [(contact.id, message.id, ONGOING_DEBOUNCE)]
+
+
+async def test_an_unreadable_profile_falls_back_to_the_normal_debounce_and_logs_the_class(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    caplog.set_level(logging.DEBUG)
+    scheduling = _Scheduler()
+    scheduling.schedule = ScheduleService(_BrokenProfiles(), FREE_TIMEZONE)
+    contact = await scheduling.contact()
+    await _said(scheduling, contact, timedelta(minutes=1), MessageDirection.OUTGOING)
+    message = await _said(scheduling, contact, timedelta())
+
+    assert await scheduling.build().on_incoming(contact.id, message.id) is True
+
+    assert scheduling.queue.jobs == [(contact.id, message.id, DEBOUNCE)]
+    [record] = [
+        r for r in caplog.records if r.getMessage() == "the conversation pace was not decided"
+    ]
+    assert record.__dict__["error"] == "StoredScheduleInvalid"
+    assert "invented pace line" not in caplog.text
 
 
 @pytest.mark.parametrize(
@@ -157,7 +304,7 @@ def _incoming(text: str, number: int = 1) -> IncomingMessage:
 async def test_the_intake_result_is_unchanged_and_the_job_is_enqueued_once_per_message(
     scheduling: _Scheduler,
 ) -> None:
-    messages = InMemoryMessages()
+    messages = scheduling.messages
     contact = await scheduling.contact()
     plain = IntakeService(scheduling.contacts, messages, InMemoryContactEvents())
     with_scheduler = IntakeService(
@@ -208,7 +355,14 @@ async def test_a_gate_hand_over_prevents_the_enqueue(rig: AutopilotRig) -> None:
     contact = await rig.contact()
     queue = RecordingQueue()
     scheduler = AutopilotScheduler(
-        rig.contacts, rig.state, queue, rig.switch, debounce_seconds=DEBOUNCE, clock=rig.clock
+        rig.contacts,
+        rig.state,
+        queue,
+        rig.switch,
+        rig.planner(),
+        debounce_seconds=DEBOUNCE,
+        ongoing_debounce_seconds=ONGOING_DEBOUNCE,
+        clock=rig.clock,
     )
     intake = IntakeService(
         rig.contacts,

@@ -7,6 +7,7 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta
 
 from cyrano.domain.autopilot import (
+    ADOPTED_NEWEST_DETAIL,
     BURST_HISTORY_MESSAGES,
     PROVIDER_COOLDOWN_SECONDS,
     REPLY_STALE_AFTER_SECONDS,
@@ -74,16 +75,26 @@ def _skip(reason: ReplyJobReason, detail: str | None = None) -> ReplyJobResult:
     return ReplyJobResult(outcome=ReplyJobOutcome.SKIPPED, reason=reason, detail=detail)
 
 
-def burst_texts(history: Sequence[Message], reply_after: datetime | None) -> list[str]:
-    texts: list[str] = []
+def burst_messages(history: Sequence[Message], reply_after: datetime | None) -> list[Message]:
+    burst: list[Message] = []
     for message in reversed(history):
         if message.direction is not MessageDirection.INCOMING:
             break
         if reply_after is not None and message.created_at <= reply_after:
             break
-        texts.append(message.text)
-    texts.reverse()
-    return texts
+        burst.append(message)
+    burst.reverse()
+    return burst
+
+
+def burst_texts(history: Sequence[Message], reply_after: datetime | None) -> list[str]:
+    return [message.text for message in burst_messages(history, reply_after)]
+
+
+def _adopted(result: ReplyJobResult) -> ReplyJobResult:
+    if result.outcome is ReplyJobOutcome.QUEUED or result.detail is None:
+        return result.model_copy(update={"detail": ADOPTED_NEWEST_DETAIL})
+    return result
 
 
 class ReplyJobRunner:
@@ -102,6 +113,7 @@ class ReplyJobRunner:
         notices: AutopilotNotices,
         switch: GuardSettings,
         max_tokens: int,
+        max_burst_wait_seconds: int,
         clock: Callable[[], datetime],
         notify_deadline: float = OWNER_NOTIFY_DEADLINE,
     ) -> None:
@@ -117,6 +129,7 @@ class ReplyJobRunner:
         self._notices = notices
         self._switch = switch
         self._retry_max_tokens = min(max_tokens * TRUNCATION_RETRY_FACTOR, TRUNCATION_MAX_TOKENS)
+        self._max_burst_wait = timedelta(seconds=max_burst_wait_seconds)
         self._clock = clock
         self._notify_deadline = notify_deadline
 
@@ -169,13 +182,31 @@ class ReplyJobRunner:
         if not history:
             return _skip(ReplyJobReason.TRIGGER_MISSING)
         latest = history[-1]
-        if latest.id != trigger.id:
-            if latest.direction is MessageDirection.INCOMING:
-                return _skip(ReplyJobReason.SUPERSEDED)
+        if latest.id == trigger.id:
+            return await self._reply(contact_id, trigger, history, contact.reply_after, now)
+        if latest.direction is not MessageDirection.INCOMING:
             return _skip(ReplyJobReason.ANSWERED)
+        burst = burst_messages(history, contact.reply_after)
+        if not burst or now - burst[0].created_at < self._max_burst_wait:
+            return _skip(ReplyJobReason.SUPERSEDED)
+        result = await self._reply(
+            contact_id, latest, history, contact.reply_after, now, adopted=True
+        )
+        return _adopted(result)
+
+    async def _reply(
+        self,
+        contact_id: int,
+        trigger: Message,
+        history: Sequence[Message],
+        reply_after: datetime | None,
+        now: datetime,
+        *,
+        adopted: bool = False,
+    ) -> ReplyJobResult:
         if await self._outbox.has_row_for_trigger(contact_id, trigger.id):
             return _skip(ReplyJobReason.ROW_EXISTS)
-        decision = detect(burst_texts(history, contact.reply_after))
+        decision = detect(burst_texts(history, reply_after))
         if decision.triggered:
             return await self._handed_over(
                 contact_id, ReplyJobReason.TEXT_TRIGGER, decision.ordered(), TriggerSource.TEXT
@@ -183,7 +214,7 @@ class ReplyJobRunner:
         generated = await self._generate(contact_id)
         if isinstance(generated, ReplyJobResult):
             return generated
-        return await self._enqueue(contact_id, trigger.id, generated, now)
+        return await self._enqueue(contact_id, trigger.id, generated, now, adopted=adopted)
 
     async def _generate(self, contact_id: int) -> GeneratedReply | ReplyJobResult:
         max_tokens: int | None = None
@@ -224,10 +255,18 @@ class ReplyJobRunner:
             return reply
 
     async def _enqueue(
-        self, contact_id: int, trigger_id: int, reply: GeneratedReply, now: datetime
+        self,
+        contact_id: int,
+        trigger_id: int,
+        reply: GeneratedReply,
+        now: datetime,
+        *,
+        adopted: bool,
     ) -> ReplyJobResult:
         try:
-            plan = await self._planner.plan(contact_id, trigger_id, now)
+            plan = await self._planner.plan(
+                contact_id, trigger_id, now, ongoing=True if adopted else None
+            )
         except PlanNotPossible:
             return _skip(ReplyJobReason.PLAN_NOT_POSSIBLE)
         await self._outbox.cancel_superseded_autopilot_rows(

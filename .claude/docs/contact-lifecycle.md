@@ -89,7 +89,7 @@ otherwise the `default` mode. If `default` itself is missing or disabled they ra
 | 3 | The card announcer sends the owner a card with a Reply button per enabled mode and an Ignore button through the control bot; after the card is delivered the contact becomes `pending`. It starts from the `ContactReadyEvent` or from the sweep. Exists, see [Card announcement](#card-announcement-cyr-12) | CYR-12 |
 | 4 | On Reply the contact becomes `active` with the chosen mode; on Ignore it becomes `ignored`. Exists | CYR-12 |
 | 5 | Stop-triggers: the new incoming message of an `active` contact is checked right after it is stored; on a hit the contact becomes `paused`, its scheduled rows are cancelled, the owner is notified and nothing is enqueued. Exists, see [Stop-triggers](#stop-triggers-cyr-20) | CYR-20 |
-| 6 | Each incoming message from an `active` contact enqueues one delayed Arq job (`AUTOPILOT_DEBOUNCE_SECONDS`); of a burst only the job of the newest message generates, the others find a newer message and skip; a row that an earlier job already wrote is cancelled as `superseded` by the newer job and by the sender. A sweep every 60 s enqueues what was lost. Exists, behind `AUTOPILOT_ENABLED`, see [autopilot.md](autopilot.md) | CYR-17 |
+| 6 | Each incoming message from an `active` contact enqueues one delayed Arq job (`AUTOPILOT_DEBOUNCE_ONGOING_SECONDS` in an ongoing conversation, otherwise `AUTOPILOT_DEBOUNCE_SECONDS`, CYR-43); of a burst one job generates, the others find a newer message and skip until the burst has waited `AUTOPILOT_MAX_BURST_WAIT_SECONDS`, after which a job answers the newest message; a row that an earlier job already wrote is cancelled as `superseded` by the newer job and by the sender while it has not started. A sweep every 60 s enqueues what was lost. Exists, behind `AUTOPILOT_ENABLED`, see [autopilot.md](autopilot.md) | CYR-17 |
 | 7 | When the job runs it re-checks the switch, the autopilot state, the status, `reply_after`, the age, supersession and an existing row, runs the stop-trigger detector on the burst again, and only then generates; anything but `active` ends the job with no reply. The model signal hands the contact over | CYR-17, CYR-20 |
 | 8 | The layered prompt is built: persona, mode fragment with few-shot examples, contact summary, last N messages | CYR-14, CYR-15, CYR-16, CYR-25 |
 | 9 | The LLM is called through the LLM interface; the response is validated | CYR-13 |
@@ -462,13 +462,16 @@ when both events arrive at the same time. `list_last` returns the newest N in ch
 ## Debounce and re-check rules
 
 - Each incoming message of an `active` contact enqueues one job, deferred by
-  `AUTOPILOT_DEBOUNCE_SECONDS` (12 s), with the id `reply-<contact id>-<message id>`. The debounce is
-  by supersession: a job whose message is no longer the latest message of the contact skips, so a
-  burst produces one reply, from the job of its newest message (CYR-17,
-  [autopilot.md](autopilot.md#the-debounce)). The reaction delay is longer than the debounce window, so
-  a job of an earlier message may already have written a row; that row is cancelled as `superseded`
-  by the newer job and by the sender's own checks (CYR-41,
-  [autopilot.md](autopilot.md#one-reply-per-burst)).
+  `AUTOPILOT_DEBOUNCE_ONGOING_SECONDS` (4 s) in an ongoing conversation and by
+  `AUTOPILOT_DEBOUNCE_SECONDS` (12 s) otherwise, by the planner's ongoing rule (CYR-43), with the id
+  `reply-<contact id>-<message id>`. The debounce is by supersession: a job whose message is no longer
+  the latest message of the contact skips, so a burst produces one reply (CYR-17,
+  [autopilot.md](autopilot.md#the-debounce)); once the burst is `AUTOPILOT_MAX_BURST_WAIT_SECONDS`
+  (30 s) old, a job answers the newest message instead of skipping
+  ([autopilot.md](autopilot.md#the-maximum-wait)). The reaction delay is longer than the debounce
+  window, so a job of an earlier message may already have written a row; while that row has not
+  started it is cancelled as `superseded` by the newer job and by the sender's check before the read
+  mark (CYR-41, [autopilot.md](autopilot.md#one-reply-per-burst)); a started reply is finished.
 - The status is checked when the job is enqueued, when it runs, in `OutboxService.enqueue` and again
   right before the send. The last check is made by the sender, not by the caller, so a status change
   between scheduling, prompt building and sending (for example a stop-trigger or a manual message of

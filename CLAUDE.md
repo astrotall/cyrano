@@ -43,7 +43,8 @@ What exists now:
 - The autopilot (CYR-17), behind `AUTOPILOT_ENABLED` (default off): the app enqueues one Arq job per
   incoming message of an `active` contact, the worker generates one reply per burst with the persona,
   the examples and the reply generator and writes an `autopilot` outbox row, and the app's sender sends
-  it (one reply per burst by supersession, CYR-41). The sweeper, `reply_after`, the autopilot stop and
+  it (one reply per burst by supersession, CYR-41; the adaptive debounce, the maximum wait and replies
+  that finish once started, CYR-43). The sweeper, `reply_after`, the autopilot stop and
   cooldown and the `autopilot` command belong to it.
 - Multi-line replies (CYR-36): the model puts each message on its own line, the job splits the reply
   into at most three parts and stores them as one chain of outbox rows (`follows_id`), and the sender
@@ -317,6 +318,14 @@ pause, supersession by a newer incoming message only, the orphan cancel each pol
 instructions, the numbered parts of `reply-preview`, `LimitHit` in the limiter and the limit notice with
 its numbers, setting and local time (`SenderNotices.limit_time_format`), and the tests with the new scans
 in `tests/test_one_sender.py`.
+CYR-43 kept a lively conversation flowing: the optional settings `AUTOPILOT_DEBOUNCE_ONGOING_SECONDS`
+and `AUTOPILOT_MAX_BURST_WAIT_SECONDS` with their ordering rules, the adaptive debounce of
+`AutopilotScheduler` through the planner's one ongoing rule (`burst_is_ongoing`,
+`HumanizationPlanner.conversation_ongoing`), the maximum wait and the effective trigger in the reply job
+(`burst_messages`, `ADOPTED_NEWEST_DETAIL`, the short reaction for an adopted reply through the planner's
+`ongoing` override), the sender's single supersession check before the read mark (none before the send,
+none for later parts), the job-time cancellation limited to replies that have not started, and the tests,
+with `tests/test_ongoing_rule.py` and the lively scenario in `tests/services/test_autopilot_lively.py`.
 
 ## Detailed guides
 

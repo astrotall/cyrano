@@ -221,6 +221,8 @@ def test_every_setting_is_either_logged_or_deliberately_withheld() -> None:
         "reply_prompt_budget_chars",
         "autopilot_enabled",
         "autopilot_debounce_seconds",
+        "autopilot_debounce_ongoing_seconds",
+        "autopilot_max_burst_wait_seconds",
         "send_limit_minute",
         "send_limit_hour",
         "send_limit_day",
@@ -411,6 +413,8 @@ def test_the_debounce_accepts_its_range(
     full_env: dict[str, str], monkeypatch: pytest.MonkeyPatch, value: str
 ) -> None:
     monkeypatch.setenv("AUTOPILOT_DEBOUNCE_SECONDS", value)
+    monkeypatch.setenv("AUTOPILOT_DEBOUNCE_ONGOING_SECONDS", value)
+    monkeypatch.setenv("AUTOPILOT_MAX_BURST_WAIT_SECONDS", "300")
 
     assert load_settings(env_file=None).autopilot_debounce_seconds == int(value)
 
@@ -434,6 +438,131 @@ def test_an_empty_debounce_falls_back_to_the_default(
     monkeypatch.setenv("AUTOPILOT_DEBOUNCE_SECONDS", "")
 
     assert load_settings(env_file=None).autopilot_debounce_seconds == 12
+
+
+ONGOING_DEBOUNCE_VARIABLE = "AUTOPILOT_DEBOUNCE_ONGOING_SECONDS"
+MAX_BURST_WAIT_VARIABLE = "AUTOPILOT_MAX_BURST_WAIT_SECONDS"
+DEBOUNCE_VARIABLE = "AUTOPILOT_DEBOUNCE_SECONDS"
+
+
+def test_the_ongoing_debounce_and_the_maximum_wait_have_their_defaults_and_stay_unlogged(
+    full_env: dict[str, str],
+) -> None:
+    settings = load_settings(env_file=None)
+
+    assert settings.autopilot_debounce_ongoing_seconds == 4
+    assert settings.autopilot_max_burst_wait_seconds == 30
+    assert "autopilot_debounce_ongoing_seconds" not in settings.safe_summary()
+    assert "autopilot_max_burst_wait_seconds" not in settings.safe_summary()
+
+
+@pytest.mark.parametrize(
+    ("name", "value", "debounce", "attribute"),
+    [
+        (ONGOING_DEBOUNCE_VARIABLE, "0", "12", "autopilot_debounce_ongoing_seconds"),
+        (ONGOING_DEBOUNCE_VARIABLE, "300", "300", "autopilot_debounce_ongoing_seconds"),
+        (MAX_BURST_WAIT_VARIABLE, "1", "1", "autopilot_max_burst_wait_seconds"),
+        (MAX_BURST_WAIT_VARIABLE, "300", "12", "autopilot_max_burst_wait_seconds"),
+    ],
+)
+def test_the_ongoing_debounce_and_the_maximum_wait_accept_their_bounds(
+    full_env: dict[str, str],
+    monkeypatch: pytest.MonkeyPatch,
+    name: str,
+    value: str,
+    debounce: str,
+    attribute: str,
+) -> None:
+    monkeypatch.setenv(DEBOUNCE_VARIABLE, debounce)
+    monkeypatch.setenv(ONGOING_DEBOUNCE_VARIABLE, "0")
+    monkeypatch.setenv(MAX_BURST_WAIT_VARIABLE, "300")
+    monkeypatch.setenv(name, value)
+
+    assert getattr(load_settings(env_file=None), attribute) == int(value)
+
+
+@pytest.mark.parametrize(
+    ("name", "value"),
+    [
+        (ONGOING_DEBOUNCE_VARIABLE, "-1"),
+        (ONGOING_DEBOUNCE_VARIABLE, "301"),
+        (ONGOING_DEBOUNCE_VARIABLE, "quick-marker-zq"),
+        (MAX_BURST_WAIT_VARIABLE, "0"),
+        (MAX_BURST_WAIT_VARIABLE, "301"),
+        (MAX_BURST_WAIT_VARIABLE, "2.5"),
+        (MAX_BURST_WAIT_VARIABLE, "long-marker-zq"),
+    ],
+)
+def test_an_ongoing_debounce_or_a_maximum_wait_out_of_range_is_readable_without_the_value(
+    full_env: dict[str, str], monkeypatch: pytest.MonkeyPatch, name: str, value: str
+) -> None:
+    monkeypatch.setenv(name, value)
+
+    with pytest.raises(ConfigError) as raised:
+        load_settings(env_file=None)
+
+    assert name in str(raised.value)
+    assert value not in str(raised.value)
+
+
+@pytest.mark.parametrize(
+    ("debounce", "ongoing", "max_wait", "rule"),
+    [
+        ("21", "22", "300", f"{ONGOING_DEBOUNCE_VARIABLE} must not be above {DEBOUNCE_VARIABLE}"),
+        ("31", "4", "29", f"{DEBOUNCE_VARIABLE} must not be above {MAX_BURST_WAIT_VARIABLE}"),
+    ],
+)
+def test_the_debounce_ordering_rules_name_the_variables_and_never_the_values(
+    full_env: dict[str, str],
+    monkeypatch: pytest.MonkeyPatch,
+    debounce: str,
+    ongoing: str,
+    max_wait: str,
+    rule: str,
+) -> None:
+    monkeypatch.setenv(DEBOUNCE_VARIABLE, debounce)
+    monkeypatch.setenv(ONGOING_DEBOUNCE_VARIABLE, ongoing)
+    monkeypatch.setenv(MAX_BURST_WAIT_VARIABLE, max_wait)
+
+    with pytest.raises(ConfigError) as raised:
+        load_settings(env_file=None)
+
+    message = str(raised.value)
+    assert rule in message
+    for value in (debounce, ongoing, max_wait):
+        assert value not in message
+
+
+@pytest.mark.parametrize(("debounce", "ongoing", "max_wait"), [("12", "12", "12"), ("0", "0", "1")])
+def test_equal_debounces_and_a_maximum_wait_equal_to_the_debounce_are_accepted(
+    full_env: dict[str, str],
+    monkeypatch: pytest.MonkeyPatch,
+    debounce: str,
+    ongoing: str,
+    max_wait: str,
+) -> None:
+    monkeypatch.setenv(DEBOUNCE_VARIABLE, debounce)
+    monkeypatch.setenv(ONGOING_DEBOUNCE_VARIABLE, ongoing)
+    monkeypatch.setenv(MAX_BURST_WAIT_VARIABLE, max_wait)
+
+    settings = load_settings(env_file=None)
+
+    assert (
+        settings.autopilot_debounce_seconds,
+        settings.autopilot_debounce_ongoing_seconds,
+        settings.autopilot_max_burst_wait_seconds,
+    ) == (int(debounce), int(ongoing), int(max_wait))
+
+
+def test_a_normal_debounce_above_the_default_maximum_wait_needs_the_maximum_wait_raised(
+    full_env: dict[str, str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv(DEBOUNCE_VARIABLE, "45")
+
+    with pytest.raises(ConfigError) as raised:
+        load_settings(env_file=None)
+
+    assert f"{DEBOUNCE_VARIABLE} must not be above {MAX_BURST_WAIT_VARIABLE}" in str(raised.value)
 
 
 SEND_LIMIT_VARIABLES = (

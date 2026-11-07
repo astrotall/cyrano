@@ -22,6 +22,7 @@ app: AutopilotScheduler.on_incoming ---- switch on, autopilot running, contact a
      |        and messages that arrived while the contact was pending
      v                                    v
 Redis: Arq job "reply_to_contact", id reply-<contact id>-<message id>, deferred by the debounce
+       (4 s in an ongoing conversation, 12 s otherwise, CYR-43)
      |
      v
 worker: ReplyJobRunner.run ---- skips, hand-over, stop or cooldown pause (tables below)
@@ -41,9 +42,9 @@ HumanizationPlanner.plan (send time) ----> split_reply ----> OutboxService.enque
 | `domain/autopilot.py` | Every constant below, `AutopilotState`, `ReplyJobRequest` (the job arguments), `ReplyJobResult`, `reply_job_id`, `retry_delay` |
 | `domain/enums.py` | `AutopilotStopReason`, `AutopilotPauseReason`, `ReplyJobOutcome`, `ReplyJobReason` |
 | `domain/errors.py` | `RetryJob(defer_seconds, error_class)`, `ReplyAfterRefused`, `AutopilotStateMissing` |
-| `services/reply_job.py` | `ReplyJobRunner`, `AutopilotNotices`, `burst_texts`. No Arq import |
+| `services/reply_job.py` | `ReplyJobRunner`, `AutopilotNotices`, `burst_messages`, `burst_texts`. No Arq import |
 | `services/reply_split.py` | `split_reply`: the pure split of a reply into at most `MAX_REPLY_PARTS` parts (CYR-36) |
-| `services/autopilot.py` | `AutopilotScheduler`, `AutopilotSweeper`, `autopilot_running` |
+| `services/autopilot.py` | `AutopilotScheduler` (the debounce is chosen with `HumanizationPlanner.conversation_ongoing`, CYR-43), `AutopilotSweeper`, `autopilot_running` |
 | `services/reply_job_queue.py` | The one-method `ReplyJobQueue` Protocol |
 | `services/repositories.py` | `AutopilotStateRepository` (`get`, `stop`, `pause_until`, `resume`) and `ReplyBacklogRepository` (`awaiting_reply`, `count_unanswered_active`) |
 | `db/repositories.py`, migration `0009` | `SqlAutopilotStateRepository`, `SqlReplyBacklogRepository`, `contacts.reply_after`, the `autopilot_state` table |
@@ -59,35 +60,124 @@ worker; the worker imports neither Telethon nor `userbot`. `tests/test_one_sende
 
 ## The debounce
 
-Every new incoming message of an `active` contact enqueues one job, deferred by
-`AUTOPILOT_DEBOUNCE_SECONDS` (default 12). The job id is `reply-<contact id>-<message id>`, so the same
-message is never queued twice while its job exists. A burst therefore makes one job per message, and
-every job but the newest one finds a newer incoming message when it runs and skips (`superseded`).
-Only the job of the last message of the burst generates, and the whole burst is in its prompt.
+Every new incoming message of an `active` contact enqueues one job. The job id is
+`reply-<contact id>-<message id>`, so the same message is never queued twice while its job exists. A
+burst therefore makes one job per message, and a job that finds a newer incoming message when it runs
+skips (`superseded`), unless the burst has waited too long ([the maximum wait](#the-maximum-wait)).
+Only one job of a burst generates, and the whole burst is in its prompt.
+
+**The adaptive debounce (CYR-43).** `AutopilotScheduler.on_incoming` defers the job by
+`AUTOPILOT_DEBOUNCE_ONGOING_SECONDS` (default 4) when the conversation is ongoing and by
+`AUTOPILOT_DEBOUNCE_SECONDS` (default 12) otherwise. "Ongoing" is the planner's rule, in one place
+(`HumanizationPlanner.conversation_ongoing`, which calls `burst_is_ongoing` and `is_ongoing` in
+`services/humanization.py`): the burst is the run of consecutive incoming messages that ends with the new
+message, and the conversation is ongoing when the activity right before the burst's first message, in
+either direction, lies less than the profile's `ongoing_window_minutes` (10) before it. Exactly the window
+length is not ongoing; a first message ever is never ongoing. The scheduler reads the last 20 messages and
+the schedule profile for it. If that fails (an unreadable profile, a database error, a message not found
+among the last 20), the job is deferred by the normal debounce and one WARNING
+`the conversation pace was not decided` with the class name is logged; the job is enqueued anyway.
+`tests/test_ongoing_rule.py` fails if a second copy of the rule appears.
+
+Why: in a conversation where both sides are writing, a contact who sends a message every 10 to 20 s
+never left a 12 s gap, so every job found a newer message and skipped, and nothing was sent (seen live).
+The short debounce is shorter than such a gap. A contact who comes back after a pause still gets the
+longer one, so a burst of short first messages is still collected into one reply.
 
 A job can only skip itself when the newer message already exists at the time it runs. The reaction
-delay of the planner (20 to 120 s from the trigger's time) is longer than the debounce window (12 s), so
-the job of an earlier message may already have written its row when the next message arrives. That row
-is handled by [one reply per burst](#one-reply-per-burst).
+delay of the planner (20 to 120 s from the trigger's time for a new conversation) is longer than the
+debounce window, so the job of an earlier message may already have written its row when the next
+message arrives. That row is handled by [one reply per burst](#one-reply-per-burst).
+
+## The maximum wait
+
+CYR-43. A burst whose gaps are all shorter than the debounce would otherwise skip job after job for as
+long as the contact keeps writing (starvation). The job therefore measures the **burst age**: now minus
+the time (`created_at`, Telegram's send time) of the first message of the current unanswered run, which
+is the run of consecutive incoming messages that ends with the newest message `N` of the contact, after
+the last outgoing message and after `reply_after`, among the last `BURST_HISTORY_MESSAGES` (20) messages.
+It is the same run as the burst of the stop-trigger check.
+
+| The newest message `N` | Burst age | What the job does |
+| --- | --- | --- |
+| is the trigger | any | Goes on as before |
+| is outgoing (newer than the trigger) | any | Skips, `answered` |
+| is a newer incoming message | below `AUTOPILOT_MAX_BURST_WAIT_SECONDS` (default 30) | Skips, `superseded`; a later job handles the burst |
+| is a newer incoming message | at or above `AUTOPILOT_MAX_BURST_WAIT_SECONDS` | Does not skip: adopts `N` as the **effective trigger** |
+
+The boundary is pinned: the maximum wait is reached when the burst age is greater than or equal to it.
+With the effective trigger, everything that follows in this run uses `N`: the existing-row check, the
+stop-trigger check on the burst up to `N`, the generation (whose history ends with `N`), the planner, the
+job-time cancellation of older rows and the enqueue, so the row carries `trigger_message_id = N`. The
+sender's first supersession check therefore finds no message newer than the row's trigger and does not
+cancel it. Several jobs that adopt the same `N` write one row: the existing-row check and the partial
+unique index on (contact, trigger) keep a second one out, and a second enqueue returns the stored chain.
+The job of `N` itself later finds that row and skips (`row_exists`).
+
+An adopted reply is planned with the **short reaction** (`reaction.ongoing_seconds`, 1 to 4 s), whatever
+the conversation looked like before the burst: the contact has already waited the maximum wait. With the
+long reaction of a new conversation (20 to 120 s) the next message would arrive first and the sender would
+cancel the row before it started, so a fresh conversation with a fast writer would still starve. This is
+the only place where the planner's own ongoing decision is overridden (`plan(..., ongoing=True)`).
+
+The result and the `reply job finished` line carry the detail `adopted_newest` (`ADOPTED_NEWEST_DETAIL`):
+for a queued reply instead of the planner's reason, and for any other outcome of an adopted run that has
+no detail of its own (`row_exists`, for example). A hand-over, a refused enqueue, a stop or a pause keep
+their own detail. The outcome and reason tables below are unchanged; `trigger_message_id` in the log line
+stays the job's own trigger, and the row shows `N`.
+
+### A lively conversation
+
+The scenario of `tests/services/test_autopilot_lively.py`, with the defaults (debounces 12 and 4 s,
+maximum wait 30 s, the default profile without a night window, the default send limits, a one-line reply
+of 44 characters, so 8.8 s of typing), seeded and invented: a contact with no earlier messages writes
+every 10 s from 0 to 170 s (18 messages) and then stops.
+
+| Time (s) | What happens |
+| --- | --- |
+| 0, 10, 20 | No activity before the burst: each job is deferred 12 s |
+| 12, 22 | The jobs find a newer message; the burst is 12 and 22 s old: `superseded` |
+| 32 | The burst is 32 s old: the job adopts the message of 30 s, plans the short reaction and writes row 1 |
+| 32 to 42.6 | The sender claims row 1, marks the chat read, pauses, types; the message of 40 s arrives during the typing and cancels nothing. **Reply 1 at 42.6** |
+| 42 | The job of the 30 s message adopts the 40 s message and writes row 2; the sender cancels it before its read mark, because reply 1 is newer than its trigger |
+| 50 | After reply 1 the conversation is ongoing: 4 s debounce. The job at 54 answers the 50 s message. **Reply 2 at 66.1** (the 60 s message arrived during the typing) |
+| 60 to 100 | Each message gets its own job and row; the per-contact minute limit (2) holds each row until 102.6, and each new job cancels the waiting older row (none has started) |
+| 104 | The row for the 100 s message is claimed when the slot frees. **Reply 3 at 114.4** |
+| 120 to 136 | **Reply 4 at 136.4**, for the 120 s message |
+| 140 to 174 | Rows held by the limit until 174.4, older ones cancelled by newer jobs |
+| 174 to 184.5 | The row for the last message (170 s) is sent. **Reply 5 at 184.5**; nothing more follows |
+
+The first reply comes 42.6 s after the first message; no reply gap is longer than 48.3 s, below the
+maximum wait plus the profile's longest typing (30 + 25 = 55 s), which the test asserts for every gap and
+for every message of the contact. In the steady state the pace is set by `SEND_LIMIT_CONTACT_MINUTE`, not
+by the debounce: two replies per minute at most. The test also asserts that no trigger has a second row,
+that every row whose typing began was sent, that every generated reply saw every message of the contact
+since the previous reply up to its effective trigger (within the 20 messages of the history), and an
+upper bound on the number of replies: at most one per incoming message and at most
+`SEND_LIMIT_CONTACT_MINUTE` in every started minute of the scenario (2 x 6 = 12 for its 350 s); it sent 5.
+The cost is the generation: 14 replies were generated for 5 sent, because a row held by the limit is
+superseded by the next message's row before it can start. A second scenario (three messages at 0, 20 and
+40 s, then silence) ends with exactly one reply, for the last message, whose prompt holds all three.
 
 ## One reply per burst
 
-CYR-41. A contact that writes three messages within a minute gets ONE reply, written for the last one.
-A row of source `autopilot` is cancelled with the reason `superseded` (no owner notice) in two places:
+CYR-41, narrowed by CYR-43. A contact that writes three messages within a minute gets ONE reply, written
+for the last one. A row of source `autopilot` that has **not started** is cancelled with the reason
+`superseded` (no owner notice) in two places:
 
 1. **In the job**, after the planner gave a send time and before `OutboxService.enqueue_sequence`: the
-   contact's other `autopilot` rows that are still `scheduled` and whose trigger message is older than
-   the new trigger, by `(created_at, id)`, are cancelled in one statement
-   (`OutboxRepository.cancel_superseded_autopilot_rows`). Since CYR-36 this includes the waiting later
-   parts of an older reply, identified by the trigger of their first part, also when that first part
-   was already sent; a sent part is never touched. A row in state `sending` cannot be cancelled
-   there; it is covered by the sender. `manual_test` rows, rows of other contacts, `sent` rows and rows
-   without a trigger are never touched. The idempotent skip when a row for the new trigger exists
-   (step 5) is unchanged.
-2. **In the sender**, for the row it is about to send: before `mark_read` and again right before
-   `send_text` ([the supersession check](outbox-and-sender.md#the-supersession-check)). A newer message,
-   incoming or outgoing, than the row's trigger cancels it. A later part of a reply is cancelled only by a
-   newer incoming message than its first part's trigger; its own earlier parts are outgoing and newer.
+   contact's other `autopilot` replies whose first part is still `scheduled` and whose trigger message is
+   older than the new (effective) trigger, by `(created_at, id)`, are cancelled in one statement, every
+   waiting part of each such reply included (`OutboxRepository.cancel_superseded_autopilot_rows`). A reply
+   whose first part is `sending` or `sent` is never touched, so its later parts are sent (CYR-43; under
+   CYR-36 its waiting parts were cancelled). `manual_test` rows, rows of other contacts and rows without a
+   trigger are never touched. The idempotent skip when a row for the new trigger exists (step 5) is
+   unchanged.
+2. **In the sender**, for a first part (or a single row) it has just claimed: once, after the availability
+   check and before `mark_read` ([the supersession check](outbox-and-sender.md#the-supersession-check)).
+   A newer message, incoming or outgoing, than the row's trigger cancels it. Once the read mark is under
+   way the reply is finished: a newer message no longer cancels it before `send_text`, and a later part of
+   a reply is never superseded (CYR-43).
 
 A burst end to end, with an invented timeline: messages at 0, 40 and 80 s, jobs at 12, 52 and 92 s.
 The job at 12 s writes row 1 for 48 s (the planner drew a delay of 48 s). The second message arrives at
@@ -97,9 +187,15 @@ writes row 2 for 84 s. The third message arrives at 80 s: the sender cancels row
 receives. Had a job run while an older row was still waiting, it would have cancelled that row itself.
 Every skip or cancel in this story writes no notice and counts no attempt.
 
-An outgoing message newer than the trigger also supersedes the row. The detector of a manual message
-cancels the contact's scheduled rows as well (`manual_message`); the check covers the row that was
-already claimed.
+An outgoing message newer than the trigger also supersedes a row that has not started. The detector of
+a manual message cancels the contact's scheduled rows as well (`manual_message`), later parts included; a
+row that was already claimed is stopped by the sender's second guard check, because the contact is
+`paused` by then.
+
+**The trade-off (CYR-43).** A reply whose read mark has begun goes out even when the contact wrote again
+during the read pause or the typing, so in a fast chat a message may get its own short reply and the next
+reply answers what came after it. Cancelling there made a fast writer starve (seen live: the next message
+cancelled the reply in its typing phase, and the second part of a reply whose first part had been sent).
 
 "Newer" means newer by the pair `(created_at, id)` and `created_at` is Telegram's send time for both
 directions ([Message times](contact-lifecycle.md#message-times)). A message that a catch-up stores late
@@ -116,12 +212,14 @@ reason, an optional detail, the row id of the first part and the number of parts
 2. The contact is missing or not `active`: skip.
 3. The trigger message is missing (or belongs to another contact), is not incoming, has a time at or
    before `contacts.reply_after`, or is older than the stale age by its Telegram time: skip.
-4. Superseded: the latest message of the contact is not the trigger. A newer incoming message gives
-   `superseded`, a newer outgoing one (the owner or the sender answered) gives `answered`.
-5. An outbox row already exists for (contact, trigger), in any state: skip.
+4. Superseded: the latest message of the contact is not the trigger. A newer outgoing one (the owner or
+   the sender answered) gives `answered`. A newer incoming one gives `superseded` while the burst is
+   younger than `AUTOPILOT_MAX_BURST_WAIT_SECONDS`; at or past it, the newest message becomes the
+   effective trigger for steps 5 to 10 ([the maximum wait](#the-maximum-wait)).
+5. An outbox row already exists for (contact, effective trigger), in any state: skip.
 6. The stop-trigger detector runs on the burst: the run of consecutive incoming messages that ends
-   with the trigger, only messages after `reply_after`. A hit calls `HandOverService.hand_over` with
-   the classes and the source `text`.
+   with the effective trigger, only messages after `reply_after`. A hit calls
+   `HandOverService.hand_over` with the classes and the source `text`.
 7. `ReplyGenerator.generate` with the contact's mode and no summary:
    - `needs_owner`: hand-over with the source `model` and no classes;
    - `truncated`: one more generation with `max_tokens` = `LLM_REPLY_MAX_TOKENS` x 2, capped at
@@ -135,8 +233,9 @@ reason, an optional detail, the row id of the first part and the number of parts
    `LLMRateLimitError`, `LLMUnavailableError`, `LLMInvalidResponseError` and any unexpected exception
    raise `RetryJob` with the next delay; on the last try the autopilot pauses for the cooldown
    (`provider_unavailable`), one notice per new pause, and no row is written.
-9. `HumanizationPlanner.plan(contact_id, trigger_message_id, now)`; `PlanNotPossible` is a skip.
-10. Before the enqueue, the contact's older scheduled `autopilot` rows are cancelled as `superseded`
+9. `HumanizationPlanner.plan(contact_id, trigger_message_id, now)` with the effective trigger, and with
+   `ongoing=True` for an adopted one; `PlanNotPossible` is a skip.
+10. Before the enqueue, the contact's older `autopilot` replies that have not started are cancelled as `superseded`
     ([One reply per burst](#one-reply-per-burst)). Then the reply is split (`split_reply`, CYR-36): at
     every run of line breaks, each part stripped, empty parts dropped, the order kept, at most
     `MAX_REPLY_PARTS` (3) parts, and any further lines merged into the last part with one space. Then
@@ -145,14 +244,15 @@ reason, an optional detail, the row id of the first part and the number of parts
     once, one transaction. An `EnqueueRefused` (one bad part refuses the whole reply) is a skip with its
     reason as the detail. A duplicate enqueue returns the stored chain and creates no part.
 
-Everything is idempotent: a job run twice, a retried job or a job that races the sweeper's job for the
-same message writes one row at most (step 5 and the partial unique index of the outbox).
+Everything is idempotent: a job run twice, a retried job, a job that races the sweeper's job for the
+same message, or several jobs that adopt the same newest message write one row at most (step 5 and the
+partial unique index of the outbox).
 
 ### Outcomes and reasons
 
 | Outcome | Reason | When |
 | --- | --- | --- |
-| `queued` | `queued` | A reply was written; the detail is the planner's reason (`delayed`, `ongoing`, `postponed_night`, ...), the row id is its first part, and `parts` is the number of parts |
+| `queued` | `queued` | A reply was written; the detail is the planner's reason (`delayed`, `ongoing`, `postponed_night`, ...), or `adopted_newest` when the job adopted the newest message ([the maximum wait](#the-maximum-wait)), the row id is its first part, and `parts` is the number of parts |
 | `skipped` | `switch_off`, `autopilot_stopped`, `autopilot_paused` | Step 1 |
 | `skipped` | `contact_missing`, `contact_not_active` | Step 2 (`contact_missing` also when the generator no longer finds it) |
 | `skipped` | `trigger_missing`, `trigger_not_incoming`, `trigger_before_resume`, `trigger_stale` | Step 3 |
@@ -191,10 +291,13 @@ written and the sender checks the guard again. The notices go through the 15 s d
 
 Logger `cyrano.services.reply_job`: one INFO line `reply job finished` per run with the contact id, the
 trigger message id, the attempt, the outcome, the reason, the detail, the row id and `parts` (the
-number of parts of a queued reply, otherwise empty); one INFO line
+number of parts of a queued reply, otherwise empty); the detail `adopted_newest` marks a run that
+adopted the newest message; one INFO line
 `reply job will be retried` with the error class and the delay instead when the job is retried;
 WARNING `autopilot notice was not sent` with the class name. Logger `cyrano.services.autopilot`: INFO
-`reply job enqueued` (ids and the delay), WARNING `reply job was not enqueued` (class name), INFO
+`reply job enqueued` (ids and the delay), WARNING `the conversation pace was not decided` (contact id
+and class name; the job is enqueued with the normal debounce), WARNING `reply job was not enqueued`
+(class name), INFO
 `autopilot sweep` (counters), ERROR `autopilot sweep failed` (class name). Never a message text, a
 generated reply, a name, a username, a Telegram id or a photo path.
 
@@ -252,7 +355,9 @@ failing sweep or queue is logged with the class name and never stops the loop.
 | Name | Value | Meaning |
 | --- | --- | --- |
 | `AUTOPILOT_ENABLED` | `false` | The switch, read by the app, the worker and the sender's guard |
-| `AUTOPILOT_DEBOUNCE_SECONDS` | 12 (0 to 300) | Delay of the job after a message; the sweeper waits twice as long |
+| `AUTOPILOT_DEBOUNCE_SECONDS` | 12 (0 to 300) | Delay of the job after a message when the conversation is not ongoing; the sweeper waits twice as long |
+| `AUTOPILOT_DEBOUNCE_ONGOING_SECONDS` | 4 (0 to 300, at most `AUTOPILOT_DEBOUNCE_SECONDS`) | Delay of the job after a message in an ongoing conversation (CYR-43) |
+| `AUTOPILOT_MAX_BURST_WAIT_SECONDS` | 30 (1 to 300, at least `AUTOPILOT_DEBOUNCE_SECONDS`) | Burst age from which a job adopts the newest message instead of skipping (CYR-43) |
 | `REPLY_STALE_AFTER_SECONDS` | 6 h | The outbox's stale age; an older message is never answered |
 | `SWEEP_INTERVAL_SECONDS` | 60 | Between two sweeps |
 | `JOB_MAX_TRIES` | 4 | One run plus three retries |
@@ -262,7 +367,8 @@ failing sweep or queue is logged with the class name and never stops the loop.
 | `TRUNCATION_MAX_TOKENS` | 1600 | Cap of that retry |
 | `JOB_TIMEOUT_SECONDS` | 300 | Arq's limit for one try |
 | `WORKER_MAX_JOBS` | 2 | Jobs one worker runs at the same time |
-| `BURST_HISTORY_MESSAGES` | 20 | Messages read for the job's supersession check and the burst |
+| `BURST_HISTORY_MESSAGES` | 20 | Messages read for the job's supersession check, the burst and the burst age |
+| `ADOPTED_NEWEST_DETAIL` | `adopted_newest` | The detail of a run that adopted the newest message |
 
 The worker runs with `max_tries=4`, `job_timeout=300`, `keep_result=0` (no result key, so the same job
 id can be enqueued again after the job ended), `max_jobs=2`, `retry_jobs` on and the health check every

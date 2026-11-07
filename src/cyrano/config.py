@@ -37,6 +37,12 @@ MAX_REPLY_PROMPT_BUDGET_CHARS = 200000
 DEFAULT_AUTOPILOT_DEBOUNCE_SECONDS = 12
 MIN_AUTOPILOT_DEBOUNCE_SECONDS = 0
 MAX_AUTOPILOT_DEBOUNCE_SECONDS = 300
+DEFAULT_AUTOPILOT_DEBOUNCE_ONGOING_SECONDS = 4
+MIN_AUTOPILOT_DEBOUNCE_ONGOING_SECONDS = 0
+MAX_AUTOPILOT_DEBOUNCE_ONGOING_SECONDS = 300
+DEFAULT_AUTOPILOT_MAX_BURST_WAIT_SECONDS = 30
+MIN_AUTOPILOT_MAX_BURST_WAIT_SECONDS = 1
+MAX_AUTOPILOT_MAX_BURST_WAIT_SECONDS = 300
 MIN_SEND_LIMIT = 1
 DEFAULT_SEND_LIMIT_MINUTE = 4
 DEFAULT_SEND_LIMIT_HOUR = 40
@@ -52,6 +58,10 @@ SEND_LIMIT_ORDER = (
     ("send_limit_contact_minute", "send_limit_minute"),
     ("send_limit_contact_hour", "send_limit_hour"),
     ("send_limit_contact_day", "send_limit_day"),
+)
+AUTOPILOT_TIMING_ORDER = (
+    ("autopilot_debounce_ongoing_seconds", "autopilot_debounce_seconds"),
+    ("autopilot_debounce_seconds", "autopilot_max_burst_wait_seconds"),
 )
 
 LOGGED_SETTINGS = frozenset(
@@ -131,6 +141,16 @@ class Settings(BaseSettings):
         ge=MIN_AUTOPILOT_DEBOUNCE_SECONDS,
         le=MAX_AUTOPILOT_DEBOUNCE_SECONDS,
     )
+    autopilot_debounce_ongoing_seconds: int = Field(
+        default=DEFAULT_AUTOPILOT_DEBOUNCE_ONGOING_SECONDS,
+        ge=MIN_AUTOPILOT_DEBOUNCE_ONGOING_SECONDS,
+        le=MAX_AUTOPILOT_DEBOUNCE_ONGOING_SECONDS,
+    )
+    autopilot_max_burst_wait_seconds: int = Field(
+        default=DEFAULT_AUTOPILOT_MAX_BURST_WAIT_SECONDS,
+        ge=MIN_AUTOPILOT_MAX_BURST_WAIT_SECONDS,
+        le=MAX_AUTOPILOT_MAX_BURST_WAIT_SECONDS,
+    )
     send_limit_minute: int = Field(default=DEFAULT_SEND_LIMIT_MINUTE, ge=MIN_SEND_LIMIT)
     send_limit_hour: int = Field(default=DEFAULT_SEND_LIMIT_HOUR, ge=MIN_SEND_LIMIT)
     send_limit_day: int = Field(default=DEFAULT_SEND_LIMIT_DAY, ge=MIN_SEND_LIMIT)
@@ -208,10 +228,10 @@ class Settings(BaseSettings):
         return value
 
     @model_validator(mode="after")
-    def _check_send_limit_order(self) -> Settings:
+    def _check_setting_order(self) -> Settings:
         broken = [
             f"{lower.upper()} must not be above {upper.upper()}"
-            for lower, upper in SEND_LIMIT_ORDER
+            for lower, upper in (*SEND_LIMIT_ORDER, *AUTOPILOT_TIMING_ORDER)
             if getattr(self, lower) > getattr(self, upper)
         ]
         if broken:

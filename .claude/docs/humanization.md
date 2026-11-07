@@ -62,7 +62,13 @@ apply by the local weekday. Overlapping windows return the latest end, with the 
 
 **Ongoing.** `is_ongoing(burst_first_at, previous_activity_at, profile)` is true when there is
 previous activity and the burst's first message came less than `ongoing_window_minutes` after it.
-Exactly the window length is not ongoing.
+Exactly the window length is not ongoing. `burst_is_ongoing(history, trigger, profile)` applies it to a
+history (the burst and the activity before it, see the burst below), and it is the one place both users
+call: the planner for the reaction delay, and since CYR-43 the autopilot scheduler for the debounce,
+through `HumanizationPlanner.conversation_ongoing(contact_id, message_id)`
+([autopilot.md](autopilot.md#the-debounce)). An ongoing conversation gets the short debounce
+(`AUTOPILOT_DEBOUNCE_ONGOING_SECONDS`, 4 s) and the short reaction; any other gets 12 s and the long
+reaction. `tests/test_ongoing_rule.py` fails if a second copy of the rule appears.
 
 **The send time.** `plan_send_time(now, trigger_at, ongoing, profile, rng)`:
 
@@ -83,14 +89,18 @@ Exactly the window length is not ongoing.
 **Typing.** `typing_seconds(text, profile) = clamp(len(text) / chars_per_second, min_seconds, max_seconds)`.
 For a reply in several parts it is computed for each part from that part's own text.
 
-**The burst.** `HumanizationPlanner.plan(contact_id, trigger_message_id, now)` (called by the
-autopilot job, CYR-17) reads the last 20
+**The burst.** `HumanizationPlanner.plan(contact_id, trigger_message_id, now, *, ongoing=None)` (called by
+the autopilot job, CYR-17) reads the last 20
 messages of the contact. The burst is the run of consecutive incoming messages that ends with the
 trigger; later messages are ignored. `burst_first_at` is the time of its first message, and
 `previous_activity_at` the time of the message right before it, in either direction, or nothing. A
 trigger that is not an incoming message within those 20 raises `PlanNotPossible`, which carries ids
 only. When the burst fills all 20, there is no previous activity to see, so it counts as new. A
 `PlanNotPossible` makes the autopilot job skip the message without a row.
+`ongoing=True` or `False` replaces the decision from the history; only the autopilot job passes it, with
+`True`, for a burst that waited the maximum wait and adopted its newest message
+([autopilot.md](autopilot.md#the-maximum-wait)): that contact has already waited, so the reply gets the
+short reaction.
 
 `ScheduleService` gives the rest of the code `get_profile()` (stored or default, with the time zone
 filled in) and `blocked_until(now)`.

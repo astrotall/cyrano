@@ -8,7 +8,7 @@ import pytest
 
 from cyrano.bot.notifier import OUTBOX_NOTICES
 from cyrano.db.repositories import SqlSenderStateRepository
-from cyrano.domain.enums import MessageDirection, OutboxSource, OutboxState
+from cyrano.domain.enums import ContactStatus, MessageDirection, OutboxSource, OutboxState
 from cyrano.domain.models import Contact, Message
 from cyrano.domain.outbox import (
     CANCEL_REASON_MANUAL_MESSAGE,
@@ -17,6 +17,7 @@ from cyrano.domain.outbox import (
     CANCEL_REASON_STALE,
     CANCEL_REASON_STOP_TRIGGER,
     CANCEL_REASON_SUPERSEDED,
+    REFUSED_CONTACT_NOT_ACTIVE,
     ScheduledMessage,
 )
 from cyrano.services.outbox_sender import STEP_LOG_MESSAGE, OutboxSender
@@ -136,8 +137,9 @@ async def test_a_newer_incoming_message_cancels_the_row_before_any_pre_send_step
     assert notifier.texts == []
 
 
-async def test_a_message_that_arrives_during_typing_cancels_the_send(
-    rig: AutopilotRig, caplog: pytest.LogCaptureFixture
+@pytest.mark.parametrize("direction", [MessageDirection.INCOMING, MessageDirection.OUTGOING])
+async def test_a_message_that_arrives_during_typing_no_longer_cancels_the_send(
+    rig: AutopilotRig, caplog: pytest.LogCaptureFixture, direction: MessageDirection
 ) -> None:
     caplog.set_level(logging.INFO, logger=SENDER_LOGGER)
     contact = await rig.contact()
@@ -145,7 +147,7 @@ async def test_a_message_that_arrives_during_typing_cancels_the_send(
     row = await _row(rig, contact, trigger)
 
     async def arrive() -> None:
-        await rig.say(contact, ago=0, text=ARRIVAL_TEXT)
+        await rig.say(contact, ago=0, text=ARRIVAL_TEXT, direction=direction)
 
     transport = _ArrivalDuringTyping(rig, arrive)
     notifier = RecordingNotifier()
@@ -153,11 +155,44 @@ async def test_a_message_that_arrives_during_typing_cancels_the_send(
     await _sender(rig, transport, notifier).send_next()
 
     stored = await _stored(rig, row)
-    assert (stored.state, stored.cancel_reason) == (OutboxState.CANCELLED, CANCEL_REASON_SUPERSEDED)
-    assert transport.steps == [READ_STEP, PAUSE_STEP, TYPING_STEP]
-    assert transport.calls == []
+    assert (stored.state, stored.cancel_reason) == (OutboxState.SENT, None)
+    assert transport.steps == [READ_STEP, PAUSE_STEP, TYPING_STEP, SEND_STEP]
+    assert transport.calls == [(contact.tg_id, REPLY_TEXT_ZQ)]
     assert notifier.texts == []
-    assert _step_outcomes(caplog)[-1] == ("send", "skipped")
+    assert _step_outcomes(caplog) == [
+        ("mark_read", "ok"),
+        ("pause", "ok"),
+        ("typing", "ok"),
+        ("send", "ok"),
+    ]
+    assert not [
+        record
+        for record in caplog.records
+        if record.getMessage() == "outbox row superseded by a newer message"
+    ]
+
+
+async def test_a_message_during_typing_still_lets_the_guard_cancel_a_contact_paused_meanwhile(
+    rig: AutopilotRig,
+) -> None:
+    contact = await rig.contact()
+    trigger = await rig.say(contact, ago=OLDER_AGO)
+    row = await _row(rig, contact, trigger)
+
+    async def arrive() -> None:
+        await rig.say(contact, ago=0, text=ARRIVAL_TEXT)
+        await rig.contacts.set_status(contact.id, ContactStatus.PAUSED)
+
+    transport = _ArrivalDuringTyping(rig, arrive)
+
+    await _sender(rig, transport).send_next()
+
+    stored = await _stored(rig, row)
+    assert (stored.state, stored.cancel_reason) == (
+        OutboxState.CANCELLED,
+        REFUSED_CONTACT_NOT_ACTIVE,
+    )
+    assert transport.calls == []
 
 
 async def test_an_outgoing_message_newer_than_the_trigger_cancels_an_autopilot_row(

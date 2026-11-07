@@ -744,14 +744,14 @@ def test_the_superseded_reason_is_used_only_by_the_domain_the_reply_job_and_the_
     assert users == {REPLY_JOB_MODULE, SENDER_MODULE}
 
 
-def test_the_sender_checks_supersession_before_the_pre_send_steps_and_before_the_send() -> None:
+def test_the_sender_checks_supersession_once_before_the_pre_send_steps_and_never_after() -> None:
     tree = ast.parse((SOURCE_ROOT / SENDER_MODULE).read_text())
 
-    first, second = _call_lines(tree, DELIVER_METHOD, SUPERSEDE_CHECK)
+    [check] = _call_lines(tree, DELIVER_METHOD, SUPERSEDE_CHECK)
     [pre_send] = _call_lines(tree, DELIVER_METHOD, BEFORE_SEND_METHOD)
     guards = _call_lines(tree, DELIVER_METHOD, GUARD_METHOD)
     [send] = _call_lines(tree, DELIVER_METHOD, TRANSPORT_METHOD)
-    assert first < pre_send < guards[-1] <= second < send
+    assert guards[0] < check < pre_send < guards[-1] < send
 
 
 def test_the_scans_catch_what_they_look_for() -> None:

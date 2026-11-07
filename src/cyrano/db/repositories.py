@@ -6,15 +6,18 @@ from collections.abc import Sequence
 from datetime import datetime
 
 from pydantic import ValidationError
-from sqlalchemy import delete, func, select, update
-from sqlalchemy.dialects.postgresql import insert
+from sqlalchemy import delete, exists, func, or_, select, update
+from sqlalchemy.dialects.postgresql import distinct_on, insert
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import aliased
 
 from cyrano.db.models import (
+    AUTOPILOT_STATE_ROW_ID,
     PERSONA_ROW_ID,
     SCHEDULE_PROFILE_ROW_ID,
     SENDER_STATE_ROW_ID,
+    AutopilotStateRow,
     ContactRow,
     MessageRow,
     ModeRow,
@@ -25,7 +28,10 @@ from cyrano.db.models import (
     StyleExampleRow,
 )
 from cyrano.db.session import SessionFactory
+from cyrano.domain.autopilot import AutopilotState
 from cyrano.domain.enums import (
+    AutopilotPauseReason,
+    AutopilotStopReason,
     ContactStatus,
     MessageDirection,
     OutboxSource,
@@ -33,6 +39,7 @@ from cyrano.domain.enums import (
     PauseReason,
 )
 from cyrano.domain.errors import (
+    AutopilotStateMissing,
     ContactAlreadyExists,
     ContactNotFound,
     DefaultModeUnavailable,
@@ -42,6 +49,7 @@ from cyrano.domain.errors import (
     OutboxRowNotFound,
     OutboxStateConflict,
     PauseReasonRefused,
+    ReplyAfterRefused,
     SenderStateMissing,
     StoredScheduleInvalid,
 )
@@ -117,9 +125,14 @@ class SqlContactRepository:
         *,
         mode_id: int | None = None,
         pause_reason: PauseReason | None = None,
+        reply_after: datetime | None = None,
     ) -> StatusChange:
         if pause_reason is not None and status is not ContactStatus.PAUSED:
             raise PauseReasonRefused(status)
+        if reply_after is not None and status is not ContactStatus.ACTIVE:
+            raise ReplyAfterRefused(status)
+        if reply_after is not None:
+            _require_aware(reply_after)
         async with self._session_factory.begin() as session:
             row = await _locked_contact(session, contact_id)
             mode_on_activation = mode_id if status is ContactStatus.ACTIVE else None
@@ -131,6 +144,8 @@ class SqlContactRepository:
                     row.mode_id = mode_on_activation
                 row.status = status
                 row.pause_reason = pause_reason
+                if reply_after is not None:
+                    row.reply_after = reply_after
                 await session.flush()
             return _status_change(row, changed=changed)
 
@@ -214,6 +229,11 @@ class SqlMessageRepository:
                 return Message.model_validate(row)
         except IntegrityError:
             raise ContactNotFound(data.contact_id) from None
+
+    async def get(self, message_id: int) -> Message | None:
+        async with self._session_factory() as session:
+            row = await session.get(MessageRow, message_id)
+            return None if row is None else Message.model_validate(row)
 
     async def exists(self, contact_id: int, tg_message_id: int) -> bool:
         statement = select(
@@ -628,6 +648,18 @@ class SqlOutboxRepository:
         async with self._session_factory() as session:
             return bool(await session.scalar(statement))
 
+    async def has_row_for_trigger(self, contact_id: int, trigger_message_id: int) -> bool:
+        statement = select(
+            select(ScheduledMessageRow.id)
+            .where(
+                ScheduledMessageRow.contact_id == contact_id,
+                ScheduledMessageRow.trigger_message_id == trigger_message_id,
+            )
+            .exists()
+        )
+        async with self._session_factory() as session:
+            return bool(await session.scalar(statement))
+
     async def stale_sending(self, claimed_before: datetime) -> list[ScheduledMessage]:
         _require_aware(claimed_before)
         async with self._session_factory() as session:
@@ -649,10 +681,12 @@ class SqlOutboxRepository:
             rows = await session.scalars(statement)
             return [ScheduledMessage.model_validate(row) for row in rows]
 
-    async def count_by_state(self) -> dict[OutboxState, int]:
+    async def count_by_state(self, source: OutboxSource | None = None) -> dict[OutboxState, int]:
         statement = select(ScheduledMessageRow.state, func.count()).group_by(
             ScheduledMessageRow.state
         )
+        if source is not None:
+            statement = statement.where(ScheduledMessageRow.source == source)
         async with self._session_factory() as session:
             found = {state: count for state, count in (await session.execute(statement)).all()}
         return {state: found.get(state, 0) for state in OutboxState}
@@ -710,3 +744,111 @@ class SqlSenderStateRepository:
             row.stop_reason = None
             await session.flush()
             return before
+
+
+async def _locked_autopilot_state(session: AsyncSession) -> AutopilotStateRow:
+    row = await session.get(AutopilotStateRow, AUTOPILOT_STATE_ROW_ID, with_for_update=True)
+    if row is None:
+        raise AutopilotStateMissing
+    return row
+
+
+class SqlAutopilotStateRepository:
+    def __init__(self, session_factory: SessionFactory) -> None:
+        self._session_factory = session_factory
+
+    async def get(self) -> AutopilotState:
+        async with self._session_factory() as session:
+            row = await session.get(AutopilotStateRow, AUTOPILOT_STATE_ROW_ID)
+            if row is None:
+                raise AutopilotStateMissing
+            return AutopilotState.model_validate(row)
+
+    async def stop(self, reason: AutopilotStopReason) -> bool:
+        async with self._session_factory.begin() as session:
+            row = await _locked_autopilot_state(session)
+            if row.stopped:
+                return False
+            row.stopped = True
+            row.stop_reason = reason.value
+            await session.flush()
+            return True
+
+    async def pause_until(
+        self, until: datetime, reason: AutopilotPauseReason, *, now: datetime
+    ) -> bool:
+        _require_aware(until)
+        _require_aware(now)
+        async with self._session_factory.begin() as session:
+            row = await _locked_autopilot_state(session)
+            is_new = row.paused_until is None or row.paused_until <= now
+            if row.paused_until is None or until > row.paused_until:
+                row.paused_until = until
+                row.pause_reason = reason.value
+                await session.flush()
+            return is_new
+
+    async def resume(self) -> AutopilotState:
+        async with self._session_factory.begin() as session:
+            row = await _locked_autopilot_state(session)
+            before = AutopilotState.model_validate(row)
+            row.stopped = False
+            row.stop_reason = None
+            row.paused_until = None
+            row.pause_reason = None
+            await session.flush()
+            return before
+
+
+def _latest_messages_of_active_contacts() -> type[MessageRow]:
+    latest = (
+        select(MessageRow)
+        .join(ContactRow, ContactRow.id == MessageRow.contact_id)
+        .where(ContactRow.status == ContactStatus.ACTIVE)
+        .ext(distinct_on(MessageRow.contact_id))
+        .order_by(MessageRow.contact_id, MessageRow.created_at.desc(), MessageRow.id.desc())
+        .subquery()
+    )
+    return aliased(MessageRow, latest)
+
+
+class SqlReplyBacklogRepository:
+    def __init__(self, session_factory: SessionFactory) -> None:
+        self._session_factory = session_factory
+
+    async def awaiting_reply(self, *, newer_than: datetime, older_than: datetime) -> list[Message]:
+        _require_aware(newer_than)
+        _require_aware(older_than)
+        newest = _latest_messages_of_active_contacts()
+        has_row = exists().where(
+            ScheduledMessageRow.contact_id == newest.contact_id,
+            ScheduledMessageRow.trigger_message_id == newest.id,
+        )
+        statement = (
+            select(newest)
+            .join(ContactRow, ContactRow.id == newest.contact_id)
+            .where(
+                newest.direction == MessageDirection.INCOMING,
+                newest.created_at > newer_than,
+                newest.created_at <= older_than,
+                or_(ContactRow.reply_after.is_(None), newest.created_at > ContactRow.reply_after),
+                ~has_row,
+            )
+            .order_by(newest.created_at, newest.id)
+        )
+        async with self._session_factory() as session:
+            return [Message.model_validate(row) for row in await session.scalars(statement)]
+
+    async def count_unanswered_active(self) -> int:
+        newest = _latest_messages_of_active_contacts()
+        statement = (
+            select(func.count())
+            .select_from(newest)
+            .join(ContactRow, ContactRow.id == newest.contact_id)
+            .where(
+                newest.direction == MessageDirection.INCOMING,
+                or_(ContactRow.reply_after.is_(None), newest.created_at > ContactRow.reply_after),
+            )
+        )
+        async with self._session_factory() as session:
+            return await session.scalar(statement) or 0

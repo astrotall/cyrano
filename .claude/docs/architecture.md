@@ -1,11 +1,9 @@
 # Architecture
 
-State as of CYR-21: the skeleton, the storage layer, the userbot intake, the profile collection, the
+State as of CYR-17: the skeleton, the storage layer, the userbot intake, the profile collection, the
 control bot with the contact card, the LLM client, the persona with the style examples, the
 layered reply prompt with the reply generator and the outbox with the one sender, its limits, its
-pause, its stop and its pre-send part exist, and so does the send time planner. The sender runs in the app, but only the owner's test command writes to the outbox. Since CYR-21 a message the owner writes by hand from the second account pauses the contact, and the owner can resume it from the notice. The LLM client, the persona, the examples and
-the reply generator have no consumer in the running app: only the `llm-check` and `reply-preview`
-commands use them. Anything else is marked **planned** with its ticket.
+pause, its stop and its pre-send part exist, and so does the send time planner. Since CYR-21 a message the owner writes by hand from the second account pauses the contact, and the owner can resume it from the notice; since CYR-20 stop-triggers hand the contact over. Since CYR-17 the autopilot exists behind `AUTOPILOT_ENABLED`: the app enqueues a reply job per incoming message of an `active` contact, the Arq worker generates the reply with the LLM client, the persona, the examples and the reply generator and writes an `autopilot` row, and the app's sender sends it ([autopilot.md](autopilot.md)). The app itself still builds no LLM client. Anything else is marked **planned** with its ticket.
 Product and decisions: [CLAUDE.md](../../CLAUDE.md). Reasons: [decisions.md](decisions.md).
 
 ## Layers
@@ -16,22 +14,23 @@ Source lives in `src/cyrano/`.
 | --- | --- | --- |
 | `userbot/` | The only package that imports Telethon: client, session and login, event filters, the incoming-message handler, the outgoing-message handler (CYR-21), the listener lifecycle. Receives private messages on the second account and converts events into plain objects. Also holds the read-only adapters of the profile collection: `profile_source.py` (bio, names, photo) and `leomatch_source.py` with `leomatch_match.py` (the matching-bot chat). `adapter.py` (`TelethonAdapter`, CYR-19) wraps the Telethon client: the read Protocol, and the one Telegram send behind the sender | exists for listening and registration (CYR-10), for reading profiles (CYR-11) and for the send (CYR-19); only the adapter can send, and only `OutboxSender` calls it |
 | `bot/` | The only package that imports aiogram: the owner-only control bot. `app.py` (`ControlBot`: bot, dispatcher, polling, stop), `middleware.py` (owner-only), `handlers.py` (`/start`, the card buttons, the resume button of the manual-pause notice, the resume, keep and ignore buttons of the hand-over notice), `rendering.py` (pure card text, keyboard, decision, the hand-over notice and its keyboard), `callbacks.py` (callback data), `sender.py` (`TelegramCardSender`), `notifier.py` (`TelegramOwnerNotifier`, CYR-19, `TelegramManualPauseNotifier`, CYR-21, and `TelegramHandOverNotifier`, CYR-20), `messages.py` (every Russian text), `errors.py` (readable fatal errors). Planned: the rest of the panel (CYR-26) | exists for the card and its two buttons (CYR-12), for outbox notifications (CYR-19), for the manual-pause notice (CYR-21) and for the hand-over notice (CYR-20) |
-| `llm/` | The only package that imports httpx and the only one that knows the provider: `deepseek.py` (`DeepSeekClient`, `StepConfig`), `transport.py` (`RetryingTransport`), `factory.py` (`LLMClientFactory`), `wire.py` (the response fields it reads), `json_reply.py` (JSON extraction and validation problems), `prompts.py` (the texts it adds for JSON), `constants.py` (every number and string). See [LLM client](#llm-client-cyr-13) | exists (CYR-13); not wired into `main.py` yet, the first consumers are CYR-16, CYR-17 and CYR-25 |
+| `llm/` | The only package that imports httpx and the only one that knows the provider: `deepseek.py` (`DeepSeekClient`, `StepConfig`), `transport.py` (`RetryingTransport`), `factory.py` (`LLMClientFactory`), `wire.py` (the response fields it reads), `json_reply.py` (JSON extraction and validation problems), `prompts.py` (the texts it adds for JSON), `constants.py` (every number and string). See [LLM client](#llm-client-cyr-13) | exists (CYR-13); built by the `llm-check` and `reply-preview` commands and, since CYR-17, by the worker for the reply job; the app process does not build it; summaries are CYR-25 |
 | `db/` | SQLAlchemy models (`models.py`), engine and session factory (`session.py`), repositories (`repositories.py`; CYR-14 added `SqlPersonaRepository` and `SqlStyleExampleRepository`; CYR-19 added `SqlOutboxRepository`; CYR-22 added `SqlSenderStateRepository`; CYR-21 added `pause_reason` on the contact row, `MessageRepository.exists` and `OutboxRepository.has_sending_row`) | exists; called by the intake (CYR-10), by the import commands (CYR-14) and by the sender (CYR-19) |
-| `services/` | Business logic shared by userbot, bot and worker: contact lifecycle, sender, reply pipeline. CYR-18 added `humanization.py` (the pure planner functions, `ScheduleService`, `HumanizationPlanner`) and `schedule_files.py` (`parse_schedule`, `ScheduleImporter`). `repositories.py` holds the repository Protocols, `intake.py` the `IntakeService`, `sanitize.py` the NUL-byte removal, `contact_events.py` the generic `ContactEventPublisher[T]` and `ContactEventSubscriber[T]` Protocols and the in-memory queue; CYR-11 added `profile_source.py` (the `ProfileSource` and `LeomatchSource` Protocols and `ProfileSourceError`), `leomatch.py` (the card parser) and `profile_collector.py` (`ProfileCollector`); CYR-12 added `card_sender.py` (the `CardSender` Protocol), `card_builder.py` (assembles the `ContactCard`), `card_announcer.py` (`CardAnnouncer`) and `card_actions.py` (`CardActions`); CYR-13 added `llm_client.py` (the `LLMClient` Protocol) and `llm_check.py` (`check_llm`, the request behind `llm-check`); CYR-14 added `style_files.py` (reading and validating the two import files), `style_import.py` (`PersonaImporter`, `ExamplesImporter`), `persona_service.py` (`PersonaService`) and `style_examples.py` (`ExampleSelector`, `collect_example_stats`), and the `PersonaRepository` and `StyleExampleRepository` Protocols in `repositories.py`; CYR-16 added `contact_facts.py` (`build_contact_facts`), `prompt_builder.py` (`PromptBuilder`), `reply_postprocess.py` (`clean_reply`) and `reply_generator.py` (`ReplyGenerator`); see [Reply generation](#reply-generation-cyr-16); CYR-19 added `send_guard.py` (`check`, `SendGuard`), `outbox_service.py` (`OutboxService`), `outbox_sender.py` (`OutboxSender`), `message_transport.py` (the `MessageTransport` Protocol), `owner_notifier.py` (the `OwnerNotifier` Protocol) and the `OutboxRepository` Protocol in `repositories.py`; CYR-22 added `send_limiter.py` (`SendLimiter` and its pure rules) and the `SenderStateRepository` Protocol; CYR-21 added `manual_intervention.py` (`ManualMessageDetector`), `manual_pause_notifier.py` (the one-method `ManualPauseNotifier` Protocol) and `pause_actions.py` (`PauseActions`, resume of a paused contact; `ignore` since CYR-20); see [Manual intervention](#manual-intervention-cyr-21); CYR-20 added `stop_triggers.py` (the pure detector), `hand_over.py` (`HandOverService`) and `hand_over_notifier.py` (the one-method `HandOverNotifier` Protocol), and the gate in `intake.py`; see [Stop-triggers](#stop-triggers-cyr-20); see [Outbox and sender](#outbox-and-sender-cyr-19) | Protocols, intake, sanitization, events (CYR-10), the profile collector (CYR-11), the card announcer and actions (CYR-12), the LLM Protocol (CYR-13) and the persona and example services (CYR-14) the prompt builder and reply generator (CYR-16) and the outbox with the sender (CYR-19) exist; the rest is planned from CYR-15 on |
-| `worker/` | Arq worker: `settings.py` holds `WorkerSettings`, `startup`, `shutdown`, a placeholder `noop` job (Arq refuses to start a worker with no registered functions) | skeleton works; real jobs planned CYR-17 |
+| `services/` | Business logic shared by userbot, bot and worker: contact lifecycle, sender, reply pipeline. CYR-18 added `humanization.py` (the pure planner functions, `ScheduleService`, `HumanizationPlanner`) and `schedule_files.py` (`parse_schedule`, `ScheduleImporter`). `repositories.py` holds the repository Protocols, `intake.py` the `IntakeService`, `sanitize.py` the NUL-byte removal, `contact_events.py` the generic `ContactEventPublisher[T]` and `ContactEventSubscriber[T]` Protocols and the in-memory queue; CYR-11 added `profile_source.py` (the `ProfileSource` and `LeomatchSource` Protocols and `ProfileSourceError`), `leomatch.py` (the card parser) and `profile_collector.py` (`ProfileCollector`); CYR-12 added `card_sender.py` (the `CardSender` Protocol), `card_builder.py` (assembles the `ContactCard`), `card_announcer.py` (`CardAnnouncer`) and `card_actions.py` (`CardActions`); CYR-13 added `llm_client.py` (the `LLMClient` Protocol) and `llm_check.py` (`check_llm`, the request behind `llm-check`); CYR-14 added `style_files.py` (reading and validating the two import files), `style_import.py` (`PersonaImporter`, `ExamplesImporter`), `persona_service.py` (`PersonaService`) and `style_examples.py` (`ExampleSelector`, `collect_example_stats`), and the `PersonaRepository` and `StyleExampleRepository` Protocols in `repositories.py`; CYR-16 added `contact_facts.py` (`build_contact_facts`), `prompt_builder.py` (`PromptBuilder`), `reply_postprocess.py` (`clean_reply`) and `reply_generator.py` (`ReplyGenerator`); see [Reply generation](#reply-generation-cyr-16); CYR-19 added `send_guard.py` (`check`, `SendGuard`), `outbox_service.py` (`OutboxService`), `outbox_sender.py` (`OutboxSender`), `message_transport.py` (the `MessageTransport` Protocol), `owner_notifier.py` (the `OwnerNotifier` Protocol) and the `OutboxRepository` Protocol in `repositories.py`; CYR-22 added `send_limiter.py` (`SendLimiter` and its pure rules) and the `SenderStateRepository` Protocol; CYR-21 added `manual_intervention.py` (`ManualMessageDetector`), `manual_pause_notifier.py` (the one-method `ManualPauseNotifier` Protocol) and `pause_actions.py` (`PauseActions`, resume of a paused contact; `ignore` since CYR-20); see [Manual intervention](#manual-intervention-cyr-21); CYR-20 added `stop_triggers.py` (the pure detector), `hand_over.py` (`HandOverService`) and `hand_over_notifier.py` (the one-method `HandOverNotifier` Protocol), and the gate in `intake.py`; see [Stop-triggers](#stop-triggers-cyr-20); CYR-17 added `reply_job.py` (`ReplyJobRunner`, `AutopilotNotices`), `autopilot.py` (`AutopilotScheduler`, `AutopilotSweeper`), `reply_job_queue.py` (the one-method `ReplyJobQueue` Protocol) and the `AutopilotStateRepository` and `ReplyBacklogRepository` Protocols; see [Autopilot](#autopilot-cyr-17); see [Outbox and sender](#outbox-and-sender-cyr-19) | Protocols, intake, sanitization, events (CYR-10), the profile collector (CYR-11), the card announcer and actions (CYR-12), the LLM Protocol (CYR-13) and the persona and example services (CYR-14) the prompt builder and reply generator (CYR-16) and the outbox with the sender (CYR-19) exist; the rest is planned from CYR-15 on |
+| `worker/` | The Arq worker and the only package that imports `arq` (CYR-17): `settings.py` (`WorkerSettings`, `startup`, `shutdown`), `jobs.py` (`reply_to_contact`), `composition.py` (`build_worker_resources`, `WorkerResources`, the worker's composition root), `queue.py` (`ArqReplyJobQueue`, the `ReplyJobQueue` implementation the app uses). It imports neither Telethon nor `userbot` | exists (CYR-17); the placeholder `noop` job is gone. Background jobs CYR-23, CYR-24, CYR-25 |
 | `config.py` | `Settings` (pydantic-settings), `load_settings`, `ConfigError` | exists |
 | `logging.py` | JSON-lines formatter, `build_log_config`, `configure_logging` | exists |
 | `health.py` | Heartbeat file, `is_alive`, `python -m cyrano.health` | exists |
-| `main.py`, `__main__.py` | App entrypoint (composition root), the subcommands `login`, `llm-check`, `persona` (`import`, `show`), `examples` (`import`, `stats`, `convert`), `reply-preview`, `outbox` (`enqueue`, `list`, `cancel`, `retry`, `status`, `resume`), `schedule` (`import`, `show`, `check`, `plan`) and `stop-check`, signal handling, heartbeat task | exists; the userbot is plugged in (CYR-10), the collector (CYR-11), the control bot and the announcer (CYR-12); `llm-check` builds the LLM factory (CYR-13); the persona and examples commands build the two repositories and the importers (CYR-14); `reply-preview` builds the repositories, the selector, the `PromptBuilder`, the `reply` client and the `ReplyGenerator` (CYR-16); the `outbox` command builds the service and the repositories, and `run` builds the sender (CYR-19), with the state repository and the limiter (CYR-22); `run` builds the `HandOverService` with the control bot's notifier and passes it to the intake (CYR-20); `run` builds neither the LLM client nor the persona, example and reply services yet |
+| `main.py`, `__main__.py` | App entrypoint (composition root), the subcommands `login`, `llm-check`, `persona` (`import`, `show`), `examples` (`import`, `stats`, `convert`), `reply-preview`, `outbox` (`enqueue`, `list`, `cancel`, `retry`, `status`, `resume`), `schedule` (`import`, `show`, `check`, `plan`) and `stop-check`, signal handling, heartbeat task | exists; the userbot is plugged in (CYR-10), the collector (CYR-11), the control bot and the announcer (CYR-12); `llm-check` builds the LLM factory (CYR-13); the persona and examples commands build the two repositories and the importers (CYR-14); `reply-preview` builds the repositories, the selector, the `PromptBuilder`, the `reply` client and the `ReplyGenerator` (CYR-16); the `outbox` command builds the service and the repositories, and `run` builds the sender (CYR-19), with the state repository and the limiter (CYR-22); `run` builds the `HandOverService` with the control bot's notifier and passes it to the intake (CYR-20); `run` builds the `ArqReplyJobQueue`, the `AutopilotScheduler` (passed to the intake) and the `AutopilotSweeper`, and the `autopilot` command its repositories (CYR-17); `run` builds neither the LLM client nor the persona, example and reply services: the worker does |
 | `style_cli.py` | The `persona` and `examples` commands: the argparse definitions, `StyleRequest` and `StyleCommands`, which receive their importers, service and repository by injection and print counts only. `main.py` builds the concrete objects | exists (CYR-14); see [Persona and style examples](#persona-and-style-examples-cyr-14) |
 | `convert_cli.py` | The `examples convert` command (CYR-34): the argparse definition, `ConvertRequest`, the report printing. `main.py` dispatches it **before** `load_settings`, so it needs no `Settings`, `.env`, database or network | exists (CYR-34); see [Chat export converter](#chat-export-converter-cyr-34) |
 | `reply_cli.py` | The `reply-preview` command (CYR-16): the argparse definition, `ReplyPreviewRequest`, `ReplyPreviewCommand`, which receives the `ReplyGenerator` by injection and prints the reply, one stats line and one-line errors. `main.py` builds the concrete objects | exists (CYR-16); see [Reply generation](#reply-generation-cyr-16) |
 | `outbox_cli.py` | The `outbox` commands (CYR-19, `status` and `resume` since CYR-22): the strict argument parser, `OutboxRequest`, `OutboxCommands`, which receive the service, the repositories and the limiter by injection and print ids, states, counters and class names only | exists (CYR-19); see [Outbox and sender](#outbox-and-sender-cyr-19) |
 | `stop_check_cli.py` | The `stop-check` command (CYR-20): the strict argument parser, `StopCheckRequest`, `run_text_check` and `StopCheckCommands`, which receive the repositories by injection and print class names only. `main.py` dispatches `--text` **before** `load_settings`, so it needs no `.env` or database | exists (CYR-20); see [Stop-triggers](#stop-triggers-cyr-20) |
 | `stop_trigger_patterns.py` | Pattern data of the stop-triggers (CYR-20): the phrases per class, the messenger and verb lists, the digit, handle, currency and link rules. Constants only; imports only `domain` | exists (CYR-20) |
+| `autopilot_cli.py` | The `autopilot` commands (CYR-17): the strict argument parser, `AutopilotRequest`, `AutopilotCommands`, which receive the state, outbox and backlog repositories by injection and print states, reasons and counters only | exists (CYR-17); see [Autopilot](#autopilot-cyr-17) |
 | `schedule_cli.py` | The `schedule` commands (CYR-18): the strict argument parser, `ScheduleRequest`, `ScheduleCommands`, which receive the importer, the services and the repository by injection and print times, kinds and reasons only | exists (CYR-18); see [Humanization](#humanization-cyr-18) |
-| `domain/` | Leaf package, imports only pydantic and the standard library: enums, status transition rules, domain errors (the LLM errors, the import validation errors and the reply errors among them), Pydantic models the layers exchange (`schedule.py`: `ScheduleProfile`, `Block`, `SendPlan` and the profile limits; `reply.py`: `ContactFacts`, `BuiltPrompt`, `GeneratedReply` and the reply limits; `llm.py`: `LLMMessage`, `LLMUsage`, `LLMResult`; `style.py`: `Persona`, `Turn`, `StyleExample`, `StyleExampleCreate`, the persona and example limits, the content hash; `chat_export.py`: the converter's limits, `SkipReason`, `RedactionKind`, `ConvertOptions`, `ConvertReport`; `ChatExportError`; `outbox.py`: `ScheduledMessage`, `SentMessage`, `GuardDecision`, `SenderState`, `SendLimit`, `OutgoingPeak`, the text limit, the reason constants, the window lengths and the stale age; `stop_triggers.py`: `StopDecision`, `DialogueLine`, `HandOverNotice` and the hand-over limits) | exists |
+| `domain/` | Leaf package, imports only pydantic and the standard library: enums, status transition rules, domain errors (the LLM errors, the import validation errors and the reply errors among them), Pydantic models the layers exchange (`schedule.py`: `ScheduleProfile`, `Block`, `SendPlan` and the profile limits; `reply.py`: `ContactFacts`, `BuiltPrompt`, `GeneratedReply` and the reply limits; `llm.py`: `LLMMessage`, `LLMUsage`, `LLMResult`; `style.py`: `Persona`, `Turn`, `StyleExample`, `StyleExampleCreate`, the persona and example limits, the content hash; `chat_export.py`: the converter's limits, `SkipReason`, `RedactionKind`, `ConvertOptions`, `ConvertReport`; `ChatExportError`; `outbox.py`: `ScheduledMessage`, `SentMessage`, `GuardDecision`, `SenderState`, `SendLimit`, `OutgoingPeak`, the text limit, the reason constants, the window lengths and the stale age; `stop_triggers.py`: `StopDecision`, `DialogueLine`, `HandOverNotice` and the hand-over limits; `autopilot.py`: `AutopilotState`, `ReplyJobRequest`, `ReplyJobResult` and every autopilot constant) | exists |
 | `prompts/` | Prompt text only: `texts.py` (headers, instructions, labels, the dialogue boundary token, the `NEEDS_OWNER` signal) and `render.py` (pure functions that render the system and the user message). No calls, no IO; imports only `domain` | exists (CYR-16). The builder itself, with its budget logic, lives in `services/prompt_builder.py`. The trigger lists live in `stop_trigger_patterns.py` (CYR-20) |
 
 `tests/` mirrors the packages (`tests/userbot`, `tests/bot`, `tests/llm`, `tests/domain`,
@@ -48,8 +47,11 @@ nor `bot`, nor Telethon, aiogram or httpx, and not `llm`; only `services` and `p
 `prompts`; `userbot` imports
 none of `db`, `llm`, `bot`; `bot` imports none of `db`, `userbot`, `llm`; `llm` imports none of `services`, `db`, `userbot`,
 `bot`; only the `userbot` package imports `telethon`, only the `bot` package imports `aiogram`
-and only the `llm` package imports `httpx`; outside `llm` only `main.py` imports `cyrano.llm`, and
-no module outside `llm` and `config.py` mentions the provider by name.
+and only the `llm` package imports `httpx`; outside `llm` only the two composition roots, `main.py`
+and `worker/composition.py`, import `cyrano.llm`, and no module outside `llm` and `config.py`
+mentions the provider by name. `tests/test_one_sender.py` adds (CYR-17): only `worker` imports `arq`,
+`worker` imports neither Telethon nor `userbot`, and outside `worker` only `main.py` imports from it,
+and only `cyrano.worker.queue`.
 
 1. `bot`, `userbot` and `worker` may import `services`.
 2. `services` reach `llm` and `db` only through interfaces defined in `services`. The concrete
@@ -75,8 +77,13 @@ no module outside `llm` and `config.py` mentions the provider by name.
    outbox only through the `OwnerNotifier` Protocol. `userbot` and `bot` implement them, and `main`
    joins them. `userbot` imports `domain` for the send errors, never `services`.
 
-Never import upward. Whether `bot`, `userbot` and `worker` may import each other is an open
-question in [decisions.md](decisions.md).
+10. The worker is a composition root of its own (CYR-17): `worker/composition.py` builds `db`,
+    `llm`, `services` and, for the owner notices, `bot` objects (`NoticeBot` and the existing notifier
+    classes). The app reaches the worker only through the `ReplyJobQueue` Protocol in `services`,
+    implemented by `worker/queue.py`.
+
+Never import upward. `worker` may import `bot` (decided in CYR-17, [decisions.md](decisions.md));
+whether `bot` and `userbot` may import each other stays an open question.
 
 ## Where does this file go?
 
@@ -91,7 +98,8 @@ question in [decisions.md](decisions.md).
 | LLM messages, results, usage and errors | `domain` |
 | SQLAlchemy models, repository implementations, session handling | `db` |
 | A repository interface | `services/repositories.py` |
-| Arq job functions and worker settings | `worker` |
+| Arq job functions, worker settings, the Arq queue implementation | `worker` |
+| What a reply job does, step by step | `services/reply_job.py`; when it is enqueued: `services/autopilot.py` |
 | A data type or rule used by several layers | `domain` |
 | Prompt text and the pure functions that render it | `prompts` |
 | Assembling a prompt from stored data, trimming it to a budget, cleaning a model reply | `services` (`prompt_builder.py`, `reply_postprocess.py`, `reply_generator.py`) |
@@ -109,8 +117,8 @@ Two Python processes, two stores, one external API each for Telegram and the LLM
 
 ```
  Telegram <--> app process (python -m cyrano)       worker process (arq)
-               userbot + control bot (exist)         delayed jobs (planned)
-               heartbeat task (exists)               placeholder job (exists)
+               userbot + control bot                 reply_to_contact job (CYR-17)
+               heartbeat, sender, sweeper            send-only notice bot
                   |        |                            |        |
                   v        v                            v        v
               PostgreSQL  Redis  <---- Arq jobs ----->  Redis  PostgreSQL
@@ -123,27 +131,33 @@ Two Python processes, two stores, one external API each for Telegram and the LLM
   (see [Userbot](#userbot-cyr-10)). Then it builds the database engine (which opens no connection
   until something uses it), the repositories, the `IntakeService` and the two in-memory event queues,
   touches the heartbeat file, connects the userbot, registers the two handlers, catches up, then starts the
-  profile collector, the card announcer, the control bot's polling and then the outbox sender as
-  background tasks (only once the userbot is connected, because the collector reads through the same
-  client and the announcer would otherwise show cards before the intake runs) and waits for SIGTERM
-  or SIGINT; a signal during connect or catch-up ends the start at once, and then none of the four is
-  started (see
+  profile collector, the card announcer, the control bot's polling, the outbox sender and the
+  autopilot sweeper as background tasks (only once the userbot is connected, because the collector
+  reads through the same client and the announcer would otherwise show cards before the intake runs)
+  and waits for SIGTERM or SIGINT; the Arq pool is created before the userbot starts, so messages of
+  the catch-up can be enqueued (a Redis that cannot be reached is one ERROR line, and every enqueue
+  tries to connect again); a signal during connect or catch-up ends the start at once, and then none
+  of the five is started (see
   [Userbot](#userbot-cyr-10)). A lost connection that Telethon cannot restore ends the process with an
   error, and the restart policy starts it again; so does a control bot that stops polling (see
   [Control bot](#control-bot-cyr-12)). A sender that crashes is logged once with the class name and
-  does not stop the intake. On shutdown it cancels the sender first, then the card announcer, stops polling and
-  closes the bot session, cancels the collector, removes the two handlers, disconnects the userbot, stops
-  the heartbeat, removes the file and disposes the engine; planned: close the Redis connections there.
+  does not stop the intake. On shutdown it cancels the sweeper first, then the sender, then the card
+  announcer, stops polling and closes the bot session, cancels the collector, removes the two handlers,
+  disconnects the userbot, closes the Arq pool (after the handlers are gone, so no intake call can use
+  it), stops the heartbeat, removes the file and disposes the engine.
   It has the `userbot_session` volume.
 - **login**: `python -m cyrano login`, run on demand (`make login`, `make login-docker`). It is the
   same image and the same `Settings` as the app, shares the `userbot_session` volume and needs no
   database.
 - **worker**: `arq cyrano.worker.settings.WorkerSettings`. Arq imports `settings.py` itself, so a
   missing or invalid configuration ends the import with `SystemExit` and the readable `ConfigError`
-  text instead of a traceback chain. Planned: runs the delayed reply job
-  (CYR-17) and background jobs (CYR-23, CYR-24, CYR-25). It has the `media` volume but not the
-  session volume, and it never sends: it will write replies to the outbox, and the app's sender sends
-  the due rows (CYR-19).
+  text instead of a traceback chain. It runs the reply job (CYR-17, [autopilot.md](autopilot.md));
+  background jobs are CYR-23, CYR-24, CYR-25. `startup` builds the engine, the repositories, the LLM
+  factory, the generator, the planner, the hand-over, the outbox service, a send-only `NoticeBot` and
+  the `ReplyJobRunner`; `shutdown` closes the bot session, the HTTP client and the engine. It has the
+  `media` volume but not the session volume, and it never sends to a contact: it writes replies to the
+  outbox, and the app's sender sends the due rows (CYR-19). Its only Telegram traffic is the owner
+  notices through the control bot's token.
 - **migrate**: one-shot, `alembic upgrade head`, then exits. Same Dockerfile as app and worker, same
   environment, `restart: "no"`. Depends only on healthy postgres. It exits non-zero with the
   readable `ConfigError` text if the settings are invalid.
@@ -372,9 +386,9 @@ the userbot, by long polling.
   policy restarts it). Known limit: aiogram retries failing `getUpdates` calls itself with backoff and
   never gives up, so a token revoked while running is retried forever; only a start-time rejection is
   fatal. The owner not having pressed Start is not fatal: the sends fail softly.
-- **Shutdown order.** Cancel the outbox sender, then the card announcer, stop polling and close the
-  bot session, cancel the polling task, then the existing steps: collector, handler removal, userbot
-  disconnect, heartbeat, engine. The sender goes first because it needs the client and the bot, and
+- **Shutdown order.** Cancel the autopilot sweeper (CYR-17), then the outbox sender, then the card
+  announcer, stop polling and close the bot session, cancel the polling task, then the existing steps:
+  collector, handler removal, userbot disconnect, the Arq pool, heartbeat, engine. The sender goes first because it needs the client and the bot, and
   the announcer next so no card is being sent while polling stops.
 - **Logger.** `cyrano.bot` (INFO: stopped), `cyrano.bot.handlers` (INFO: contact id, action and outcome
   of a button press; WARNING: error class; DEBUG: a card that could not be edited),
@@ -386,8 +400,8 @@ the userbot, by long polling.
 
 `src/cyrano/llm/` plus `services/llm_client.py` and `domain/llm.py`. One interface for reply
 generation (CYR-16, CYR-17) and summary extraction (CYR-25), DeepSeek the only provider. Nothing in
-this ticket sends a message or touches a contact, and the app process does not build the client yet:
-only `python -m cyrano llm-check` does.
+this ticket sends a message or touches a contact. The app process does not build the client; the
+`llm-check` and `reply-preview` commands and, since CYR-17, the worker (`worker/composition.py`) do.
 
 | Where | What |
 | --- | --- |
@@ -538,8 +552,8 @@ writes a file: no database, no network, no Telegram, no LLM. It **needs no `Sett
 ## Reply generation (CYR-16)
 
 Rules and shapes for the reader: [reply-generation.md](reply-generation.md). This section is the
-code map and the decisions about layering. Nothing here is wired into `main.run`, writes to the
-database or sends a message.
+code map and the decisions about layering. Nothing here writes to the database or sends a message;
+since CYR-17 the worker builds the generator for the reply job, `main.run` does not.
 
 | Where | What |
 | --- | --- |
@@ -569,7 +583,7 @@ database or sends a message.
 ## Outbox and sender (CYR-19)
 
 Rules, states and error handling for the reader: [outbox-and-sender.md](outbox-and-sender.md). This
-section is the code map. The autopilot does not exist, so only the owner's test command writes rows.
+section is the code map. The owner's test command and, since CYR-17, the autopilot job write rows.
 
 | Where | What |
 | --- | --- |
@@ -582,7 +596,7 @@ section is the code map. The autopilot does not exist, so only the owner's test 
 | `services/outbox_sender.py` | `OutboxSender`, `SenderTimings`, `SenderNotices` (also `stale_summary` and `stop_reminder`), the timing constants including `OWNER_NOTIFY_DEADLINE`; the in-memory state of the stale summary notice and of the stop reminder |
 | `services/message_transport.py`, `services/owner_notifier.py` | `MessageTransport`, three methods since CYR-18, and the one-method `OwnerNotifier` |
 | `userbot/adapter.py`, `userbot/client.py` | `TelethonAdapter`, `UserbotAccess`, `build_access`; the error mapping tuples (flood waits, account blocks including `FrozenMethodInvalidError`, `AuthKeyDuplicatedError`, `AuthKeyPermEmptyError`, `ActiveUserRequiredError`, `SessionPasswordNeededError` and the bare `UnauthorizedError`, content and recipient refusals) |
-| `bot/notifier.py`, `bot/messages.py` | `TelegramOwnerNotifier`, `OUTBOX_NOTICES`, the texts |
+| `bot/notifier.py`, `bot/messages.py` | `TelegramOwnerNotifier`, `OUTBOX_NOTICES`, `AUTOPILOT_NOTICES` (CYR-17), the texts |
 | `outbox_cli.py`, `main.py` | The `outbox` commands and the wiring |
 
 - **Dependencies.** `OutboxSender` depends on the repository Protocols, `SendLimiter`, `ScheduleService`,
@@ -598,8 +612,8 @@ section is the code map. The autopilot does not exist, so only the owner's test 
 ## Humanization (CYR-18)
 
 Rules, the file format and worked examples for the reader: [humanization.md](humanization.md). This
-section is the code map. The planner has no consumer in the running app until CYR-17; the sender uses
-the profile from the start.
+section is the code map. The autopilot job (CYR-17) calls the planner; the sender uses the profile
+from the start.
 
 | Where | What |
 | --- | --- |
@@ -620,6 +634,29 @@ the profile from the start.
 - **Database use.** The sender reads the one profile row for each claimed row, at most once per poll.
   A stored profile that no longer validates raises `StoredScheduleInvalid`, without its data.
 
+## Autopilot (CYR-17)
+
+Rules, the job algorithm, the tables of outcomes and failures, the constants and the checklist for
+the reader: [autopilot.md](autopilot.md). This section is the code map.
+
+| Where | What |
+| --- | --- |
+| `domain/autopilot.py`, `domain/enums.py`, `domain/errors.py` | `AutopilotState`, `ReplyJobRequest`, `ReplyJobResult`, the constants; `AutopilotStopReason`, `AutopilotPauseReason`, `ReplyJobOutcome`, `ReplyJobReason`; `RetryJob`, `ReplyAfterRefused`, `AutopilotStateMissing` |
+| `db/models.py`, `db/repositories.py`, migration `0009` | `ContactRow.reply_after`, `AutopilotStateRow`, `SqlAutopilotStateRepository`, `SqlReplyBacklogRepository`, `SqlMessageRepository.get`, `SqlOutboxRepository.has_row_for_trigger` |
+| `services/reply_job.py` | `ReplyJobRunner.run`: the steps, the retry and the notices; no Arq import |
+| `services/autopilot.py` | `AutopilotScheduler.on_incoming` (called by the intake after the stop-trigger gate) and `AutopilotSweeper` |
+| `services/reply_job_queue.py` | `ReplyJobQueue.enqueue(contact_id, trigger_message_id, defer_seconds)` |
+| `worker/` | The queue implementation, the job function, the composition, the settings |
+| `bot/app.py`, `bot/notifier.py` | `build_bot`, `NoticeBot`, `AUTOPILOT_NOTICES` |
+| `autopilot_cli.py`, `main.py` | The `autopilot` commands and the wiring |
+
+- **Dependencies.** The runner depends on the repository Protocols, `ReplyGenerator`,
+  `HandOverService`, `HumanizationPlanner`, `OutboxService`, the `OwnerNotifier` Protocol and the
+  notice templates; the clock is a constructor parameter. The scheduler and the sweeper depend on the
+  repository Protocols and `ReplyJobQueue`; the sweeper's sleep is injected.
+- **Database use.** The sweeper runs one query every 60 s while the autopilot runs (the latest message
+  of every `active` contact, `DISTINCT ON`); the scheduler reads the state and the contact per message.
+
 ## Persistence
 
 - **Tables**: `contacts`, `messages`, `modes`; native enums `contact_status` and
@@ -629,8 +666,9 @@ the profile from the start.
   [persona-and-examples.md](persona-and-examples.md). Since CYR-19 also `scheduled_messages`, the
   outbox (with `due_at` since migration `0005`), and since CYR-22 `sender_state` (one row, `id` fixed to 1 by a check constraint); see
   [outbox-and-sender.md](outbox-and-sender.md). Since CYR-21 `contacts.pause_reason` (migration `0007`, a
-  nullable string column with a check constraint on `manual_message`, `send_rejected` and `owner`, no
-  backfill). Since CYR-18 also `schedule_profile` (at most one row,
+  nullable string column with a check constraint on `manual_message`, `send_rejected`, `owner` and
+  `stop_trigger`, the last one added by migration `0008`, no backfill). Since CYR-17 `contacts.reply_after` and `autopilot_state` (migration `0009`, one row, `id`
+  fixed to 1 by a check constraint, seeded idempotently); see [autopilot.md](autopilot.md). Since CYR-18 also `schedule_profile` (at most one row,
   `id` fixed to 1 by a check constraint, JSONB `data`, no seed: no row means the default profile); see
   [humanization.md](humanization.md).
 - **Names**: table names and enum type names live in `db/models.py`, enum values in
@@ -639,7 +677,10 @@ the profile from the start.
   frozen record of the past, so it must not change when the code does. `alembic check` and
   `tests/db/test_migrations.py` prove the two agree.
 - **Time**: every timestamp is `timestamptz`; the domain models reject naive values and normalize
-  to UTC. `touch_last_message_at` refuses a naive `datetime`.
+  to UTC. `touch_last_message_at` refuses a naive `datetime`. The one exception is
+  `IncomingMessage.sent_at`, where a naive or missing value means "no time" and the intake stores
+  its clock's now instead; both message directions store Telegram's send time as `created_at`
+  ([contact-lifecycle.md](contact-lifecycle.md#message-times)).
 - **Repositories**: take a session factory. Every method is one transaction (`StyleExampleRepository.add_many(..., replace=True)` deletes and inserts in that one transaction, which is how the import's `--replace` stays atomic), returns domain models
   and never an ORM object, and turns constraint violations into domain errors with `from None`, so
   the driver's message (which names key values) does not travel. Writes that read first lock the
@@ -647,8 +688,8 @@ the profile from the start.
   transaction, so sending and its record need no wider one. Nothing spans several repository calls
   yet; when a later ticket needs that to be atomic, it changes this rule here.
 - **Engine and sessions**: `build_engine(settings)` and `build_session_factory(engine)`. Nothing is
-  built at import time; the composition root owns the lifecycle. The worker does not build an engine
-  yet (CYR-17).
+  built at import time; the composition root owns the lifecycle. The worker builds its own engine in
+  `startup` and disposes it in `shutdown` (CYR-17).
 - **Migrations**: `alembic.ini` holds no URL. The async `migrations/env.py` reads
   `Settings.database_url`, so there is one source of truth, and logs through `configure_logging`.
   `--sql` prints plain SQL and configures no logging, so log lines do not end up in the output. The
@@ -692,7 +733,8 @@ the raw input. `load_settings(env_file=None)` ignores any `.env`.
 | `STYLE_EXAMPLES_MAX` | no | `8` | most style examples one selection returns; 1 to 50; not in the startup log line |
 | `REPLY_HISTORY_MESSAGES` | no | `20` | how many last messages of a contact the reply prompt loads; 1 to 100; not in the startup log line |
 | `REPLY_PROMPT_BUDGET_CHARS` | no | `24000` | character budget of the whole reply prompt; 4000 to 200000; not in the startup log line |
-| `AUTOPILOT_ENABLED` | no | `false` | boolean; an `autopilot` outbox row is sent only when it is `true`; a `manual_test` row does not consult it; not in the startup log line |
+| `AUTOPILOT_ENABLED` | no | `false` | boolean; the app enqueues reply jobs, the worker writes `autopilot` rows and the sender sends them only when it is `true`; a `manual_test` row does not consult it; not in the startup log line |
+| `AUTOPILOT_DEBOUNCE_SECONDS` | no | `12` | 0 to 300; delay of a reply job after an incoming message; the sweeper waits twice as long; not in the startup log line |
 | `SEND_LIMIT_MINUTE`, `SEND_LIMIT_HOUR`, `SEND_LIMIT_DAY` | no | `4`, `40`, `200` | integers from 1; most outgoing messages per window, all contacts together; minute <= hour <= day; not in the startup log line |
 | `SEND_LIMIT_CONTACT_MINUTE`, `SEND_LIMIT_CONTACT_HOUR`, `SEND_LIMIT_CONTACT_DAY` | no | `2`, `15`, `60` | integers from 1; most outgoing messages per window to one contact; minute <= hour <= day, each not above the global value of its window; not in the startup log line |
 | `HEARTBEAT_PATH` | no | `<tmpdir>/cyrano-heartbeat` | liveness file; also read straight from `os.environ` by `cyrano.health`, the one exception to hard rule 3 ([decisions.md](decisions.md)) |
@@ -731,7 +773,9 @@ the raw input. `load_settings(env_file=None)` ignores any `.env`.
   client `cyrano.llm.deepseek` and `cyrano.llm.transport`, and the persona and example import
   `cyrano.services.style_import` (INFO: counts only), the reply generator
 `cyrano.services.reply_generator` (INFO: counters and token counts only, never a prompt or a reply),
-and the sender `cyrano.services.outbox_sender` (internal ids, reasons, counters and class names only).
+the sender `cyrano.services.outbox_sender` (internal ids, reasons, counters and class names only),
+and the autopilot `cyrano.services.reply_job`, `cyrano.services.autopilot` and `cyrano.worker.queue`
+(internal ids, outcomes, reasons, counters and class names only, CYR-17).
 - Library loggers (`telethon`, `aiogram`, `httpx`, `httpcore`) have their own levels
   (`*_LOG_LEVEL`, default `WARNING`), independent of `LOG_LEVEL`. `httpcore` follows
   `HTTPX_LOG_LEVEL` because it is httpx's transport.
@@ -885,12 +929,20 @@ and the sender `cyrano.services.outbox_sender` (internal ids, reasons, counters 
   `test_filters.py` and `test_runner.py`; the resume cases in `tests/bot/test_handlers.py` and
   `test_notifier.py`; `tests/test_main.py` (both handlers wired); the new scans in
   `tests/test_one_sender.py`.
+  CYR-17 added: migration `0009` (the column, the seeded row, up and down); the autopilot state and
+  backlog repositories, `reply_after` in `set_status`, `MessageRepository.get`,
+  `OutboxRepository.has_row_for_trigger` and the source filter of `count_by_state` on real PostgreSQL;
+  `tests/services/test_reply_job.py` (every skip reason, the burst, the hand-overs, the stops, the retry
+  schedule and the cooldown, the privacy of the logs and notices); `test_autopilot.py` (the scheduler,
+  the intake, the sweeper with `CappedLoop`); `test_autopilot_end_to_end.py` (intake, queue, job and the
+  real `OutboxSender` with a scripted transport); the worker settings, the job function, the queue and
+  the composition with fakes; the `autopilot` commands, also through `main`; `tests/test_main.py` (the
+  sweeper and the pool in the start and shutdown order); the new scans in `tests/test_one_sender.py`.
 - Failure cases to cover for new behaviour:
   empty input, malformed Telegram event, invalid LLM JSON, status changed between scheduling and
   sending, FloodWait.
 
 ## Open design questions
 
-Listed in [decisions.md](decisions.md) under "Open questions": how the worker's notifier reaches the
-owner, worker reconnect to Redis, tuning the reply instructions on real outputs, whether
-`bot`, `userbot` and `worker` may import each other, and the Leomatch cases not yet observed (a card with a description, search, the caption position and message order inside an album, a video card).
+Listed in [decisions.md](decisions.md) under "Open questions": tuning the reply instructions on
+real outputs, whether `bot` and `userbot` may import each other, a per-contact autopilot switch, and the Leomatch cases not yet observed (a card with a description, search, the caption position and message order inside an album, a video card).

@@ -6,7 +6,15 @@ from collections.abc import Sequence
 from datetime import datetime
 from typing import Protocol
 
-from cyrano.domain.enums import ContactStatus, OutboxSource, OutboxState, PauseReason
+from cyrano.domain.autopilot import AutopilotState
+from cyrano.domain.enums import (
+    AutopilotPauseReason,
+    AutopilotStopReason,
+    ContactStatus,
+    OutboxSource,
+    OutboxState,
+    PauseReason,
+)
 from cyrano.domain.models import (
     Contact,
     ContactCreate,
@@ -36,6 +44,7 @@ class ContactRepository(Protocol):
         *,
         mode_id: int | None = None,
         pause_reason: PauseReason | None = None,
+        reply_after: datetime | None = None,
     ) -> StatusChange: ...
 
     async def set_mode(self, contact_id: int, mode_id: int) -> Contact: ...
@@ -53,6 +62,8 @@ class ContactRepository(Protocol):
 
 class MessageRepository(Protocol):
     async def append(self, data: MessageCreate) -> Message: ...
+
+    async def get(self, message_id: int) -> Message | None: ...
 
     async def exists(self, contact_id: int, tg_message_id: int) -> bool: ...
 
@@ -131,11 +142,15 @@ class OutboxRepository(Protocol):
 
     async def has_sending_row(self, contact_id: int) -> bool: ...
 
+    async def has_row_for_trigger(self, contact_id: int, trigger_message_id: int) -> bool: ...
+
     async def stale_sending(self, claimed_before: datetime) -> list[ScheduledMessage]: ...
 
     async def list_rows(self, state: OutboxState | None, limit: int) -> list[ScheduledMessage]: ...
 
-    async def count_by_state(self) -> dict[OutboxState, int]: ...
+    async def count_by_state(
+        self, source: OutboxSource | None = None
+    ) -> dict[OutboxState, int]: ...
 
 
 class SenderStateRepository(Protocol):
@@ -146,6 +161,26 @@ class SenderStateRepository(Protocol):
     async def stop(self, reason: str) -> bool: ...
 
     async def resume(self, *, keep_stop: bool = False) -> SenderState: ...
+
+
+class AutopilotStateRepository(Protocol):
+    async def get(self) -> AutopilotState: ...
+
+    async def stop(self, reason: AutopilotStopReason) -> bool: ...
+
+    async def pause_until(
+        self, until: datetime, reason: AutopilotPauseReason, *, now: datetime
+    ) -> bool: ...
+
+    async def resume(self) -> AutopilotState: ...
+
+
+class ReplyBacklogRepository(Protocol):
+    async def awaiting_reply(
+        self, *, newer_than: datetime, older_than: datetime
+    ) -> list[Message]: ...
+
+    async def count_unanswered_active(self) -> int: ...
 
 
 class ScheduleProfileRepository(Protocol):

@@ -22,18 +22,23 @@ Contact statuses: `new -> pending -> active -> paused / ignored`. Meaning and tr
 [contact-lifecycle.md](.claude/docs/contact-lifecycle.md).
 
 The skeleton (CYR-8), the storage layer (CYR-9), the userbot intake (CYR-10), the profile
-collection (CYR-11), the control bot with the contact card (CYR-12), the LLM client (CYR-13, not
-used by the app yet), the persona and style examples import (CYR-14, not used by the app yet) and
-the layered reply prompt with the reply generator and the `reply-preview` command (CYR-16, not
-wired into the app) and the outbox with the one sender and the status guard (CYR-19; only the
-owner's test command writes rows, nothing is sent automatically) with its limits, flood-wait pause
-and account-level stop (CYR-22) and the humanization (CYR-18: the send time planner, not used by the
-app yet, the schedule profile, and the read mark, typing and availability check in the sender) exist.
+collection (CYR-11), the control bot with the contact card (CYR-12), the LLM client (CYR-13, used
+by the worker, not by the app process), the persona and style examples import (CYR-14) and
+the layered reply prompt with the reply generator and the `reply-preview` command (CYR-16, used by
+the worker since CYR-17) and the outbox with the one sender and the status guard (CYR-19; the owner's
+test command and, with the switch on, the autopilot write rows) with its limits, flood-wait pause
+and account-level stop (CYR-22) and the humanization (CYR-18: the send time planner, called by the
+autopilot job, the schedule profile, and the read mark, typing and availability check in the sender) exist.
 and the pause on a manual message
 of the owner (CYR-21: the outgoing handler and the detector in the running app, the notice with its Resume
 button) and the stop-triggers (CYR-20: the detector and the hand-over on incoming messages in the
-running app, the notice with its three buttons, the `NEEDS_OWNER` model signal in the generator, not
-used by the app yet, and the `stop-check` command). Everything
+running app, the notice with its three buttons, the `NEEDS_OWNER` model signal in the generator, and
+the `stop-check` command) and the autopilot (CYR-17, behind `AUTOPILOT_ENABLED`, default off: the app
+enqueues one Arq job per incoming message of an `active` contact, the worker generates one reply per
+burst with the persona, the examples and the reply generator and writes an `autopilot` outbox row,
+the app's sender sends it; the sweeper, `reply_after`, the autopilot stop and cooldown, and the
+`autopilot` command; incoming messages are stored with Telegram's send time, clamped to now when it is
+more than 5 minutes ahead, and "newer" is decided by `(created_at, id)`). Everything
 else is planned and marked with its ticket key.
 Never describe planned behaviour as existing.
 
@@ -61,16 +66,16 @@ Changing any of these is a large change (see Workflow expectations). Reasons:
 | --- | --- |
 | Python 3.14, uv | in the project |
 | pydantic-settings (Pydantic v2), tzdata | in the project |
-| Arq, Redis 7.4 | in the project (skeleton worker, placeholder job) |
+| Arq, Redis 7.4 | in the project (the reply job of the autopilot; only `worker/` imports arq) |
 | PostgreSQL 16.15 | in the project (compose, migrations, tests) |
 | SQLAlchemy 2.x async, asyncpg, Alembic | in the project (schema, repositories, used by the intake) |
 | Ruff, mypy strict, pytest, pytest-asyncio | in the project |
 | Docker, Docker Compose, GitHub Actions, Dependabot | in the project |
 | Telethon | in the project (userbot listens, registers contacts, reads profiles and sends only through `userbot/adapter.py` for the sender; imported only in `userbot/`) |
 | aiogram 3 | in the project (control bot; imported only in `bot/`) |
-| DeepSeek client over plain httpx | in the project (`llm/`; the only package that imports httpx; not wired into `main.py` yet) |
-| Persona and style examples | in the project (imported from local files into PostgreSQL by commands; selectors in `services/`; not wired into `main.run` yet) |
-| Layered reply prompt | in the project (`prompts/` for texts, builder and generator in `services/`; used by `reply-preview` only) |
+| DeepSeek client over plain httpx | in the project (`llm/`; the only package that imports httpx; built by the worker and two commands, not by `main.run`) |
+| Persona and style examples | in the project (imported from local files into PostgreSQL by commands; selectors in `services/`; used by the worker's reply job, not by `main.run`) |
+| Layered reply prompt | in the project (`prompts/` for texts, builder and generator in `services/`; used by `reply-preview` and the worker's reply job) |
 | httpx.MockTransport in tests | in the project (no respx) |
 
 ## Repository layout
@@ -79,23 +84,24 @@ Changing any of these is a large change (see Workflow expectations). Reasons:
 .
 ├── CLAUDE.md, CONTRIBUTING.md, README.md
 ├── pyproject.toml, uv.lock, .python-version
-├── Makefile                      includes login, login-docker, llm-check, persona-import, examples-import, examples-stats, examples-convert, reply-preview, outbox-enqueue, outbox-list, outbox-cancel, outbox-retry, outbox-status, outbox-resume, schedule-import, schedule-show, schedule-check, schedule-plan, stop-check and setup-hooks
+├── Makefile                      includes login, login-docker, llm-check, persona-import, examples-import, examples-stats, examples-convert, reply-preview, outbox-enqueue, outbox-list, outbox-cancel, outbox-retry, outbox-status, outbox-resume, schedule-import, schedule-show, schedule-check, schedule-plan, stop-check, autopilot-status, autopilot-resume and setup-hooks
 ├── Dockerfile, docker-compose.yml, docker-compose.override.yml
 ├── .env.example, .dockerignore, .gitignore
 ├── alembic.ini
 ├── migrations/                   async env.py, versions/
 ├── examples/                     invented sample persona, style examples and schedule (real files go to data/)
-├── .claude/docs/                 architecture, contact-lifecycle, safety-rules, decisions, persona-and-examples, reply-generation, outbox-and-sender, humanization, stop-triggers
+├── .claude/docs/                 architecture, contact-lifecycle, safety-rules, decisions, persona-and-examples, reply-generation, outbox-and-sender, humanization, stop-triggers, autopilot
 ├── .githooks/                    pre-commit (runs make check and make test; enabled by make setup-hooks)
 ├── .github/                      dependabot.yml, workflows/ci.yml
 ├── src/cyrano/
-│   ├── __main__.py, main.py      entrypoint (composition root), signals, heartbeat, subcommands login, llm-check, persona (import, show), examples (import, stats, convert), reply-preview, outbox (enqueue, list, cancel, retry, status, resume), schedule (import, show, check, plan), stop-check
+│   ├── __main__.py, main.py      entrypoint (composition root), signals, heartbeat, subcommands login, llm-check, persona (import, show), examples (import, stats, convert), reply-preview, outbox (enqueue, list, cancel, retry, status, resume), schedule (import, show, check, plan), stop-check, autopilot (status, resume)
 │   ├── style_cli.py              the persona and examples commands
 │   ├── convert_cli.py            the examples convert command (chat export to a draft)
 │   ├── reply_cli.py              the reply-preview command
 │   ├── outbox_cli.py             the outbox enqueue, list, cancel, retry, status and resume commands
 │   ├── schedule_cli.py           the schedule import, show, check and plan commands
 │   ├── stop_check_cli.py         the stop-check command (a dry run of the detector)
+│   ├── autopilot_cli.py          the autopilot status and resume commands
 │   ├── stop_trigger_patterns.py  the stop-trigger pattern data (imports only domain)
 │   ├── config.py                 Settings, load_settings, ConfigError
 │   ├── logging.py                JSON-lines logging
@@ -109,13 +115,15 @@ Changing any of these is a large change (see Workflow expectations). Reasons:
 │   │                             chat_export_converter, contact_facts, prompt_builder,
 │   │                             reply_postprocess, reply_generator, send_guard, send_limiter, outbox_service, outbox_sender,
 │   │                             message_transport, owner_notifier, humanization, schedule_files, stop_triggers,
-│   │                             hand_over, hand_over_notifier; the rest is planned
+│   │                             hand_over, hand_over_notifier, reply_job, autopilot, reply_job_queue;
+│   │                             the rest is planned
 │   ├── userbot/                  Telethon: protocols, filters, handler, client, adapter, login, runner, errors,
 │   │                             profile_source, leomatch_source, leomatch_match
 │   ├── bot/                      aiogram: app, middleware, handlers, rendering, callbacks, sender, notifier, messages, errors
 │   ├── prompts/                  prompt texts and their pure rendering (imports only domain)
 │   ├── llm/                      DeepSeek client, retrying transport, factory; the only package that imports httpx
-│   └── worker/settings.py        Arq WorkerSettings, placeholder job
+│   └── worker/                   Arq: settings (WorkerSettings), jobs (reply_to_contact), composition, queue
+│                                 (ArqReplyJobQueue, used by the app); the only package that imports arq
 └── tests/                        mirrors src/cyrano
 ```
 
@@ -205,7 +213,7 @@ CYR-18 added the humanization: `domain/schedule.py` (`ScheduleProfile` with its 
 `StoredScheduleInvalid`, `ScheduleTimezoneUnresolved`, `ERROR_OUTSIDE_HOURS`, migration `0006`
 (`schedule_profile`, no seed row), the `ScheduleProfileRepository` Protocol with
 `SqlScheduleProfileRepository`, `services/humanization.py` (the pure planner, `ScheduleService`,
-`HumanizationPlanner`, which no app code calls yet), `services/schedule_files.py`, the `show_typing` and
+`HumanizationPlanner`, called by the autopilot job since CYR-17), `services/schedule_files.py`, the `show_typing` and
 `mark_read` methods of `MessageTransport` with their adapter implementation, the new steps of
 `OutboxSender` (the availability check for autopilot rows; read mark, pause and typing for every row;
 the second guard; `SENDING_STALE_AFTER` computed, 195 s), `schedule_cli.py` with the `schedule` commands and
@@ -234,6 +242,25 @@ Protocol), the gate in `IntakeService` (the optional `hand_over` keyword), `Paus
 the wiring in `main.py` (the control bot is built before the intake), `stop_check_cli.py` with the
 `stop-check` command and its Makefile target, and the tests, with the phrase lists in
 `tests/services/stop_trigger_phrases.py` and the new scans in `tests/test_one_sender.py`.
+CYR-17 added the autopilot: `domain/autopilot.py` (`AutopilotState`, `ReplyJobRequest`,
+`ReplyJobResult`, every autopilot constant), the `AutopilotStopReason`, `AutopilotPauseReason`,
+`ReplyJobOutcome` and `ReplyJobReason` enums, `RetryJob`, `ReplyAfterRefused` and
+`AutopilotStateMissing`, migration `0009` (`contacts.reply_after`, the seeded one-row
+`autopilot_state`), the `reply_after` argument of `ContactRepository.set_status` (passed by
+`PauseActions.resume`), `MessageRepository.get`, `OutboxRepository.has_row_for_trigger` and the source
+filter of `count_by_state`, the `AutopilotStateRepository` and `ReplyBacklogRepository` Protocols with
+`SqlAutopilotStateRepository` and `SqlReplyBacklogRepository`, `GeneratedReply.truncated` and the
+`max_tokens` override of `ReplyGenerator.generate`, `services/reply_job.py` (`ReplyJobRunner`,
+`AutopilotNotices`), `services/autopilot.py` (`AutopilotScheduler`, called by the intake after the
+stop-trigger gate, and `AutopilotSweeper`, a background task of the app), `services/reply_job_queue.py`
+(the `ReplyJobQueue` Protocol), the `worker/` package (`queue.py` with `ArqReplyJobQueue`, the only
+worker module the app imports; `jobs.py` with `reply_to_contact`; `composition.py`; `settings.py`
+without the placeholder job), `NoticeBot` and `build_bot` in `bot/app.py`, `AUTOPILOT_NOTICES` and
+the Russian texts, the reworded hand-over reason for a model-side hand-over, the optional
+`AUTOPILOT_DEBOUNCE_SECONDS` setting, `autopilot_cli.py` with the `autopilot status` and
+`autopilot resume` commands and their Makefile targets, the wiring in `main.py` (the pool, the
+scheduler, the sweeper, the shutdown order), and the tests, with the new scans in
+`tests/test_one_sender.py`.
 
 ## Detailed guides
 
@@ -252,6 +279,9 @@ the wiring in `main.py` (the control bot is built before the intake), `stop_chec
   commands, what is not built yet.
 - [humanization.md](.claude/docs/humanization.md): the schedule profile, the planner rules with worked
   examples, the pre-send sequence, the safety net, the commands.
+- [autopilot.md](.claude/docs/autopilot.md): the flow from the incoming message to the outbox row, the
+  job algorithm, the outcomes and the failure policy, `reply_after`, the sweeper, the constants, the
+  commands and the checklist for switching it on.
 - [stop-triggers.md](.claude/docs/stop-triggers.md): the stop-trigger classes, the normalisation and the
   pattern syntax, where it is checked, the model signal, the hand-over, the notice and its buttons,
   `stop-check`, the known false positives and limits.

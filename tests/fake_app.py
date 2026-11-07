@@ -10,6 +10,11 @@ from cyrano.logging import configure_logging
 from cyrano.main import run
 from cyrano.userbot.client import UserbotAccess
 from tests.bot.fakes import fake_control_bot_class
+from tests.services.autopilot_fakes import (
+    InMemoryAutopilotState,
+    InMemoryReplyBacklog,
+    RecordingQueue,
+)
 from tests.services.fakes import InMemoryModes
 from tests.services.outbox_fakes import (
     ALWAYS_FREE_PROFILE,
@@ -65,6 +70,18 @@ def _in_memory_schedule_profiles(_: object) -> InMemoryScheduleProfiles:
     return InMemoryScheduleProfiles(ALWAYS_FREE_PROFILE)
 
 
+def _in_memory_autopilot_state(_: object) -> InMemoryAutopilotState:
+    return InMemoryAutopilotState()
+
+
+def _in_memory_backlog(_: object) -> InMemoryReplyBacklog:
+    return InMemoryReplyBacklog()
+
+
+def _recording_queue(_: object) -> RecordingQueue:
+    return RecordingQueue()
+
+
 def main(argv: list[str]) -> int:
     settings = load_settings(env_file=None)
     configure_logging(settings.log_level, settings.library_log_levels)
@@ -76,6 +93,9 @@ def main(argv: list[str]) -> int:
         patch.object(main_module, "SqlOutboxRepository", _in_memory_outbox),
         patch.object(main_module, "SqlSenderStateRepository", _in_memory_sender_state),
         patch.object(main_module, "SqlScheduleProfileRepository", _in_memory_schedule_profiles),
+        patch.object(main_module, "SqlAutopilotStateRepository", _in_memory_autopilot_state),
+        patch.object(main_module, "SqlReplyBacklogRepository", _in_memory_backlog),
+        patch.object(main_module, "ArqReplyJobQueue", _recording_queue),
         patch.object(main_module, "ControlBot", fake_control_bot_class()),
     ):
         asyncio.run(run(settings, client_factory=factory))

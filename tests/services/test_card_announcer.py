@@ -216,12 +216,17 @@ async def test_a_failed_status_write_after_delivery_leaves_the_contact_new_for_t
             *,
             mode_id: int | None = None,
             pause_reason: PauseReason | None = None,
+            reply_after: datetime | None = None,
         ) -> StatusChange:
             if self.failures:
                 self.failures -= 1
                 raise ConnectionError("fake database failure")
             return await super().set_status(
-                contact_id, status, mode_id=mode_id, pause_reason=pause_reason
+                contact_id,
+                status,
+                mode_id=mode_id,
+                pause_reason=pause_reason,
+                reply_after=reply_after,
             )
 
     rig = await _rig(contacts=_FailOnce(), sweep_interval=SHORT_INTERVAL)

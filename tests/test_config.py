@@ -220,6 +220,7 @@ def test_every_setting_is_either_logged_or_deliberately_withheld() -> None:
         "reply_history_messages",
         "reply_prompt_budget_chars",
         "autopilot_enabled",
+        "autopilot_debounce_seconds",
         "send_limit_minute",
         "send_limit_hour",
         "send_limit_day",
@@ -399,6 +400,40 @@ def test_a_nonsense_autopilot_value_is_a_readable_error_without_the_value(
 
     assert "AUTOPILOT_ENABLED" in str(raised.value)
     assert "nonsense-marker-zq" not in str(raised.value)
+
+
+def test_the_debounce_defaults_to_twelve_seconds(full_env: dict[str, str]) -> None:
+    assert load_settings(env_file=None).autopilot_debounce_seconds == 12
+
+
+@pytest.mark.parametrize("value", ["0", "12", "300"])
+def test_the_debounce_accepts_its_range(
+    full_env: dict[str, str], monkeypatch: pytest.MonkeyPatch, value: str
+) -> None:
+    monkeypatch.setenv("AUTOPILOT_DEBOUNCE_SECONDS", value)
+
+    assert load_settings(env_file=None).autopilot_debounce_seconds == int(value)
+
+
+@pytest.mark.parametrize("value", ["-1", "301", "soon-marker-zq"])
+def test_a_debounce_outside_its_range_is_a_readable_error_without_the_value(
+    full_env: dict[str, str], monkeypatch: pytest.MonkeyPatch, value: str
+) -> None:
+    monkeypatch.setenv("AUTOPILOT_DEBOUNCE_SECONDS", value)
+
+    with pytest.raises(ConfigError) as raised:
+        load_settings(env_file=None)
+
+    assert "AUTOPILOT_DEBOUNCE_SECONDS" in str(raised.value)
+    assert value not in str(raised.value)
+
+
+def test_an_empty_debounce_falls_back_to_the_default(
+    full_env: dict[str, str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("AUTOPILOT_DEBOUNCE_SECONDS", "")
+
+    assert load_settings(env_file=None).autopilot_debounce_seconds == 12
 
 
 SEND_LIMIT_VARIABLES = (

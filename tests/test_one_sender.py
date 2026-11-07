@@ -12,7 +12,7 @@ from cyrano.services.hand_over_notifier import HandOverNotifier
 from cyrano.services.manual_pause_notifier import ManualPauseNotifier
 from cyrano.services.message_transport import MessageTransport
 from cyrano.services.owner_notifier import OwnerNotifier
-from cyrano.services.repositories import SenderStateRepository
+from cyrano.services.repositories import AutopilotStateRepository, SenderStateRepository
 from cyrano.userbot.protocols import UserbotClient
 
 SOURCE_ROOT = Path(__file__).resolve().parents[1] / "src" / "cyrano"
@@ -53,6 +53,13 @@ STOP_METHOD = "stop"
 RESUME_METHOD = "resume"
 RETRY_METHOD = "retry_failed"
 OWNER_COMMAND_MODULE = "outbox_cli.py"
+REPLY_JOB_MODULE = "services/reply_job.py"
+AUTOPILOT_MODULE = "services/autopilot.py"
+AUTOPILOT_COMMAND_MODULE = "autopilot_cli.py"
+AUTOPILOT_PAUSE_HANDLER = "_pause"
+AUTOPILOT_STOP_HANDLER = "_stop"
+WORKER_PACKAGE = "worker"
+APP_QUEUE_MODULE = "cyrano.worker.queue"
 TELETHON_WRITE_METHODS = frozenset(
     {
         "send_message",
@@ -506,15 +513,20 @@ def test_only_the_flood_path_pauses_the_sender() -> None:
         if PAUSE_METHOD in _called_attributes(tree)
     }
 
-    assert modules == {SENDER_MODULE: {FLOOD_WAIT_HANDLER}}
+    assert modules == {
+        SENDER_MODULE: {FLOOD_WAIT_HANDLER},
+        REPLY_JOB_MODULE: {AUTOPILOT_PAUSE_HANDLER},
+    }
 
 
 def test_only_the_account_path_stops_the_sender() -> None:
     writers = {name for name, tree in _modules() if _calls_with_arguments(tree, STOP_METHOD)}
     tree = ast.parse((SOURCE_ROOT / SENDER_MODULE).read_text())
+    job = ast.parse((SOURCE_ROOT / REPLY_JOB_MODULE).read_text())
 
-    assert writers == {SENDER_MODULE}
+    assert writers == {SENDER_MODULE, REPLY_JOB_MODULE}
     assert _callers_in_module(tree, STOP_METHOD) == {"_stop_for_account"}
+    assert _callers_in_module(job, STOP_METHOD) == {AUTOPILOT_STOP_HANDLER}
 
 
 def test_only_the_owner_command_resumes_the_sender() -> None:
@@ -524,7 +536,93 @@ def test_only_the_owner_command_resumes_the_sender() -> None:
         if len(_calls_named(tree, RESUME_METHOD)) > _resume_calls_on(tree, PAUSE_ACTIONS_NAME)
     }
 
-    assert callers == {OWNER_COMMAND_MODULE}
+    assert callers == {OWNER_COMMAND_MODULE, AUTOPILOT_COMMAND_MODULE}
+
+
+def _names_used(tree: ast.AST) -> set[str]:
+    names = {node.id for node in ast.walk(tree) if isinstance(node, ast.Name)}
+    return names | {alias for _, alias in _imported(tree)}
+
+
+def test_the_sender_and_the_autopilot_never_touch_each_others_state() -> None:
+    sender = ast.parse((SOURCE_ROOT / SENDER_MODULE).read_text())
+    job = ast.parse((SOURCE_ROOT / REPLY_JOB_MODULE).read_text())
+    command = ast.parse((SOURCE_ROOT / AUTOPILOT_COMMAND_MODULE).read_text())
+
+    assert "AutopilotStateRepository" not in _names_used(sender)
+    assert "SenderStateRepository" not in _names_used(job)
+    assert "SenderStateRepository" not in _names_used(command)
+    assert "AutopilotStateRepository" in _names_used(job)
+
+
+def test_the_autopilot_state_repository_has_exactly_its_four_methods() -> None:
+    assert _members(AutopilotStateRepository) == {
+        "get",
+        PAUSE_METHOD,
+        STOP_METHOD,
+        RESUME_METHOD,
+    }
+
+
+def test_the_reply_job_calls_the_notifier_in_one_place_behind_the_deadline() -> None:
+    source = (SOURCE_ROOT / REPLY_JOB_MODULE).read_text()
+
+    assert len(re.findall(r"\.notify\(", source)) == 1
+    assert re.search(
+        r"asyncio\.timeout\(self\._notify_deadline\):\s+await self\._notifier\.notify\(",
+        source,
+    )
+
+
+def _autopilot_modules() -> list[str]:
+    return [
+        name
+        for name, _ in _modules()
+        if name in {REPLY_JOB_MODULE, AUTOPILOT_MODULE, AUTOPILOT_COMMAND_MODULE}
+        or name.split("/")[0] == WORKER_PACKAGE
+    ]
+
+
+def test_the_autopilot_path_never_touches_the_transport() -> None:
+    modules = _autopilot_modules()
+
+    assert REPLY_JOB_MODULE in modules
+    for name in modules:
+        tree = ast.parse((SOURCE_ROOT / name).read_text())
+        referenced = (_attributes_used(tree) - CALL_ONLY_WRITE_METHODS) | _called_attributes(tree)
+        assert referenced.isdisjoint(TRANSPORT_METHODS | TELETHON_WRITE_METHODS), name
+        assert _names_passed_to_getattr(tree).isdisjoint(TRANSPORT_METHODS), name
+
+
+def test_the_worker_package_imports_neither_telethon_nor_the_userbot() -> None:
+    for name, tree in _modules():
+        if name.split("/")[0] != WORKER_PACKAGE:
+            continue
+        for module, _ in _imported(tree):
+            assert module.split(".")[0] != "telethon", name
+            assert not module.startswith("cyrano.userbot"), name
+
+
+def test_only_the_worker_package_imports_arq() -> None:
+    importers = {
+        name.split("/")[0]
+        for name, tree in _modules()
+        if any(module.split(".")[0] == "arq" for module, _ in _imported(tree))
+    }
+
+    assert importers == {WORKER_PACKAGE}
+
+
+def test_outside_the_worker_only_the_app_imports_the_queue_module_and_nothing_else_of_it() -> None:
+    importers: dict[str, set[str]] = {}
+    for name, tree in _modules():
+        if name.split("/")[0] == WORKER_PACKAGE:
+            continue
+        for module, _ in _imported(tree):
+            if module == "cyrano.worker" or module.startswith("cyrano.worker."):
+                importers.setdefault(name, set()).add(module)
+
+    assert importers == {"main.py": {APP_QUEUE_MODULE}}
 
 
 def test_the_sender_reads_its_state_before_it_claims_a_row() -> None:

@@ -41,6 +41,11 @@ from tests.conftest import (
 )
 from tests.fake_app import CONNECTING_MARKER, HANGING_CONNECT_SCENARIO
 from tests.privacy import assert_absent
+from tests.services.autopilot_fakes import (
+    InMemoryAutopilotState,
+    InMemoryReplyBacklog,
+    RecordingQueue,
+)
 from tests.services.fakes import FakeCardSender, InMemoryModes
 from tests.services.outbox_fakes import (
     ALWAYS_FREE_PROFILE,
@@ -81,6 +86,9 @@ class Repositories:
     modes: InMemoryModes
     outbox: InMemoryOutbox
     sender_state: InMemorySenderState
+    autopilot_state: InMemoryAutopilotState
+    backlog: InMemoryReplyBacklog
+    queue: RecordingQueue
 
 
 @pytest.fixture(autouse=True)
@@ -91,12 +99,18 @@ def repositories(monkeypatch: pytest.MonkeyPatch) -> Repositories:
         InMemoryModes(),
         InMemoryOutbox(),
         InMemorySenderState(),
+        InMemoryAutopilotState(),
+        InMemoryReplyBacklog(),
+        RecordingQueue(),
     )
     monkeypatch.setattr("cyrano.main.SqlContactRepository", lambda _: stored.contacts)
     monkeypatch.setattr("cyrano.main.SqlMessageRepository", lambda _: stored.messages)
     monkeypatch.setattr("cyrano.main.SqlModeRepository", lambda _: stored.modes)
     monkeypatch.setattr("cyrano.main.SqlOutboxRepository", lambda _: stored.outbox)
     monkeypatch.setattr("cyrano.main.SqlSenderStateRepository", lambda _: stored.sender_state)
+    monkeypatch.setattr("cyrano.main.SqlAutopilotStateRepository", lambda _: stored.autopilot_state)
+    monkeypatch.setattr("cyrano.main.SqlReplyBacklogRepository", lambda _: stored.backlog)
+    monkeypatch.setattr("cyrano.main.ArqReplyJobQueue", lambda _: stored.queue)
     monkeypatch.setattr(
         "cyrano.main.SqlScheduleProfileRepository",
         lambda _: InMemoryScheduleProfiles(ALWAYS_FREE_PROFILE),
@@ -1260,3 +1274,123 @@ async def test_a_message_the_owner_sent_to_a_group_changes_nothing_in_the_app(
     assert contact.status is ContactStatus.ACTIVE
     assert bot.manual_pause_notifier.contact_ids == []
     assert repositories.messages.stored == []
+
+
+class _SweeperSpy:
+    def __init__(self, calls: list[str]) -> None:
+        self.calls = calls
+
+    async def run(self) -> None:
+        self.calls.append("sweeper.run")
+        try:
+            await asyncio.sleep(3600)
+        except asyncio.CancelledError:
+            self.calls.append("sweeper cancelled")
+            raise
+
+
+class _QueueSpy(RecordingQueue):
+    def __init__(self, calls: list[str]) -> None:
+        super().__init__()
+        self.calls = calls
+
+    async def start(self) -> None:
+        self.calls.append("queue.start")
+
+    async def close(self) -> None:
+        self.calls.append("queue.close")
+
+
+async def test_the_sweeper_starts_after_the_sender_and_is_cancelled_first_and_the_queue_last(
+    session_env: dict[str, str],
+    heartbeat_file: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    bot_calls: list[str],
+) -> None:
+    _recording_sender(monkeypatch, bot_calls)
+    monkeypatch.setattr(
+        "cyrano.main.AutopilotSweeper", lambda *args, **kwargs: _SweeperSpy(bot_calls)
+    )
+    monkeypatch.setattr("cyrano.main.ArqReplyJobQueue", lambda _: _QueueSpy(bot_calls))
+    client = FakeClient(calls=bot_calls)
+    stop = asyncio.Event()
+    task = asyncio.create_task(
+        run(load_settings(env_file=None), stop, client_factory=_factory(client))
+    )
+
+    await _wait_until(lambda: _contains(bot_calls, "sweeper.run"))
+    stop.set()
+    await asyncio.wait_for(task, timeout=2)
+
+    assert bot_calls.index("queue.start") < bot_calls.index("catch_up")
+    assert bot_calls.index("sender.run") < bot_calls.index("sweeper.run")
+    order = ["sweeper cancelled", "sender cancelled", "bot.stop", "disconnect", "queue.close"]
+    assert [bot_calls.index(name) for name in order] == sorted(bot_calls.index(n) for n in order)
+
+
+async def test_neither_the_sweeper_starts_nor_the_queue_stays_open_when_the_start_is_interrupted(
+    session_env: dict[str, str],
+    heartbeat_file: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    bot_calls: list[str],
+) -> None:
+    monkeypatch.setattr(
+        "cyrano.main.AutopilotSweeper", lambda *args, **kwargs: _SweeperSpy(bot_calls)
+    )
+    monkeypatch.setattr("cyrano.main.ArqReplyJobQueue", lambda _: _QueueSpy(bot_calls))
+    client = FakeClient(hang_on_connect=True)
+    stop = asyncio.Event()
+    asyncio.get_running_loop().call_later(0.05, stop.set)
+
+    await asyncio.wait_for(
+        run(load_settings(env_file=None), stop, client_factory=_factory(client)), timeout=2
+    )
+
+    assert "sweeper.run" not in bot_calls
+    assert bot_calls.count("queue.close") == 1
+
+
+async def test_a_message_of_an_active_contact_is_put_on_the_queue_when_the_switch_is_on(
+    session_env: dict[str, str],
+    heartbeat_file: Path,
+    repositories: Repositories,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("AUTOPILOT_ENABLED", "true")
+    monkeypatch.setenv("AUTOPILOT_DEBOUNCE_SECONDS", "7")
+    contact = await repositories.contacts.seed(
+        FAKE_SENDER_ID, status=ContactStatus.ACTIVE, mode_id=1
+    )
+    client = FakeClient()
+    stop = asyncio.Event()
+    task = asyncio.create_task(
+        run(load_settings(env_file=None), stop, client_factory=_factory(client))
+    )
+    await asyncio.sleep(0.05)
+
+    await client.deliver(FakeEvent(raw_text="an invented question"))
+    stop.set()
+    await asyncio.wait_for(task, timeout=2)
+
+    [stored] = repositories.messages.stored
+    assert repositories.queue.jobs == [(contact.id, stored.id, 7)]
+
+
+async def test_with_the_switch_off_nothing_is_put_on_the_queue(
+    session_env: dict[str, str],
+    heartbeat_file: Path,
+    repositories: Repositories,
+) -> None:
+    await repositories.contacts.seed(FAKE_SENDER_ID, status=ContactStatus.ACTIVE, mode_id=1)
+    client = FakeClient()
+    stop = asyncio.Event()
+    task = asyncio.create_task(
+        run(load_settings(env_file=None), stop, client_factory=_factory(client))
+    )
+    await asyncio.sleep(0.05)
+
+    await client.deliver(FakeEvent(raw_text="an invented question"))
+    stop.set()
+    await asyncio.wait_for(task, timeout=2)
+
+    assert repositories.queue.jobs == []

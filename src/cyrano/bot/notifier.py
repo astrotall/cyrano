@@ -15,6 +15,7 @@ from cyrano.bot.rendering import hand_over_keyboard, render_hand_over
 from cyrano.domain.enums import LimitScope, LimitWindow
 from cyrano.domain.stop_triggers import HandOverNotice
 from cyrano.services.outbox_sender import SenderNotices
+from cyrano.services.reply_job import AutopilotNotices
 
 logger = logging.getLogger("cyrano.bot.notifier")
 
@@ -33,6 +34,13 @@ OUTBOX_NOTICES = SenderNotices(
         (LimitScope.CONTACT, LimitWindow.HOUR): messages.OUTBOX_LIMIT_CONTACT_HOUR,
         (LimitScope.CONTACT, LimitWindow.DAY): messages.OUTBOX_LIMIT_CONTACT_DAY,
     },
+)
+
+AUTOPILOT_NOTICES = AutopilotNotices(
+    stopped=messages.AUTOPILOT_STOPPED,
+    paused=messages.AUTOPILOT_PAUSED,
+    stop_reasons=messages.AUTOPILOT_STOP_REASONS,
+    pause_reasons=messages.AUTOPILOT_PAUSE_REASONS,
 )
 
 

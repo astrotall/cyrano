@@ -2,10 +2,18 @@
 
 from __future__ import annotations
 
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import Annotated
 
-from pydantic import AfterValidator, AwareDatetime, BaseModel, ConfigDict, Field, model_validator
+from pydantic import (
+    AfterValidator,
+    AwareDatetime,
+    BaseModel,
+    ConfigDict,
+    Field,
+    field_validator,
+    model_validator,
+)
 
 from cyrano.domain.enums import (
     CardOutcome,
@@ -18,6 +26,8 @@ from cyrano.domain.enums import (
 DEFAULT_MODE_NAME = "default"
 
 MAX_BIGINT = 2**63 - 1
+
+MAX_FUTURE_SKEW = timedelta(minutes=5)
 
 MAX_USERNAME_LENGTH = 64
 MAX_DISPLAY_NAME_LENGTH = 256
@@ -73,6 +83,7 @@ class Contact(_Stored):
     profile: dict[str, object]
     summary: dict[str, object]
     last_message_at: UtcDatetime | None
+    reply_after: UtcDatetime | None = None
     created_at: UtcDatetime
     updated_at: UtcDatetime
 
@@ -133,7 +144,14 @@ class IncomingMessage(_Input):
     display_name: str | None = None
     tg_message_id: TelegramId
     text: str
-    sent_at: UtcDatetime
+    sent_at: UtcDatetime | None = None
+
+    @field_validator("sent_at", mode="before")
+    @classmethod
+    def _naive_time_is_missing(cls, value: object) -> object:
+        if isinstance(value, datetime) and value.utcoffset() is None:
+            return None
+        return value
 
 
 class OutgoingMessage(_Input):

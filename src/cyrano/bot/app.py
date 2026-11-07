@@ -40,6 +40,35 @@ def build_dispatcher(
     return dispatcher
 
 
+def build_bot(settings: Settings, session: BaseSession | None = None) -> Bot:
+    try:
+        return Bot(
+            token=settings.bot_token.get_secret_value(),
+            session=session,
+            default=DefaultBotProperties(parse_mode=ParseMode.HTML, link_preview_is_disabled=True),
+        )
+    except TokenValidationError:
+        raise BotTokenRejected from None
+
+
+class NoticeBot:
+    def __init__(self, settings: Settings, *, session: BaseSession | None = None) -> None:
+        self._bot = build_bot(settings, session)
+        self._notifier = TelegramOwnerNotifier(self._bot, settings.owner_telegram_id)
+        self._hand_over_notifier = TelegramHandOverNotifier(self._bot, settings.owner_telegram_id)
+
+    @property
+    def notifier(self) -> TelegramOwnerNotifier:
+        return self._notifier
+
+    @property
+    def hand_over_notifier(self) -> TelegramHandOverNotifier:
+        return self._hand_over_notifier
+
+    async def close(self) -> None:
+        await self._bot.session.close()
+
+
 class ControlBot:
     def __init__(
         self,
@@ -49,16 +78,7 @@ class ControlBot:
         *,
         session: BaseSession | None = None,
     ) -> None:
-        try:
-            self._bot = Bot(
-                token=settings.bot_token.get_secret_value(),
-                session=session,
-                default=DefaultBotProperties(
-                    parse_mode=ParseMode.HTML, link_preview_is_disabled=True
-                ),
-            )
-        except TokenValidationError:
-            raise BotTokenRejected from None
+        self._bot = build_bot(settings, session)
         self._dispatcher = build_dispatcher(settings.owner_telegram_id, actions, pause_actions)
         self._sender = TelegramCardSender(self._bot, settings.owner_telegram_id, settings.media_dir)
         self._notifier = TelegramOwnerNotifier(self._bot, settings.owner_telegram_id)

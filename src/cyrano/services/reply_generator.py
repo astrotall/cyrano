@@ -41,10 +41,15 @@ class ReplyGenerator:
         self._history_limit = history_limit
 
     async def generate(
-        self, contact_id: int, mode_name: str | None = None, *, summary: str | None = None
+        self,
+        contact_id: int,
+        mode_name: str | None = None,
+        *,
+        summary: str | None = None,
+        max_tokens: int | None = None,
     ) -> GeneratedReply:
         prompt = await self.prepare(contact_id, mode_name, summary=summary)
-        return await self.complete(prompt)
+        return await self.complete(prompt, max_tokens=max_tokens)
 
     async def prepare(
         self, contact_id: int, mode_name: str | None = None, *, summary: str | None = None
@@ -68,8 +73,10 @@ class ReplyGenerator:
             examples=examples,
         )
 
-    async def complete(self, prompt: BuiltPrompt) -> GeneratedReply:
-        result = await self._client.complete(prompt.messages)
+    async def complete(
+        self, prompt: BuiltPrompt, *, max_tokens: int | None = None
+    ) -> GeneratedReply:
+        result = await self._client.complete(prompt.messages, max_tokens=max_tokens)
         needs_owner = contains_needs_owner(result.text)
         text = "" if needs_owner else clean_reply(result.text)
         logger.info(
@@ -82,12 +89,14 @@ class ReplyGenerator:
                 "output_tokens": result.usage.output_tokens,
                 "needs_owner": needs_owner,
                 "needs_owner_leaked": needs_owner and not is_bare_needs_owner(result.text),
+                "truncated": result.truncated,
             },
         )
         return GeneratedReply(
             text=text,
             usage=result.usage,
             needs_owner=needs_owner,
+            truncated=result.truncated,
             examples_offered=prompt.examples_offered,
             examples_kept=prompt.examples_kept,
             messages_offered=prompt.messages_offered,

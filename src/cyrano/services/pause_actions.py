@@ -3,15 +3,24 @@
 from __future__ import annotations
 
 import asyncio
+from collections.abc import Callable
+from datetime import UTC, datetime
 
 from cyrano.domain.enums import ContactStatus, IgnoreOutcome, ResumeOutcome
 from cyrano.domain.errors import InvalidStatusTransition
 from cyrano.services.repositories import ContactRepository
 
 
+def _utc_now() -> datetime:
+    return datetime.now(UTC)
+
+
 class PauseActions:
-    def __init__(self, contacts: ContactRepository) -> None:
+    def __init__(
+        self, contacts: ContactRepository, *, clock: Callable[[], datetime] = _utc_now
+    ) -> None:
         self._contacts = contacts
+        self._clock = clock
         self._lock = asyncio.Lock()
 
     async def resume(self, contact_id: int) -> ResumeOutcome:
@@ -27,7 +36,9 @@ class PauseActions:
         if contact.status is not ContactStatus.PAUSED or contact.mode_id is None:
             return ResumeOutcome.REFUSED
         try:
-            await self._contacts.set_status(contact.id, ContactStatus.ACTIVE)
+            await self._contacts.set_status(
+                contact.id, ContactStatus.ACTIVE, reply_after=self._clock()
+            )
         except InvalidStatusTransition:
             return ResumeOutcome.REFUSED
         return ResumeOutcome.APPLIED

@@ -109,7 +109,7 @@ def test_only_the_composition_root_imports_the_llm_package() -> None:
             )
             if any(name == "cyrano.llm" or name.startswith("cyrano.llm.") for name in names):
                 importers.add(relative.as_posix())
-    assert importers == {"main.py"}
+    assert importers == {"main.py", "worker/composition.py"}
 
 
 def test_no_module_outside_llm_and_config_mentions_the_provider() -> None:

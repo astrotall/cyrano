@@ -17,6 +17,7 @@ from cyrano.domain.errors import (
     PromptTooLarge,
     ReplyInvalid,
 )
+from cyrano.domain.llm import LLMResult, LLMUsage
 from cyrano.domain.models import ModeCreate
 from cyrano.domain.style import StyleExampleCreate
 from cyrano.logging import JsonFormatter
@@ -40,7 +41,7 @@ from tests.reply_db import (
     ready_contact,
     row_counts,
 )
-from tests.services.fakes import ScriptedLLMClient
+from tests.services.fakes import FakeLLMClient, ScriptedLLMClient
 
 
 async def test_a_reply_is_generated_with_usage_and_counters(repos: Repositories) -> None:
@@ -385,3 +386,28 @@ async def test_logs_carry_counters_and_none_of_the_texts(
     assert (fields["examples_kept"], fields["messages_kept"]) == (0, 3)
     assert (fields["input_tokens"], fields["output_tokens"]) == (321, 17)
     assert fields["prompt_characters"] > 0
+
+
+async def test_a_token_limit_override_reaches_the_client(repos: Repositories) -> None:
+    contact = await ready_contact(repos)
+    client = ScriptedLLMClient("fine")
+
+    reply = await repos.generator(client).generate(contact.id, max_tokens=800)
+
+    assert client.calls[0][2] == 800
+    assert reply.truncated is False
+
+
+async def test_a_truncated_model_reply_is_flagged_and_still_cleaned(repos: Repositories) -> None:
+    contact = await ready_contact(repos)
+    client = FakeLLMClient(
+        result=LLMResult(
+            text="Me: cut short",
+            usage=LLMUsage(input_tokens=5, output_tokens=400, cache_hit_tokens=None),
+            truncated=True,
+        )
+    )
+
+    reply = await repos.generator(client).generate(contact.id)
+
+    assert (reply.truncated, reply.text) == (True, "cut short")

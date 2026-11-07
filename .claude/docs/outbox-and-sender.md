@@ -3,11 +3,11 @@
 Exists since CYR-19; the limits, the pause and the stop since CYR-22; the pre-send part and the
 availability check since CYR-18. The outbox is the table of
 messages waiting to go out; the sender is the one piece of code that sends them to contacts. The
-Telethon session lives in the app process, so sending stays there. A future Arq worker (CYR-17) will
-only generate replies and write them to the outbox.
+Telethon session lives in the app process, so sending stays there. The Arq worker (CYR-17) only
+generates replies and writes them to the outbox ([autopilot.md](autopilot.md)).
 
-**The autopilot does not exist.** The only way to put a row in the outbox today is the owner's
-explicit test command. Nothing is ever sent automatically. Rules S1 and S2:
+Two things write rows: the owner's explicit test command (`manual_test`) and, since CYR-17, the
+autopilot job (`autopilot`), which runs only with `AUTOPILOT_ENABLED=true`. Rules S1 and S2:
 [safety-rules.md](safety-rules.md). Reasons: [decisions.md](decisions.md).
 
 ## The table
@@ -34,7 +34,10 @@ explicit test command. Nothing is ever sent automatically. Rules S1 and S2:
 Constraints: `text` not empty, `state` and `source` from the allowed values. Indexes: a partial
 unique index on `(contact_id, trigger_message_id) WHERE trigger_message_id IS NOT NULL`, so one
 incoming message yields at most one row, and an index on `(state, send_at)` for the claim. Enqueue
-with a known trigger returns the row already stored, also when two calls race.
+with a known trigger returns the row already stored, also when two calls race. Every `autopilot` row
+carries the incoming message it answers as `trigger_message_id` (the internal `messages.id`); the job
+looks for a row with that key (`has_row_for_trigger`, any state) before it generates, so a job that
+runs twice, a retried job and the sweeper never produce a second row or a second model call.
 
 ## States
 
@@ -415,11 +418,13 @@ with the class name, and the loop goes on: one bad row never stops it. Only canc
 | Source | Written by | Needs `AUTOPILOT_ENABLED` | Status check |
 | --- | --- | --- | --- |
 | `manual_test` | The owner's `outbox enqueue` command | No | Yes |
-| `autopilot` | CYR-17, not built | Yes | Yes |
+| `autopilot` | The reply job of the worker (CYR-17), [autopilot.md](autopilot.md) | Yes | Yes |
 
-`AUTOPILOT_ENABLED` defaults to `false` and stays off until the guards listed in
-[decisions.md](decisions.md) exist. Turning it on today changes nothing visible, because nothing
-writes `autopilot` rows. It does not switch the sender off: the sender always runs.
+`AUTOPILOT_ENABLED` defaults to `false`. With it off the app enqueues no job, the job writes no row,
+and an `autopilot` row left in the outbox is cancelled by the guard (`autopilot_disabled`). Switch it
+on only after the checklist in [autopilot.md](autopilot.md#checklist-before-switching-it-on). It does
+not switch the sender off: the sender always runs. The autopilot's own stop and cooldown pause
+(`autopilot_state`) stop the generation, not the sending; the sender's state is a separate row.
 
 ## Owner commands
 
@@ -432,7 +437,7 @@ database up. The sending itself is done by the running app.
 | `outbox list [--state S] [--limit N]` | `make outbox-list [STATE=...] [LIMIT=...]` | Newest first (default 50, 1 to 1000): id, contact id, source, state, `send_at`, `due_at`, error class, `cancel_reason`. An empty value prints `-`. The reason is a stored constant such as `cancelled_by_owner`, `stale`, `send_rejected` or a guard refusal, so a stale cancel is told apart from an owner cancel. Never a text |
 | `outbox cancel ID` | `make outbox-cancel ID=...` | Cancels a `scheduled` row. A row in any other state is refused with a message |
 | `outbox retry ID [--in-seconds N] [--yes]` | `make outbox-retry ID=... [IN=...] [YES=1]` | Only for a `failed` row; any other state is refused with a message. Without `--yes` it prints a reminder to check the chat first and changes nothing. With `--yes` it sets `scheduled`, `send_at` and `due_at` to now + N seconds (default 5, 0 to 86400), clears `error_class` and `cancel_reason`, and prints the row id and the planned time |
-| `outbox status` | `make outbox-status` | The sender state (running, paused with the time and reason, stopped with the reason), the six counters against their limits, and the rows per state. Never a text, a name or a Telegram id |
+| `outbox status` | `make outbox-status` | The sender state (running, paused with the time and reason, stopped with the reason), the six counters against their limits, and the rows per state (both sources; `autopilot status` counts the `autopilot` rows alone). Never a text, a name or a Telegram id |
 | `outbox resume [--yes]` | `make outbox-resume [YES=1]` | Clears a pause, or with `--yes` also a stop, and says what was cleared. Nothing to clear is a harmless message and exit 0. Without `--yes` a stopped sender stays exactly as it is: it prints a reminder to check the account first and exits 1 |
 
 The per-contact counters in `outbox status` show the contact with the most messages in that window
@@ -466,5 +471,4 @@ its message, because PostgreSQL can quote row values in it.
 
 | What | Ticket |
 | --- | --- |
-| The autopilot: generating replies, asking the planner for the time and writing `autopilot` rows | CYR-17 |
 | Splitting a reply into several messages | CYR-36 |

@@ -18,6 +18,7 @@ on a hand-over.
 | `services/hand_over_notifier.py` | `HandOverNotifier`, a single-method Protocol (`notify_hand_over`) |
 | `services/intake.py` | The gate on every new incoming message |
 | `services/reply_postprocess.py`, `services/reply_generator.py` | The model signal (`NEEDS_OWNER`) |
+| `services/reply_job.py` | The second check on the burst and the hand-over on the model signal (CYR-17) |
 | `bot/notifier.py`, `bot/rendering.py`, `bot/messages.py` | `TelegramHandOverNotifier`, the notice text and keyboard, the Russian texts |
 | `bot/handlers.py`, `services/pause_actions.py` | The three buttons: resume, keep, ignore |
 | `stop_check_cli.py` | The `stop-check` dry-run command |
@@ -95,8 +96,13 @@ number.
    pause. A `new`, `pending`, `paused` or `ignored` contact is not checked. The gate catches every
    error, logs it with the contact id and the error class and returns; the intake result is the
    same, and the userbot handler never retries because of the gate.
-2. **The model signal.** Exists in the generator; nothing in the app calls the generator yet (the
-   autopilot is CYR-17). See below.
+2. **The autopilot job.** Since CYR-17 the reply job runs `detect` again, right before it calls the
+   model, on the burst: the run of consecutive incoming messages that ends with the message it
+   answers, only messages after `contacts.reply_after`. This covers a burst whose earlier message
+   fired while the gate was not checking (the contact was `pending` when it arrived, or the gate
+   failed). A hit calls `HandOverService.hand_over(contact_id, classes, TriggerSource.TEXT)`, and
+   nothing is generated ([autopilot.md](autopilot.md)).
+3. **The model signal.** The generator recognises it, and the autopilot job acts on it. See below.
 
 ## The model signal
 
@@ -113,8 +119,9 @@ is treated the same way and logged with `needs_owner_leaked = true`. The log lin
 flags, never the reply.
 
 `reply-preview` prints `needs owner (model signal)` instead of the text, then the stats line, and
-exits 0. The autopilot (CYR-17) is to call `HandOverService.hand_over(contact_id, (), TriggerSource.MODEL)`
-on the signal and send nothing.
+exits 0. The autopilot job (CYR-17) calls `HandOverService.hand_over(contact_id, (), TriggerSource.MODEL)`
+on the signal and writes no row. It hands over the same way, with the source `model` and no classes,
+when a reply is truncated twice, invalid twice, or the prompt is too large.
 
 ## The hand-over
 
@@ -141,8 +148,9 @@ lines. A crash between the pause and the notice loses the notice, not the pause.
 - the title with the internal contact id, and the display name if there is one (HTML-escaped, at
   most 60 characters);
 - that the conversation is handed over and nothing was sent to the contact;
-- the reason (the Russian class names, or «тема, на которую ассистент не отвечает сам» for the
-  model signal) and the source (the contact's text or the model);
+- the reason (the Russian class names, or «ассистент не может ответить сам, нужно ваше решение»
+  when there are no classes: the model signal and the other model-side hand-overs of the autopilot)
+  and the source (the contact's text, or «Сработало при подготовке ответа моделью.»);
 - the last lines, numbered from 1, oldest first, as «Контакт» or «Вы». Every text is HTML-escaped
   and its whitespace collapsed, so a message cannot fake another numbered line; an empty text is
   «[без текста]». If the message would exceed 4096 UTF-16 units, the oldest lines are dropped;

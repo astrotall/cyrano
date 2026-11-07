@@ -1360,6 +1360,7 @@ async def test_a_storage_failure_while_pausing_leaves_the_row_for_the_stale_chec
             *,
             mode_id: int | None = None,
             pause_reason: PauseReason | None = None,
+            reply_after: datetime | None = None,
         ) -> StatusChange:
             raise RuntimeError("fake storage failure")
 

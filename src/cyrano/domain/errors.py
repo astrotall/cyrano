@@ -30,6 +30,12 @@ class PauseReasonRefused(DomainError):
         self.status = status
 
 
+class ReplyAfterRefused(DomainError):
+    def __init__(self, status: ContactStatus) -> None:
+        super().__init__(f"a reply-after time is allowed only with the active status, not {status}")
+        self.status = status
+
+
 class ContactNotFound(DomainError):
     def __init__(self, contact_id: int) -> None:
         super().__init__(f"contact {contact_id} does not exist")
@@ -218,3 +224,15 @@ class StoredScheduleInvalid(DomainError):
 class ScheduleTimezoneUnresolved(DomainError):
     def __init__(self) -> None:
         super().__init__("the schedule profile has no time zone; read it through ScheduleService")
+
+
+class AutopilotStateMissing(DomainError):
+    def __init__(self) -> None:
+        super().__init__("the autopilot state row is missing; run the migrations")
+
+
+class RetryJob(DomainError):
+    def __init__(self, defer_seconds: int, error_class: str) -> None:
+        super().__init__(f"the reply job will be retried in {defer_seconds} s after {error_class}")
+        self.defer_seconds = defer_seconds
+        self.error_class = error_class

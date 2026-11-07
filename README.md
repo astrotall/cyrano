@@ -40,21 +40,10 @@ Key principles:
 - **Personal data stays local.** Persona, examples, sessions, media and messages never go to git.
   Message text, names and other personal data are never logged at INFO or above.
 
-> The project skeleton (CYR-8), the storage layer (CYR-9), the userbot intake (CYR-10), the
-> profile collection (CYR-11), the control bot with the contact card (CYR-12), the LLM client
-> (CYR-13), the import of the owner persona and style examples (CYR-14), the converter of a chat
-> export into draft examples (CYR-34) and the layered reply prompt with the reply generator (CYR-16)
-> exist; these last four are not used by the running app, only by the `llm-check`, `persona`,
-> `examples` and `reply-preview` commands. The outbox with the one guarded sender (CYR-19) and its
-> limits, pause and stop (CYR-22) exist too, and only the owner's test command can add a message to it: nothing is sent automatically. The pause
-> on a message the owner writes by hand (CYR-21) exists. The stop-triggers on incoming messages with
-> the hand-over notice (CYR-20) exist; the model's hand-over signal is recognised by the reply
-> generator, which the running app does not use yet. The flow below is the plan.
-
 ## Architecture diagram
 
-Planned flow. The boxes marked (planned) do not exist yet. The userbot box exists for listening and
-registering contacts only; the control bot box exists for the card and its two buttons.
+The flow. The boxes marked (planned) do not exist yet. The automatic reply runs only with
+`AUTOPILOT_ENABLED=true` ([The autopilot](#the-autopilot)).
 
 ```
  unknown sender
@@ -63,7 +52,7 @@ registering contacts only; the control bot box exists for the card and its two b
  +-----------------------+   registers contact (new),     +------------------+
  | userbot (Telethon)    |   collects profile             | PostgreSQL       |
  | second account        |------------------------------->| contacts,        |
- | (registers, exists)   |                                | messages,        |
+ | (registers, sends)    |                                | messages,        |
  +-----------------------+                                | modes            |
       |  card                                              +------------------+
       v                                                           ^
@@ -74,14 +63,14 @@ registering contacts only; the control bot box exists for the card and its two b
       | contact -> active                                         |
       v                                                           |
  incoming message --> Arq job, delayed, debounced  --> Redis      |
-                      (planned)                        (exists)   |
+                      (CYR-17, behind the switch)                 |
       |                                                           |
       v                                                           |
  +-----------------------+   re-check status, build layered       |
  | worker (Arq)          |   prompt, call LLM (DeepSeek)  --------+
- | (skeleton exists)     |
+ | reply job (CYR-17)    |   write an autopilot outbox row
  +-----------------------+
-      |  reply text
+      |  outbox row
       v
  +-----------------------------------------------+
  | sender: outbox, status guard, rate limits,    |
@@ -90,16 +79,17 @@ registering contacts only; the control bot box exists for the card and its two b
  +-----------------------------------------------+
 ```
 
-What exists: configuration, JSON logging, the app process with a heartbeat, the Arq worker with a
-placeholder job, the contact status rules, the database schema with its migrations and
+What exists: configuration, JSON logging, the app process with a heartbeat, the Arq worker with the
+reply job of the autopilot, the contact status rules, the database schema with its migrations and
 repositories, Docker and CI, and the userbot: it logs the second account in, listens for private
 messages, registers unknown senders as contacts with status `new`, stores their messages and
 publishes an in-memory event for each new contact; a collector then reads their profile for the
 owner's card (see [What is collected](#what-is-collected-about-a-new-contact)). The control bot then shows the owner a card for every new contact with a Reply button per
 mode and an Ignore button (see [The control bot](#the-control-bot-and-the-card)). The outbox and
-the one sender send what the owner's test command puts in the outbox, and nothing else (see
-[The outbox and the sender](#the-outbox-and-the-sender)). The `llm`
-package holds the DeepSeek client, which nothing in the app calls yet; `services` holds the
+the one sender send what the owner's test command and, with the switch on, the autopilot put in the
+outbox (see [The outbox and the sender](#the-outbox-and-the-sender) and
+[The autopilot](#the-autopilot)). The `llm`
+package holds the DeepSeek client, which the worker and two commands use, never the app; `services` holds the
 repository interfaces, the LLM interface, the intake, the event queue, the collector and the card
 logic.
 Details: [.claude/docs/contact-lifecycle.md](.claude/docs/contact-lifecycle.md).
@@ -180,7 +170,8 @@ minutes at most, so a failing collection never keeps the owner waiting):
 Reply moves the contact from `pending` to `active` with that mode, Ignore from `pending` to
 `ignored`; the card is then edited to show the decision and the buttons disappear. A button on an
 old card never changes a contact that is no longer waiting for a decision: it shows a short alert
-instead. Nothing replies to an `active` contact automatically yet (the autopilot is CYR-17).
+instead. With `AUTOPILOT_ENABLED=true` the autopilot answers `active` contacts, including what they
+wrote while the card was waiting ([The autopilot](#the-autopilot)).
 
 ### When you write by hand
 
@@ -250,7 +241,7 @@ goes wrong. The sender
 also keeps conservative limits per minute, hour and day, pauses as a whole during a flood wait, and
 stops completely on a problem with the account itself. Notifications to the owner carry
 internal ids and error class names only.
-The autopilot does not exist yet, so the owner's commands are the only source of rows. States,
+Rows come from the owner's commands and, with `AUTOPILOT_ENABLED=true`, from the autopilot. States,
 errors and rules: [.claude/docs/outbox-and-sender.md](.claude/docs/outbox-and-sender.md).
 
 ```sh
@@ -307,8 +298,9 @@ Replies should look like they come from a person with a daily routine. A planner
 goes out (a short delay inside a conversation, a longer one otherwise, past the night and the busy
 windows), and the sender marks the chat as read, pauses and shows typing before every message. A failed
 read mark or typing never blocks the message. An autopilot row due inside a window is postponed, not
-dropped; the owner's test rows skip that check but get the read mark and typing too. The autopilot does
-not exist yet, so nothing calls the planner except `schedule plan`. Splitting a reply is CYR-36.
+dropped; the owner's test rows skip that check but get the read mark and typing too. The autopilot
+asks the planner for the time of every reply it writes; `schedule plan` shows the same plan. Splitting
+a reply is CYR-36.
 
 Without an imported file the built-in default profile is used: night from 01:00-02:00 until 09:00, on
 Saturday and Sunday until 11:00-12:00, no busy windows, in `TIMEZONE`.
@@ -326,6 +318,48 @@ make schedule-plan CONTACT=<id>                       # when a reply to their la
 
 The running app picks up an import without a restart. Format, rules and worked examples:
 [.claude/docs/humanization.md](.claude/docs/humanization.md).
+
+### The autopilot
+
+With `AUTOPILOT_ENABLED=true`, every message of an `active` contact puts one reply job on the Arq
+queue, 12 s later (`AUTOPILOT_DEBOUNCE_SECONDS`). When several messages arrive in a row, only the job
+of the last one writes a reply. The worker checks the contact, the message (not older than 6 h, not
+from before a resume, not answered yet), runs the stop-trigger check on the whole burst, generates the
+reply with your persona and examples, asks the planner for the send time and writes an `autopilot`
+row; the app's sender sends it with the usual guard, limits, read mark and typing. A sweep in the app
+every minute picks up messages whose job was lost, and those that arrived while a contact was still
+waiting for your decision.
+
+The worker never sends to a contact. It writes to you only through the control bot: a hand-over
+notice when the model asks for you, when a reply is cut off or invalid twice, and the notices below.
+
+- **Stopped** (a rejected key, a request the provider refuses, 402 balance included, or no persona):
+  nothing is generated until you fix the cause and run `make autopilot-resume YES=1`.
+- **Paused for 15 minutes** (the provider is down or rate limiting after four tries): it continues by
+  itself; `make autopilot-resume` ends the pause early.
+
+```sh
+make autopilot-status          # switch, running / stopped / paused, autopilot rows per state, unanswered active contacts
+make autopilot-resume          # clears a pause
+make autopilot-resume YES=1    # also clears a stop; fix the cause first
+```
+
+**Before you switch it on:**
+
+1. Import and check your schedule (`make schedule-import`, `make schedule-show`, `make schedule-check`).
+2. Import the persona and the style examples (`make persona-import`, `make examples-import`), and
+   check a few replies with `make reply-preview CONTACT=...`.
+3. Review the `SEND_LIMIT_*` settings for your account.
+4. Make sure the notices reach you: press Start in the control bot and send one test row with
+   `make outbox-enqueue`.
+5. Test with a third account of your own as the only `active` contact, and watch it: the replies,
+   their timing, a sensitive topic, a message you write by hand, `make autopilot-status`.
+6. Set `AUTOPILOT_ENABLED=true` in `.env` and restart both the app and the worker (`make up`, or both
+   processes locally).
+
+Not covered: the contact's age, languages other than Russian and a little English in the stop-trigger
+check, voice and other media (the reply is written without them), contact summaries (CYR-25). Details:
+[.claude/docs/autopilot.md](.claude/docs/autopilot.md).
 
 ### Code layers
 
@@ -355,7 +389,7 @@ import aiogram; full rules in
 | Language | Python 3.14, uv | now |
 | Configuration | pydantic-settings, Pydantic v2 | now |
 | Time zones | tzdata (IANA database in the slim image) | now |
-| Delayed jobs | Arq on Redis | now (skeleton worker, placeholder job) |
+| Delayed jobs | Arq on Redis | now (the reply job of the autopilot) |
 | Cache and queue | Redis 7.4 (AOF) | now (compose service) |
 | Database server | PostgreSQL 16.15 | now (compose service, migrations, tests) |
 | Userbot | Telethon | now (listens, registers contacts, reads profiles; sends only through the guarded sender) |
@@ -409,14 +443,15 @@ What exists now:
 │   ├── dependabot.yml            # weekly: Actions, Docker, Compose, uv
 │   └── workflows/ci.yml
 ├── src/cyrano/
-│   ├── __main__.py               # python -m cyrano [login | llm-check | persona ... | examples ... | reply-preview ... | outbox ... | schedule ... | stop-check ...]
-│   ├── main.py                   # app entrypoint, signals, heartbeat, subcommands login, llm-check, persona (import, show), examples (import, stats, convert), reply-preview, outbox (enqueue, list, cancel, retry, status, resume), schedule (import, show, check, plan), stop-check
+│   ├── __main__.py               # python -m cyrano [login | llm-check | persona ... | examples ... | reply-preview ... | outbox ... | schedule ... | stop-check ... | autopilot ...]
+│   ├── main.py                   # app entrypoint, signals, heartbeat, subcommands login, llm-check, persona (import, show), examples (import, stats, convert), reply-preview, outbox (enqueue, list, cancel, retry, status, resume), schedule (import, show, check, plan), stop-check, autopilot (status, resume)
 │   ├── style_cli.py              # the persona and examples commands
 │   ├── convert_cli.py            # examples convert: Telegram Desktop export to a draft examples file
 │   ├── reply_cli.py              # reply-preview: generate one reply for a stored conversation
 │   ├── outbox_cli.py             # outbox enqueue, list, cancel, retry, status, resume: the owner's commands
 │   ├── schedule_cli.py           # schedule import, show, check, plan: the owner's commands
 │   ├── stop_check_cli.py         # stop-check: the stop-trigger classes of a phrase or a contact, a dry run
+│   ├── autopilot_cli.py          # autopilot status, resume: the owner's commands
 │   ├── stop_trigger_patterns.py  # the stop-trigger pattern data
 │   ├── config.py                 # Settings, load_settings, ConfigError
 │   ├── logging.py                # JSON-lines logging
@@ -466,9 +501,15 @@ What exists now:
 │   │   ├── pause_actions.py      # PauseActions: Resume and Ignore of a paused contact
 │   │   ├── stop_triggers.py      # the pure stop-trigger detector
 │   │   ├── hand_over.py          # HandOverService: pause, cancel, one notice to the owner
-│   │   └── hand_over_notifier.py # HandOverNotifier Protocol: notify_hand_over
-│   └── worker/
-│       └── settings.py           # Arq WorkerSettings, placeholder job
+│   │   ├── hand_over_notifier.py # HandOverNotifier Protocol: notify_hand_over
+│   │   ├── reply_job.py          # ReplyJobRunner: one generated reply per burst into the outbox
+│   │   ├── autopilot.py          # AutopilotScheduler and AutopilotSweeper: put reply jobs on the queue
+│   │   └── reply_job_queue.py    # ReplyJobQueue Protocol: enqueue
+│   └── worker/                   # the only package that imports arq; never imports Telethon
+│       ├── settings.py           # Arq WorkerSettings, startup, shutdown
+│       ├── jobs.py               # reply_to_contact, the job function
+│       ├── composition.py        # builds and closes what the job needs
+│       └── queue.py              # ArqReplyJobQueue, used by the app
 └── tests/                        # mirrors src/cyrano; database tests need a real PostgreSQL
 ```
 
@@ -625,7 +666,10 @@ uv run arq --custom-log-dict cyrano.worker.settings.LOG_CONFIG \
 
 `.env` in the current directory is loaded; real environment variables take precedence over it.
 The app connects to Telegram as the userbot and polls the control bot, and connects to Postgres
-(from the start: the sender polls the outbox every two seconds); it does not connect to Redis. The worker connects to Redis; the compose one works via `docker compose up -d redis`.
+(from the start: the sender polls the outbox every two seconds), and to Redis for the reply job
+queue (a Redis that cannot be reached is logged and retried at the next enqueue). The worker connects
+to Redis, Postgres, the LLM provider and the Bot API for the owner notices; the compose Redis works via
+`docker compose up -d redis`.
 
 ### Makefile targets
 
@@ -647,6 +691,7 @@ The app connects to Telegram as the userbot and polls the control bot, and conne
 | `make outbox-enqueue CONTACT=... TEXT="..." [IN=...]`, `make outbox-list [STATE=...] [LIMIT=...]`, `make outbox-cancel ID=...`, `make outbox-retry ID=... [IN=...] [YES=1]`, `make outbox-status`, `make outbox-resume [YES=1]` | The owner's commands for the outbox (see [The outbox and the sender](#the-outbox-and-the-sender)) |
 | `make schedule-import FILE=...`, `make schedule-show`, `make schedule-check [AT="YYYY-MM-DD HH:MM"]`, `make schedule-plan CONTACT=...` | The owner's commands for the schedule profile (see [Humanization and the schedule](#humanization-and-the-schedule)) |
 | `make stop-check TEXT="..."` or `make stop-check CONTACT=...` | Print the stop-trigger classes of a phrase (no `.env` needed) or of the contact's last 3 incoming messages; changes nothing, prints no text (see [When a contact touches a sensitive topic](#when-a-contact-touches-a-sensitive-topic)) |
+| `make autopilot-status`, `make autopilot-resume [YES=1]` | The state of the autopilot, and clearing its pause or, with `YES=1`, its stop (see [The autopilot](#the-autopilot)) |
 | `make llm-check` | Send one tiny request to DeepSeek with the `reply` settings and print the result (see [Checking the LLM key](#checking-the-llm-key)) |
 
 ### Checking the LLM key
@@ -768,10 +813,11 @@ the default applies.
 | `TELETHON_LOG_LEVEL`, `AIOGRAM_LOG_LEVEL` | no | `WARNING` | Level of the `telethon` and `aiogram` loggers; same allowed values as `LOG_LEVEL` |
 | `HTTPX_LOG_LEVEL` | no | `WARNING` | Level of the `httpx` logger, also applied to `httpcore`; same allowed values as `LOG_LEVEL` |
 | `TIMEZONE` | no | `Europe/Moscow` | IANA zone name, validated at startup |
-| `STYLE_EXAMPLES_MAX` | no | `8` | Most style examples one selection returns, from 1 to 50. Only `reply-preview` selects examples so far |
+| `STYLE_EXAMPLES_MAX` | no | `8` | Most style examples one selection returns, from 1 to 50. `reply-preview` and the reply job of the worker select examples |
 | `REPLY_HISTORY_MESSAGES` | no | `20` | How many last messages of a contact go into the reply prompt, from 1 to 100 |
 | `REPLY_PROMPT_BUDGET_CHARS` | no | `24000` | Character budget of the whole reply prompt, from 4000 to 200000; over it, examples and then the oldest messages are dropped |
-| `AUTOPILOT_ENABLED` | no | `false` | `true` allows outbox rows from the autopilot to be sent. The autopilot does not exist yet, and the owner's test commands do not consult this switch; the status check applies to both |
+| `AUTOPILOT_ENABLED` | no | `false` | `true` switches the autopilot on: the app enqueues reply jobs, the worker writes `autopilot` rows and the sender sends them. Restart the app and the worker after a change. The owner's test commands do not consult this switch; the status check applies to both |
+| `AUTOPILOT_DEBOUNCE_SECONDS` | no | `12` | Delay of a reply job after an incoming message, from 0 to 300; the sweep waits twice as long before it enqueues a lost job |
 | `SEND_LIMIT_MINUTE` | no | `4` | Most outgoing messages per minute, all contacts together; at least 1, not above `SEND_LIMIT_HOUR` |
 | `SEND_LIMIT_HOUR` | no | `40` | Most outgoing messages per hour, all contacts together; at least 1, not above `SEND_LIMIT_DAY` |
 | `SEND_LIMIT_DAY` | no | `200` | Most outgoing messages per day, all contacts together; at least 1 |

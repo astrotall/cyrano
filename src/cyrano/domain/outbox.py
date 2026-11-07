@@ -24,6 +24,7 @@ CANCEL_REASON_SEND_REJECTED = "send_rejected"
 CANCEL_REASON_MANUAL_MESSAGE = "manual_message"
 CANCEL_REASON_STOP_TRIGGER = "stop_trigger"
 CANCEL_REASON_SUPERSEDED = "superseded"
+CANCEL_REASON_PREDECESSOR = "predecessor"
 ERROR_INTERRUPTED = "interrupted"
 ERROR_UNCERTAIN = "uncertain"
 ERROR_RATE_LIMITED = "rate_limited"
@@ -59,6 +60,7 @@ class ScheduledMessage(BaseModel):
     sent_tg_message_id: int | None
     created_at: UtcDatetime
     updated_at: UtcDatetime
+    follows_id: int | None = None
 
 
 class SentMessage(BaseModel):

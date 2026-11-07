@@ -17,6 +17,7 @@ from cyrano.domain.errors import (
 )
 from cyrano.domain.reply import BuiltPrompt
 from cyrano.services.reply_generator import ReplyGenerator
+from cyrano.services.reply_split import split_reply
 
 REPLY_PREVIEW_COMMAND = "reply-preview"
 EXIT_OK = 0
@@ -26,6 +27,7 @@ FAILURE_LINE = "reply-preview failed: {error}"
 FAILURE_HINT_LINE = "reply-preview failed: {error} ({hint})"
 PROMPT_MESSAGE_LABEL = "[{role}]"
 NEEDS_OWNER_LINE = "needs owner (model signal)"
+PART_LINE = "[{number}/{total}] {text}"
 STATS_LINE = (
     "model={model} input_tokens={input_tokens} output_tokens={output_tokens} "
     "examples={examples_kept}/{examples_offered} messages={messages_kept}/{messages_offered} "
@@ -85,6 +87,18 @@ def _print_prompt(prompt: BuiltPrompt) -> None:
         print(message.content)
 
 
+def _reply_lines(text: str, *, needs_owner: bool) -> list[str]:
+    if needs_owner:
+        return [NEEDS_OWNER_LINE]
+    parts = split_reply(text)
+    if len(parts) <= 1:
+        return [text]
+    return [
+        PART_LINE.format(number=number, total=len(parts), text=part)
+        for number, part in enumerate(parts, start=1)
+    ]
+
+
 class ReplyPreviewCommand:
     def __init__(self, generator: ReplyGenerator, model: str) -> None:
         self._generator = generator
@@ -99,7 +113,8 @@ class ReplyPreviewCommand:
         except DomainError as exc:
             print(_failure_line(exc), file=sys.stderr)
             return EXIT_ERROR
-        print(NEEDS_OWNER_LINE if reply.needs_owner else reply.text)
+        for line in _reply_lines(reply.text, needs_owner=reply.needs_owner):
+            print(line)
         print(
             STATS_LINE.format(
                 model=self._model,

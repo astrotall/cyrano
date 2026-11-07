@@ -9,7 +9,12 @@ from cyrano.db.repositories import SqlContactRepository, SqlModeRepository
 from cyrano.domain.enums import ContactStatus, OutboxSource, OutboxState
 from cyrano.domain.errors import OutboxRowNotFound, OutboxStateConflict
 from cyrano.domain.models import DEFAULT_MODE_NAME, Contact, ContactCreate
-from cyrano.domain.outbox import ScheduledMessage, SenderState, SentMessage
+from cyrano.domain.outbox import (
+    CANCEL_REASON_PREDECESSOR,
+    ScheduledMessage,
+    SenderState,
+    SentMessage,
+)
 from cyrano.domain.schedule import ScheduleProfile
 from cyrano.domain.stop_triggers import HandOverNotice
 from cyrano.services.humanization import ScheduleService
@@ -259,7 +264,15 @@ class InMemoryOutbox:
         send_at: datetime,
         source: OutboxSource,
         trigger_message_id: int | None = None,
+        follows_id: int | None = None,
     ) -> ScheduledMessage:
+        if trigger_message_id is not None:
+            for stored in self.rows.values():
+                if (stored.contact_id, stored.trigger_message_id) == (
+                    contact_id,
+                    trigger_message_id,
+                ):
+                    return stored
         row = ScheduledMessage(
             id=len(self.rows) + 1,
             contact_id=contact_id,
@@ -275,9 +288,43 @@ class InMemoryOutbox:
             sent_tg_message_id=None,
             created_at=FAKE_NOW,
             updated_at=FAKE_NOW,
+            follows_id=follows_id,
         )
         self.rows[row.id] = row
         return row
+
+    async def enqueue_sequence(
+        self,
+        contact_id: int,
+        texts: Sequence[str],
+        send_at: datetime,
+        source: OutboxSource,
+        trigger_message_id: int | None = None,
+    ) -> list[ScheduledMessage]:
+        before = len(self.rows)
+        first = await self.enqueue(contact_id, texts[0], send_at, source, trigger_message_id)
+        if len(self.rows) == before:
+            return self._chain_from(first)
+        chain = [first]
+        for text in texts[1:]:
+            chain.append(
+                await self.enqueue(contact_id, text, send_at, source, follows_id=chain[-1].id)
+            )
+        return chain
+
+    def _chain_from(self, first: ScheduledMessage) -> list[ScheduledMessage]:
+        chain = [first]
+        while follower := next(
+            (row for row in self.rows.values() if row.follows_id == chain[-1].id), None
+        ):
+            chain.append(follower)
+        return chain
+
+    def _claimable(self, row: ScheduledMessage) -> bool:
+        if row.follows_id is None:
+            return True
+        predecessor = self.rows.get(row.follows_id)
+        return predecessor is not None and predecessor.state is OutboxState.SENT
 
     async def get(self, row_id: int) -> ScheduledMessage | None:
         return self.rows.get(row_id)
@@ -286,7 +333,7 @@ class InMemoryOutbox:
         due = [
             row
             for row in self.rows.values()
-            if row.state is OutboxState.SCHEDULED and row.send_at <= now
+            if row.state is OutboxState.SCHEDULED and row.send_at <= now and self._claimable(row)
         ]
         if not due:
             return None
@@ -351,19 +398,53 @@ class InMemoryOutbox:
         self, contact_id: int, trigger_message_id: int, reason: str
     ) -> int:
         newest = (self.trigger_times.get(trigger_message_id, FAKE_NOW), trigger_message_id)
-        older = [
-            row
-            for row in self.rows.values()
-            if row.contact_id == contact_id
-            and row.source is OutboxSource.AUTOPILOT
-            and row.state is OutboxState.SCHEDULED
-            and row.trigger_message_id is not None
-            and (self.trigger_times.get(row.trigger_message_id, FAKE_NOW), row.trigger_message_id)
-            < newest
-        ]
+        older = []
+        for row in self.rows.values():
+            root = await self.root_trigger_id(row.id)
+            if (
+                row.contact_id == contact_id
+                and row.source is OutboxSource.AUTOPILOT
+                and row.state is OutboxState.SCHEDULED
+                and root is not None
+                and (self.trigger_times.get(root, FAKE_NOW), root) < newest
+            ):
+                older.append(row)
         for row in older:
             self._update(row.id, state=OutboxState.CANCELLED, cancel_reason=reason)
         return len(older)
+
+    async def schedule_followers(self, row_id: int, send_at: datetime) -> int:
+        followers = [
+            row
+            for row in self.rows.values()
+            if row.follows_id == row_id and row.state is OutboxState.SCHEDULED
+        ]
+        for row in followers:
+            self._update(row.id, send_at=send_at)
+        return len(followers)
+
+    async def cancel_orphaned_followers(self) -> int:
+        ended = {OutboxState.FAILED, OutboxState.CANCELLED}
+        cancelled = 0
+        while orphans := [
+            row
+            for row in self.rows.values()
+            if row.state is OutboxState.SCHEDULED
+            and row.follows_id is not None
+            and self.rows[row.follows_id].state in ended
+        ]:
+            for row in orphans:
+                self._update(
+                    row.id, state=OutboxState.CANCELLED, cancel_reason=CANCEL_REASON_PREDECESSOR
+                )
+            cancelled += len(orphans)
+        return cancelled
+
+    async def root_trigger_id(self, row_id: int) -> int | None:
+        row = self.rows.get(row_id)
+        while row is not None and row.follows_id is not None:
+            row = self.rows.get(row.follows_id)
+        return None if row is None else row.trigger_message_id
 
     async def has_sending_row(self, contact_id: int) -> bool:
         return any(

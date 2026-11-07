@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections.abc import Sequence
 from datetime import datetime
 
 from cyrano.domain.enums import OutboxSource
@@ -53,3 +54,22 @@ class OutboxService:
         if not decision.allowed:
             raise EnqueueRefused(decision.reason)
         return await self._outbox.enqueue(contact_id, cleaned, send_at, source, trigger_message_id)
+
+    async def enqueue_sequence(
+        self,
+        contact_id: int,
+        texts: Sequence[str],
+        send_at: datetime,
+        source: OutboxSource,
+        trigger_message_id: int | None = None,
+    ) -> list[ScheduledMessage]:
+        if not texts:
+            raise EnqueueRefused(REFUSED_TEXT_EMPTY)
+        cleaned = [clean_outbox_text(text) for text in texts]
+        contact = await self._contacts.get_by_id(contact_id)
+        decision = self._guard.check(contact, source)
+        if not decision.allowed:
+            raise EnqueueRefused(decision.reason)
+        return await self._outbox.enqueue_sequence(
+            contact_id, cleaned, send_at, source, trigger_message_id
+        )

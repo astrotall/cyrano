@@ -106,17 +106,46 @@ async def test_without_show_prompt_the_prompt_is_not_printed(
         assert_absent(marker, captured.out + captured.err)
 
 
-async def test_nothing_but_the_allowed_lines_is_printed_even_with_a_multi_line_reply(
+async def test_a_multi_line_reply_prints_one_numbered_line_per_part_then_the_stats(
     repos: Repositories, capsys: pytest.CaptureFixture[str]
 ) -> None:
     contact = await ready_contact(repos)
 
-    await _command(repos, ScriptedLLMClient("one\n\ntwo")).run(ReplyPreviewRequest(contact.id))
+    code = await _command(repos, ScriptedLLMClient("one\n\ntwo")).run(
+        ReplyPreviewRequest(contact.id)
+    )
 
     lines = capsys.readouterr().out.splitlines()
-    assert lines[:3] == ["one", "", "two"]
-    assert lines[3].startswith("model=")
+    assert code == 0
+    assert lines[:2] == ["[1/2] one", "[2/2] two"]
+    assert lines[2].startswith(STATS_PATTERN)
+    assert len(lines) == 3
+
+
+async def test_more_lines_than_parts_print_the_merged_last_part(
+    repos: Repositories, capsys: pytest.CaptureFixture[str]
+) -> None:
+    contact = await ready_contact(repos)
+
+    await _command(repos, ScriptedLLMClient("one\ntwo\nthree\nfour")).run(
+        ReplyPreviewRequest(contact.id)
+    )
+
+    lines = capsys.readouterr().out.splitlines()
+    assert lines[:3] == ["[1/3] one", "[2/3] two", "[3/3] three four"]
     assert len(lines) == 4
+
+
+async def test_a_one_line_reply_keeps_the_unnumbered_line(
+    repos: Repositories, capsys: pytest.CaptureFixture[str]
+) -> None:
+    contact = await ready_contact(repos)
+
+    await _command(repos, ScriptedLLMClient("just one line")).run(ReplyPreviewRequest(contact.id))
+
+    lines = capsys.readouterr().out.splitlines()
+    assert lines[0] == "just one line"
+    assert len(lines) == 2
 
 
 async def test_the_command_writes_nothing_and_changes_no_row(

@@ -1,10 +1,10 @@
 # Safety rules
 
 **Every rule below says where it is enforced. All of them exist except S7 (limits on proactive
-messages, CYR-23, planned) and the splitting part of S6 (CYR-36, planned).** S1 and S2 are enforced since
+messages, CYR-23, planned).** S1 and S2 are enforced since
 CYR-19: one guarded sender is the only way to a contact. Since CYR-17 the autopilot job writes `autopilot`
 rows too, only with `AUTOPILOT_ENABLED=true`, and the same sender sends them. S8 is enforced since CYR-12,
-S5 since CYR-22, S4 since CYR-21, and S6 since CYR-18, except the splitting. S3 and S10 are enforced
+S5 since CYR-22, S4 since CYR-21, and S6 since CYR-18, its splitting part since CYR-36. S3 and S10 are enforced
 since CYR-20 for incoming texts, and since CYR-17 for the whole burst in the autopilot job and for the model
 signal, on which the job hands over. S9 is enforced by ignore files, tests and review. Changing or
 dropping a rule is a large change (see [CLAUDE.md](../../CLAUDE.md)) and ships with the code and the test
@@ -174,23 +174,33 @@ only.
 
 ## S6. Humanized pacing and quiet hours
 
-- **Rule:** replies are delayed, show a typing action, are split into several messages when long,
-  and are not sent during quiet hours.
+- **Rule:** replies are delayed, show a typing action, are split into several messages when the
+  owner's style is several short messages in a row, and are not sent during quiet hours.
 - **Why:** instant, uniform replies at any hour look automated and draw limits.
-- **Enforced where:** exists (CYR-18), except the splitting (CYR-36, planned). `plan_send_time` in
+- **Enforced where:** exists (CYR-18; the splitting since CYR-36). `plan_send_time` in
   `services/humanization.py` proposes the delayed time; the autopilot job calls it since CYR-17. The
   sender, `services/outbox_sender.py`, enforces the rest for itself: an `autopilot` row inside a night or
   busy window goes back to `scheduled` with `error_class = outside_hours`, never dropped, and every row
   goes through the read mark, a pause and typing before the send. A failed read mark or typing never
   blocks the send, except a flood wait or an account problem, handled as on a send. The windows use the
-  profile's time zone, by default `TIMEZONE`. Details: [humanization.md](humanization.md).
+  profile's time zone, by default `TIMEZONE`. Since CYR-36 a reply the model wrote as several lines
+  is stored as a chain of up to three rows (`split_reply`, `OutboxService.enqueue_sequence`); the sender
+  claims a part only after the one before it was sent, waits `split_pause_seconds` after each send, runs
+  only typing for a later part (no read mark, no read pause, no availability check, because the reply
+  has started) and cancels the rest of a reply whose part failed or was cancelled. Every part passes the
+  guard, the limits and the stale rule. Details: [humanization.md](humanization.md) and
+  [outbox-and-sender.md](outbox-and-sender.md#multi-part-replies).
 - **How it is tested:** exists. With an injected clock and a seeded random generator:
   `tests/services/test_humanization.py` (windows, reasons, delays, typing),
   `tests/services/test_humanization_planner.py` (the burst, on real PostgreSQL) and
   `tests/services/test_outbox_sender_humanization.py` (the order, a row due in a window is deferred and
   sent after, not dropped, `manual_test` rows skip the check, cosmetic failures, a flood wait and an
-  account problem before the send, the deadline, the relation of the stale-sending age). Splitting is
-  untested because it is not built.
+  account problem before the send, the deadline, the relation of the stale-sending age). Splitting:
+  `tests/services/test_reply_split.py` (the pure split), `tests/db/test_outbox_sequence_repository.py`
+  (the chain, the claim rule, the orphans, on real PostgreSQL) and
+  `tests/services/test_outbox_sender_parts.py` (the order of the steps, the split pause from the seeded
+  generator, a failure, a limit, supersession and a manual message between the parts, a part due in a
+  busy window).
 
 ## S7. Limits on proactive messages
 

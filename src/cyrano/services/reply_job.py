@@ -49,6 +49,7 @@ from cyrano.services.outbox_sender import OWNER_NOTIFY_DEADLINE
 from cyrano.services.outbox_service import OutboxService
 from cyrano.services.owner_notifier import OwnerNotifier
 from cyrano.services.reply_generator import ReplyGenerator
+from cyrano.services.reply_split import split_reply
 from cyrano.services.repositories import (
     AutopilotStateRepository,
     ContactRepository,
@@ -136,6 +137,7 @@ class ReplyJobRunner:
                 "reason": result.reason.value,
                 "detail": result.detail,
                 "row_id": result.row_id,
+                "parts": result.parts,
             },
         )
         return result
@@ -232,8 +234,12 @@ class ReplyJobRunner:
             contact_id, trigger_id, CANCEL_REASON_SUPERSEDED
         )
         try:
-            row = await self._enqueuer.enqueue(
-                contact_id, reply.text, plan.send_at, OutboxSource.AUTOPILOT, trigger_id
+            rows = await self._enqueuer.enqueue_sequence(
+                contact_id,
+                split_reply(reply.text),
+                plan.send_at,
+                OutboxSource.AUTOPILOT,
+                trigger_id,
             )
         except EnqueueRefused as exc:
             return _skip(ReplyJobReason.ENQUEUE_REFUSED, exc.reason)
@@ -241,7 +247,8 @@ class ReplyJobRunner:
             outcome=ReplyJobOutcome.QUEUED,
             reason=ReplyJobReason.QUEUED,
             detail=plan.reason.value,
-            row_id=row.id,
+            row_id=rows[0].id,
+            parts=len(rows),
         )
 
     async def _handed_over_by_model(

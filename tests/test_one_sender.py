@@ -42,11 +42,20 @@ DELIVER_METHOD = "_deliver"
 BEFORE_SEND_METHOD = "_before_send"
 GUARD_METHOD = "_guarded_contact"
 ENQUEUE_METHOD = "enqueue"
+ENQUEUE_SEQUENCE_METHOD = "enqueue_sequence"
+SCHEDULE_FOLLOWERS_METHOD = "schedule_followers"
+CANCEL_ORPHANS_METHOD = "cancel_orphaned_followers"
+PREDECESSOR_REASON = "CANCEL_REASON_PREDECESSOR"
+OUTBOX_SERVICE_MODULE = "services/outbox_service.py"
+DB_REPOSITORIES_MODULE = "db/repositories.py"
 STORAGE_WRITE_METHODS = frozenset(
     {
         "set_status",
         "append",
         "enqueue",
+        ENQUEUE_SEQUENCE_METHOD,
+        SCHEDULE_FOLLOWERS_METHOD,
+        CANCEL_ORPHANS_METHOD,
         "cancel_pending_for_contact",
         SUPERSEDE_METHOD,
         "commit",
@@ -690,8 +699,43 @@ def test_only_the_reply_job_cancels_superseded_rows_and_only_before_it_enqueues(
 
     assert callers == {REPLY_JOB_MODULE}
     [cancel_line] = _call_lines(tree, "_enqueue", SUPERSEDE_METHOD)
-    [enqueue_line] = _call_lines(tree, "_enqueue", ENQUEUE_METHOD)
+    [enqueue_line] = _call_lines(tree, "_enqueue", ENQUEUE_SEQUENCE_METHOD)
     assert cancel_line < enqueue_line
+    assert _call_lines(tree, "_enqueue", ENQUEUE_METHOD) == []
+
+
+def test_only_the_sender_schedules_and_cancels_follower_parts() -> None:
+    for method in (SCHEDULE_FOLLOWERS_METHOD, CANCEL_ORPHANS_METHOD):
+        callers = {name for name, tree in _modules() if method in _called_attributes(tree)}
+        assert callers == {SENDER_MODULE}, method
+
+
+def test_the_sender_cancels_orphans_before_it_claims_and_schedules_followers_after_the_send() -> (
+    None
+):
+    tree = ast.parse((SOURCE_ROOT / SENDER_MODULE).read_text())
+
+    [orphans] = _call_lines(tree, "send_next", CANCEL_ORPHANS_METHOD)
+    [claim] = _call_lines(tree, "send_next", "claim_due")
+    [send] = _call_lines(tree, DELIVER_METHOD, TRANSPORT_METHOD)
+    [complete] = _call_lines(tree, DELIVER_METHOD, "complete_send")
+    [followers] = _call_lines(tree, DELIVER_METHOD, SCHEDULE_FOLLOWERS_METHOD)
+    assert orphans < claim
+    assert send < complete < followers
+
+
+def test_only_the_outbox_service_and_the_reply_job_enqueue_a_sequence() -> None:
+    callers = {
+        name for name, tree in _modules() if ENQUEUE_SEQUENCE_METHOD in _called_attributes(tree)
+    }
+
+    assert callers == {OUTBOX_SERVICE_MODULE, REPLY_JOB_MODULE}
+
+
+def test_the_predecessor_reason_is_used_only_by_the_repository() -> None:
+    users = {name for name, tree in _modules() if PREDECESSOR_REASON in _imported_names(tree)}
+
+    assert users == {DB_REPOSITORIES_MODULE}
 
 
 def test_the_superseded_reason_is_used_only_by_the_domain_the_reply_job_and_the_sender() -> None:
@@ -738,3 +782,20 @@ def test_the_scans_catch_what_they_look_for() -> None:
     assert len(_calls_with_arguments(bad, STOP_METHOD)) == 1
     assert PAUSE_METHOD in _called_attributes(bad)
     assert ("telethon.tl.functions.messages", "SendMessageRequest") in set(_imported(bad))
+
+
+def test_the_follower_scans_catch_what_they_look_for() -> None:
+    bad = ast.parse(
+        "async def go(outbox):\n"
+        "    await outbox.schedule_followers(1, now)\n"
+        "    await outbox.cancel_orphaned_followers()\n"
+        "    await outbox.enqueue_sequence(1, ['x'], now, source)\n"
+        "from cyrano.domain.outbox import CANCEL_REASON_PREDECESSOR\n"
+    )
+
+    assert {
+        SCHEDULE_FOLLOWERS_METHOD,
+        CANCEL_ORPHANS_METHOD,
+        ENQUEUE_SEQUENCE_METHOD,
+    } <= _called_attributes(bad)
+    assert PREDECESSOR_REASON in _imported_names(bad)

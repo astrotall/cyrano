@@ -149,16 +149,17 @@ def test_the_contact_paused_notice_takes_the_contact_id_and_the_class_name_only(
     assert _fields(messages.OUTBOX_CONTACT_PAUSED) == {"contact_id", "error"}
 
 
-def test_the_limit_note_is_truthful_about_postponing_and_the_stale_cancel() -> None:
+def test_the_limit_note_says_nothing_is_lost_and_names_the_stale_cancel() -> None:
     note = messages.OUTBOX_LIMIT_NOTE
 
-    assert "отложены до освобождения слота" in note
+    assert "Ничего не потеряно" in note
+    assert "ждут в очереди" in note
     assert f"{ROW_STALE_AFTER_SECONDS // 3600} часов" in note
     assert "отменяется как устаревшее" in note
-    assert "не потеряны" not in note
-    assert "уйдут сами" not in note
+    assert note.index("Ничего не потеряно") < note.index("отменяется как устаревшее")
     for template in OUTBOX_NOTICES.limit_reached.values():
         assert note in template
+        assert messages.OUTBOX_LIMIT_NUMBERS in template
 
 
 def test_the_stale_summary_notice_takes_the_count_and_the_contact_ids_only() -> None:
@@ -190,25 +191,82 @@ def test_a_limit_notice_exists_for_every_hourly_and_daily_limit_and_for_nothing_
     }
 
 
+LIMIT_NOTICE_VALUES = {
+    "contact_id": 23,
+    "limit": 41,
+    "counted": 43,
+    "free_at": "08.11 14:05",
+    "timezone": "Europe/Berlin",
+}
+
+
 @pytest.mark.parametrize(
-    ("scope", "window", "expected"),
+    ("scope", "window", "expected", "setting"),
     [
-        (LimitScope.GLOBAL, LimitWindow.HOUR, "общий лимит отправки за час"),
-        (LimitScope.GLOBAL, LimitWindow.DAY, "общий лимит отправки за сутки"),
-        (LimitScope.CONTACT, LimitWindow.HOUR, "за час для контакта #23"),
-        (LimitScope.CONTACT, LimitWindow.DAY, "за сутки для контакта #23"),
+        (LimitScope.GLOBAL, LimitWindow.HOUR, "общий лимит отправки за час", "SEND_LIMIT_HOUR"),
+        (LimitScope.GLOBAL, LimitWindow.DAY, "общий лимит отправки за сутки", "SEND_LIMIT_DAY"),
+        (
+            LimitScope.CONTACT,
+            LimitWindow.HOUR,
+            "за час для контакта #23",
+            "SEND_LIMIT_CONTACT_HOUR",
+        ),
+        (
+            LimitScope.CONTACT,
+            LimitWindow.DAY,
+            "за сутки для контакта #23",
+            "SEND_LIMIT_CONTACT_DAY",
+        ),
     ],
 )
-def test_a_limit_notice_says_which_limit_and_keeps_only_the_contact_id(
-    scope: LimitScope, window: LimitWindow, expected: str
+def test_a_limit_notice_says_which_limit_and_gives_its_numbers(
+    scope: LimitScope, window: LimitWindow, expected: str, setting: str
 ) -> None:
     template = OUTBOX_NOTICES.limit_reached[(scope, window)]
-    rendered = template.format(contact_id=23)
+    rendered = template.format(**LIMIT_NOTICE_VALUES)
 
     assert expected in rendered
+    assert f"настройка {setting})" in rendered
+    assert "лимит: 41" in rendered
+    assert "Отправлено за окно: 43" in rendered
+    assert "08.11 14:05 (Europe/Berlin)" in rendered
+    assert "Ничего не потеряно" in rendered
+    assert f"{ROW_STALE_AFTER_SECONDS // 3600} часов" in rendered
     assert "python -m cyrano outbox status" in rendered
-    assert _fields(template) <= {"contact_id"}
     assert any("а" <= character <= "я" for character in rendered)
+
+
+@pytest.mark.parametrize("window", [LimitWindow.HOUR, LimitWindow.DAY])
+def test_only_a_contact_limit_notice_carries_the_contact_id(window: LimitWindow) -> None:
+    numbers = {"limit", "counted", "free_at", "timezone"}
+
+    assert _fields(OUTBOX_NOTICES.limit_reached[(LimitScope.GLOBAL, window)]) == numbers
+    assert _fields(OUTBOX_NOTICES.limit_reached[(LimitScope.CONTACT, window)]) == numbers | {
+        "contact_id"
+    }
+
+
+def test_the_other_settings_never_appear_in_a_limit_notice() -> None:
+    names = {
+        "SEND_LIMIT_HOUR",
+        "SEND_LIMIT_DAY",
+        "SEND_LIMIT_CONTACT_HOUR",
+        "SEND_LIMIT_CONTACT_DAY",
+    }
+    for template in OUTBOX_NOTICES.limit_reached.values():
+        named = {name for name in names if f"настройка {name})" in template}
+        assert len(named) == 1
+    assert OUTBOX_NOTICES.limit_time_format == messages.OUTBOX_LIMIT_TIME_FORMAT
+
+
+def test_a_limit_notice_takes_no_telegram_id_or_text() -> None:
+    rendered = "\n".join(
+        template.format(**{**LIMIT_NOTICE_VALUES, "contact_id": FAKE_OTHER_INTERNAL_ID})
+        for template in OUTBOX_NOTICES.limit_reached.values()
+    )
+
+    assert str(FAKE_OTHER_INTERNAL_ID) in rendered
+    assert_absent(FAKE_TELEGRAM_ID, rendered)
 
 
 def test_the_manual_pause_notifier_satisfies_the_service_interface() -> None:

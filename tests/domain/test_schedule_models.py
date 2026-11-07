@@ -11,6 +11,7 @@ from cyrano.domain.enums import Weekday
 from cyrano.domain.errors import ContentValidationError, ImportFileError, ScheduleTimezoneUnresolved
 from cyrano.domain.schedule import (
     MAX_BUSY_WINDOWS,
+    MAX_SPLIT_PAUSE_SECONDS,
     MAX_TYPING_SECONDS,
     ScheduleProfile,
     default_schedule_profile,
@@ -48,6 +49,7 @@ def test_every_field_but_the_version_has_its_default() -> None:
     assert profile.typing.min_seconds == 2
     assert profile.typing.max_seconds == 25
     assert profile.postponed_spread_minutes == (1, 15)
+    assert profile.split_pause_seconds == (3, 8)
 
 
 def test_the_version_is_required() -> None:
@@ -93,6 +95,7 @@ def test_a_valid_full_profile_round_trips_through_its_stored_form() -> None:
         "read_pause_seconds": [0, 10],
         "typing": {"chars_per_second": 50, "min_seconds": 0, "max_seconds": MAX_TYPING_SECONDS},
         "postponed_spread_minutes": [0, 120],
+        "split_pause_seconds": [0, MAX_SPLIT_PAUSE_SECONDS],
     }
 
     profile = parse_schedule(json.dumps(document))
@@ -218,6 +221,10 @@ RULE_CASES: list[tuple[dict[str, object], str, str]] = [
         "must be [lo, hi] with lo <= hi",
     ),
     ({"postponed_spread_minutes": [1, 121]}, "postponed_spread_minutes[1]", "must be at most 120"),
+    ({"split_pause_seconds": [8, 3]}, "split_pause_seconds", "must be [lo, hi] with lo <= hi"),
+    ({"split_pause_seconds": [3, 61]}, "split_pause_seconds[1]", "must be at most 60"),
+    ({"split_pause_seconds": [-1, 3]}, "split_pause_seconds[0]", "must be at least 0"),
+    ({"split_pause_seconds": [1.5, 3]}, "split_pause_seconds[0]", "must be an integer"),
 ]
 
 
@@ -254,6 +261,7 @@ def test_an_unknown_key_is_refused_at_its_parent_without_being_named(
         {"busy": [{"days": [SECRET_VALUE], "from": "09:00", "to": "10:00"}]},
         {"busy": [{"days": ["mon"], "from": SECRET_VALUE, "to": "10:00"}]},
         {"read_pause_seconds": [SECRET_VALUE, 3]},
+        {"split_pause_seconds": [SECRET_VALUE, 3]},
     ],
 )
 def test_a_validation_error_never_carries_the_input(document: dict[str, object]) -> None:
@@ -331,6 +339,20 @@ def test_the_sample_file_validates_and_holds_invented_generic_values() -> None:
     assert [(w.days, w.start, w.end) for w in profile.busy] == [
         ((Weekday.TUE, Weekday.THU), time(9, 0), time(10, 30))
     ]
+    assert profile.split_pause_seconds == (3, 8)
+
+
+def test_the_split_pause_limit_is_one_minute() -> None:
+    assert MAX_SPLIT_PAUSE_SECONDS == 60
+
+
+def test_a_stored_profile_without_the_split_pause_reads_with_the_default() -> None:
+    stored = default_schedule_profile("UTC").stored_data()
+    stored.pop("split_pause_seconds")
+
+    profile = ScheduleProfile.model_validate(stored)
+
+    assert profile.split_pause_seconds == (3, 8)
 
 
 def test_the_file_size_limit_is_exact(tmp_path: Path) -> None:

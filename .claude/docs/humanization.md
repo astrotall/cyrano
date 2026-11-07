@@ -10,8 +10,9 @@ account should stay within safe behaviour. Two parts do this:
 - **The pre-send part of the sender** decides **how** it goes out: read mark, a pause, typing, then
   the message. It runs for every row of the sender, the owner's test rows included.
 
-Splitting a reply into several messages is not here: CYR-36. The rule is S6 in
-[safety-rules.md](safety-rules.md); the sender in [outbox-and-sender.md](outbox-and-sender.md).
+Since CYR-36 a reply the model wrote as several lines goes out as up to three messages, one per part,
+with a short pause between them ([multi-part replies](outbox-and-sender.md#multi-part-replies)). The rule
+is S6 in [safety-rules.md](safety-rules.md); the sender in [outbox-and-sender.md](outbox-and-sender.md).
 
 ## The profile
 
@@ -35,6 +36,7 @@ refused. Errors give the JSON path and the rule, never a value and never the unk
 | `typing.min_seconds` | `2` | Integer, 0 to `max_seconds` |
 | `typing.max_seconds` | `25` | Integer, `min_seconds` to 60 |
 | `postponed_spread_minutes` | `[1, 15]` | `[lo, hi]`, integers, 0 to 120 |
+| `split_pause_seconds` | `[3, 8]` | `[lo, hi]`, integers, 0 to 60 (`MAX_SPLIT_PAUSE_SECONDS`). The pause between two parts of one reply, counted from the actual send of the earlier part (CYR-36). A profile stored before the field existed reads with the default; no migration |
 
 A sample with invented values: `examples/schedule.sample.json`. The worked examples below use it.
 
@@ -79,6 +81,7 @@ Exactly the window length is not ongoing.
 | `exhausted` | Eight pushes were used; the time may still be blocked, and the sender's check catches that |
 
 **Typing.** `typing_seconds(text, profile) = clamp(len(text) / chars_per_second, min_seconds, max_seconds)`.
+For a reply in several parts it is computed for each part from that part's own text.
 
 **The burst.** `HumanizationPlanner.plan(contact_id, trigger_message_id, now)` (called by the
 autopilot job, CYR-17) reads the last 20
@@ -118,14 +121,20 @@ after it it is blocked.
 
 ## The pre-send sequence
 
-In the sender, per row: claim, stale check, guard, limiter, the availability check for autopilot rows,
-then, for every source:
+In the sender, per row: claim, stale check, guard, limiter, the availability check for autopilot rows
+(first parts only), then, for every source:
 
-1. `mark_read`.
-2. A pause of `uniform(read_pause_seconds)`.
-3. `show_typing(typing_seconds(text))`.
+1. `mark_read`, only for a single row or the first part of a reply.
+2. A pause of `uniform(read_pause_seconds)`, only for a single row or the first part of a reply.
+3. `show_typing(typing_seconds(text))`, for every part with its own text.
 4. The guard again, on a freshly read contact.
 5. `send_text`.
+6. For a reply in several parts: the next part becomes due `uniform(split_pause_seconds)` after this
+   send, and goes through the same sequence without steps 1 and 2.
+
+A later part does not mark the chat as read again (it is read already and the contact sees no new
+message from themselves), and the availability check does not stop a reply that has started: its parts
+are seconds apart, so a window that begins between them does not cut the reply in half.
 
 Reading comes before typing because that is the order a person does it in: the contact sees the
 message read, then typing, then the reply. The other order shows someone answering a message they
@@ -146,7 +155,7 @@ The planner only proposes a time. Three things stand behind it, in this order at
   flood wait moved it there, or the plan was `exhausted`) goes back to `scheduled`, at the window's
   end plus the spread, with `error_class = outside_hours`. It is not dropped, it is not an attempt,
   `due_at` stays, and the owner gets no notice. `manual_test` rows skip this check: the owner asked
-  for that message now.
+  for that message now. A later part of a reply skips it too.
 
 **The stale rule still wins, on purpose.** `due_at` is untouched, so a row due at 02:30 and held until
 the morning is more than 6 h old when it comes back, and is cancelled as `stale` with the usual summary

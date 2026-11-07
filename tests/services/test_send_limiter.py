@@ -104,6 +104,65 @@ def test_a_limit_that_is_free_does_not_appear_in_the_reached_list() -> None:
     assert decision.reached == (HOUR_LIMIT,)
 
 
+def test_a_reached_limit_reports_its_count_and_the_time_its_slot_frees() -> None:
+    decision = decide([(MINUTE_LIMIT, [_ago(1), _ago(20)]), (HOUR_LIMIT, [])], FAKE_NOW)
+
+    [hit] = decision.hits
+    assert hit.limit == MINUTE_LIMIT
+    assert hit.counted == 2
+    assert hit.frees_at == _ago(20) + timedelta(seconds=60)
+    assert decision.reached == (hit.limit,)
+
+
+def test_no_reached_limit_reports_no_hit() -> None:
+    assert decide([(MINUTE_LIMIT, [_ago(1)])], FAKE_NOW).hits == ()
+
+
+def test_every_reached_limit_has_its_own_free_time() -> None:
+    decision = decide([(MINUTE_LIMIT, [_ago(1), _ago(2)]), (HOUR_LIMIT, [_ago(100)])], FAKE_NOW)
+
+    assert [hit.frees_at for hit in decision.hits] == [
+        _ago(2) + timedelta(seconds=60),
+        _ago(100) + timedelta(hours=1),
+    ]
+    assert decision.free_at == max(hit.frees_at for hit in decision.hits)
+
+
+async def test_the_service_counts_every_message_in_the_window_beyond_the_limit() -> None:
+    stored = _messages((CONTACT, 1), (CONTACT, 2), (OTHER_CONTACT, 3), (CONTACT, 4000))
+
+    decision = await SendLimiter(stored, FakeLimits(send_limit_hour=2)).check(CONTACT, FAKE_NOW)
+
+    [hit] = decision.hits
+    assert (hit.limit.scope, hit.limit.window, hit.limit.maximum) == (
+        LimitScope.GLOBAL,
+        LimitWindow.HOUR,
+        2,
+    )
+    assert hit.counted == 3
+    assert hit.frees_at == _ago(2) + timedelta(hours=1)
+
+
+async def test_a_contact_limit_counts_only_that_contact() -> None:
+    stored = _messages((CONTACT, 1), (OTHER_CONTACT, 2), (CONTACT, 3), (CONTACT, 5))
+
+    decision = await SendLimiter(stored, FakeLimits(send_limit_contact_day=2)).check(
+        CONTACT, FAKE_NOW
+    )
+
+    [hit] = decision.hits
+    assert hit.counted == 3
+
+
+async def test_a_message_exactly_one_window_old_is_not_counted() -> None:
+    stored = _messages((CONTACT, 1), (CONTACT, 2), (CONTACT, 3600))
+
+    decision = await SendLimiter(stored, FakeLimits(send_limit_hour=2)).check(CONTACT, FAKE_NOW)
+
+    [hit] = decision.hits
+    assert hit.counted == 2
+
+
 def test_the_settings_give_all_six_limits() -> None:
     limits = limits_from(FakeLimits(1, 2, 3, 4, 5, 6))
 

@@ -1,7 +1,7 @@
 # Outbox and sender
 
 Exists since CYR-19; the limits, the pause and the stop since CYR-22; the pre-send part and the
-availability check since CYR-18. The outbox is the table of
+availability check since CYR-18; replies in several parts since CYR-36. The outbox is the table of
 messages waiting to go out; the sender is the one piece of code that sends them to contacts. The
 Telethon session lives in the app process, so sending stays there. The Arq worker (CYR-17) only
 generates replies and writes them to the outbox ([autopilot.md](autopilot.md)).
@@ -12,7 +12,8 @@ autopilot job (`autopilot`), which runs only with `AUTOPILOT_ENABLED=true`. Rule
 
 ## The table
 
-`scheduled_messages`, migration `0003`, `due_at` since migration `0005`:
+`scheduled_messages`, migration `0003`, `due_at` since migration `0005`, `follows_id` since migration
+`0010`:
 
 | Column | Holds |
 | --- | --- |
@@ -30,10 +31,12 @@ autopilot job (`autopilot`), which runs only with `AUTOPILOT_ENABLED=true`. Rule
 | `claimed_at` | When the sender claimed the row |
 | `sent_tg_message_id` | The Telegram id of the sent message |
 | `created_at`, `updated_at` | `timestamptz` |
+| `follows_id` | The part this row follows in a [multi-part reply](#multi-part-replies), or `NULL` for a first part and for every single row; foreign key to `scheduled_messages.id`, indexed |
 
 Constraints: `text` not empty, `state` and `source` from the allowed values. Indexes: a partial
 unique index on `(contact_id, trigger_message_id) WHERE trigger_message_id IS NOT NULL`, so one
-incoming message yields at most one row, and an index on `(state, send_at)` for the claim. Enqueue
+incoming message yields at most one row (one first part), an index on `(state, send_at)` for the claim
+and one on `follows_id`. Enqueue
 with a known trigger returns the row already stored, also when two calls race. Every `autopilot` row
 carries the incoming message it answers as `trigger_message_id` (the internal `messages.id`); the job
 looks for a row with that key (`has_row_for_trigger`, any state) before it generates, so a job that
@@ -43,9 +46,9 @@ runs twice, a retried job and the sweeper never produce a second row or a second
 
 | From | To | Who | When |
 | --- | --- | --- | --- |
-| (none) | `scheduled` | `OutboxService.enqueue` | Text and guard passed |
+| (none) | `scheduled` | `OutboxService.enqueue`, or `OutboxService.enqueue_sequence` for every part of a reply | Text and guard passed |
 | `scheduled` | `sending` | `claim_due` in the sender | The row is due |
-| `scheduled` | `cancelled` | `cancel_scheduled` (the owner's command), `cancel_pending_for_contact` (the sender after a recipient rejection, reason `send_rejected`; the manual-message detector, reason `manual_message`, CYR-21; the hand-over on a stop-trigger, reason `stop_trigger`, CYR-20) and `cancel_superseded_autopilot_rows` (the reply job, the contact's older `autopilot` rows, reason `superseded`, CYR-41) | |
+| `scheduled` | `cancelled` | `cancel_scheduled` (the owner's command), `cancel_pending_for_contact` (the sender after a recipient rejection, reason `send_rejected`; the manual-message detector, reason `manual_message`, CYR-21; the hand-over on a stop-trigger, reason `stop_trigger`, CYR-20) `cancel_superseded_autopilot_rows` (the reply job, the contact's older `autopilot` rows and the waiting parts of older replies, reason `superseded`, CYR-41, CYR-36) and `cancel_orphaned_followers` (the sender, a part whose predecessor is `failed` or `cancelled`, reason `predecessor`, CYR-36) | |
 | `sending` | `sent` | `complete_send` in the sender | Telegram accepted the message |
 | `sending` | `scheduled` | `reschedule` in the sender | Flood wait, a reached limit or an autopilot row inside a window, and nothing else |
 | `sending` | `failed` | `mark_failed` in the sender | Certain refusal, account problem, unknown outcome, or `interrupted` |
@@ -59,8 +62,9 @@ stored as sent.
 
 ## Claim and locking
 
-`claim_due(now)` claims **one** row: state `scheduled`, `send_at <= now`, ordered by `send_at` then
-`id`, `FOR UPDATE SKIP LOCKED`. In the same transaction it sets `sending` and `claimed_at`. Two
+`claim_due(now)` claims **one** row: state `scheduled`, `send_at <= now`, and either no `follows_id` or
+a predecessor in state `sent`, ordered by `send_at` then `id`, `FOR UPDATE SKIP LOCKED`. A part whose
+predecessor has not been sent is never claimed, so the parts of a reply never go out of order. In the same transaction it sets `sending` and `claimed_at`. Two
 claimers never get the same row, and a `sending` row is never returned. There is one sender loop in
 the app; the locking makes a second one harmless, and a test runs two.
 
@@ -117,6 +121,7 @@ one in `src` that calls the transport. Strictly sequential: one row at a time, o
 | `FLOOD_WAIT_NOTIFY_ABOVE` | 60 s | A longer wait notifies the owner |
 | `ROW_STALE_AFTER_SECONDS` | 6 h | A row whose `due_at` is older than this is cancelled, not sent |
 | `LIMIT_NOTICE_INTERVAL_SECONDS` | 1 h | At most one limit notice per kind in this time |
+| `FOLLOWER_HISTORY_MESSAGES` | 20 | Messages read for the supersession check of a later part of a reply |
 | `STALE_NOTICE_INTERVAL_SECONDS` | 1 h | At most one stale summary notice in this time |
 | `STALE_NOTICE_CONTACT_IDS_MAX` | 5 | Contact ids listed in a stale summary notice |
 | `STOP_REMINDER_INTERVAL_SECONDS` | 6 h | Time between reminders while the sender is stopped |
@@ -127,16 +132,18 @@ Each poll, in this order:
 1. Report waiting stale cancels if their notice is due (see the stale rule). Read `sender_state`. If
    it is stopped, send the stop reminder if it is due (see the sender state). Stopped, or
    `paused_until` in the future: nothing is claimed, and the transport is not called.
-2. Claim one row.
+2. Cancel the orphaned parts (`cancel_orphaned_followers`, see [multi-part replies](#multi-part-replies)),
+   then claim one row.
 3. Stale: `due_at` more than 6 h ago cancels the row with reason `stale`, counts it for the stale
    summary notice, and sends that notice if it is due.
 4. Re-read the contact and run the guard.
 5. Check the limits. A reached limit puts the row back; see below.
-6. Autopilot rows only: the availability check. See below.
+6. Autopilot rows only, first parts only: the availability check. See below.
 7. Autopilot rows only: the supersession check. See below.
-8. The pre-send part: `mark_read`, a pause, `show_typing`. See below.
+8. The pre-send part: `mark_read`, a pause, `show_typing`; a later part of a reply only `show_typing`.
+   See below.
 9. Re-read the contact and run the guard again, then the supersession check again.
-10. `send_text`, then `complete_send`.
+10. `send_text`, then `complete_send`, then `schedule_followers` for the next part of the reply, if any.
 
 The startup sweep and the stale check of stuck rows keep running while the sender is paused or
 stopped. They only ever mark rows as failed; they send nothing.
@@ -152,7 +159,8 @@ a night or busy window goes back to `scheduled` at the window's end plus
 `uniform(postponed_spread_minutes)`, with `error_class = outside_hours`. It is never dropped and not
 an attempt, because the transport was not called. `due_at` stays, and the owner gets no notice. A spread
 that lands in the next window is held again at the next claim. A `manual_test` row skips the check: the
-owner asked for that message now.
+owner asked for that message now. A later part of a reply skips it too: a reply that has started is
+finished within seconds, not cut in half by a window that began between its parts.
 
 The stale rule runs first, so a row held past 6 h from its `due_at` is cancelled as `stale` when it
 comes back, as for a limit. Why a planned row does not run into this:
@@ -161,10 +169,16 @@ comes back, as for a limit. Why a planned row does not run into this:
 ### The supersession check
 
 CYR-41. For rows of source `autopilot` only; a `manual_test` row is never superseded, and neither is a
-row without a `trigger_message_id`. A row is superseded when the latest message of its contact, by
+first part without a `trigger_message_id`. A first part (or a single row) is superseded when the latest message of its contact, by
 `(created_at, id)` as everywhere else ([Message times](contact-lifecycle.md#message-times)), is newer
 than its trigger message. Any newer message counts, incoming (the contact wrote again) or outgoing (the
 owner or the sender answered). An older message that a catch-up stored later, with a larger id, does not.
+
+A later part of a reply (CYR-36) is superseded only by an **incoming** message newer than the trigger of
+its first part (`root_trigger_id`), found among the contact's last `FOLLOWER_HISTORY_MESSAGES` (20)
+messages. Outgoing messages do not count for it: its own predecessor is an outgoing message newer than
+the trigger, and a message the owner writes by hand already cancels every scheduled part through the
+manual pause.
 
 The check runs twice: after the availability check and before `mark_read`, and again after the pre-send
 part together with the second guard check, right before `send_text`, so a message that arrives during
@@ -181,11 +195,46 @@ that came after an earlier job ran got its own reply. The reply job cancels such
 [autopilot.md](autopilot.md#one-reply-per-burst); the sender check covers the gap before that job runs,
 a row of a job that failed or lags, and the time spent in the pre-send part.
 
+### Multi-part replies
+
+CYR-36. The model writes several short messages as lines of one reply, and the autopilot job sends each
+line as its own message ([autopilot.md](autopilot.md#the-job)). The parts are rows of a chain:
+
+- **Storing.** `OutboxService.enqueue_sequence` validates every part with the text rules above, runs the
+  guard once and stores the chain through `OutboxRepository.enqueue_sequence` in one transaction: the
+  first part carries the trigger, the planned `send_at` and `due_at`; every later part has no trigger,
+  `follows_id` of the part before it and the same `send_at` as a placeholder, and `due_at` is the same
+  for every part. A refusal or a failure in the middle stores nothing. If a first part for (contact,
+  trigger) exists already, nothing is created and the stored chain is returned, so a retried job never
+  writes parts again. `OutboxService.enqueue` (one row, the owner's test command) is unchanged.
+- **Order.** `claim_due` claims a later part only after the part before it is `sent`. After a part is
+  sent, the sender calls `schedule_followers(row_id, now + uniform(split_pause_seconds))`: the next part's
+  `send_at` is measured from the actual send, with the injected random generator and the profile's
+  `split_pause_seconds` (default 3 to 8 s, [humanization.md](humanization.md#the-profile)).
+- **What a later part skips.** The availability check (a reply that has started is finished), the read
+  mark and the read pause. It still runs the stale check, the guard, the limits, typing, the second guard,
+  the supersession check (its own rule, above) and every error policy below.
+- **Orphans.** Once per poll, before the claim, `cancel_orphaned_followers` cancels every `scheduled`
+  part whose predecessor is `failed` or `cancelled`, with the reason `predecessor`
+  (`CANCEL_REASON_PREDECESSOR`), down the whole chain in one transaction, and returns the count (logged
+  as one INFO line with the count). This covers every way a part ends without being sent: a send failure,
+  a stale or superseded cancel, the guard, the owner's `outbox cancel`, the stale check of a stuck row.
+  Nothing is sent out of order; a reply can stop after its first part.
+- **A manual message or a hand-over** cancels every `scheduled` part of the contact through
+  `cancel_pending_for_contact`, as for any row.
+- **The owner's retry** of a failed part (`outbox retry ID --yes`) resends only that part; its later
+  parts were already cancelled as `predecessor` and stay cancelled.
+
+If `schedule_followers` fails after a send (a database outage), the error is logged as a failed step and
+the next part keeps its placeholder time, so it is claimed at the next poll without the split pause; it
+still gets its typing.
+
 ### The pre-send part
 
 For every source, in this order: `mark_read(tg_id)`, a pause of `uniform(read_pause_seconds)`,
-`show_typing(tg_id, typing_seconds(text))`. The numbers come from the profile; the rules are in
-[humanization.md](humanization.md).
+`show_typing(tg_id, typing_seconds(text))`. A later part of a reply skips the read mark and the read
+pause, because the chat is already read, and runs only `show_typing` with the typing time of its own
+text. The numbers come from the profile; the rules are in [humanization.md](humanization.md).
 
 It runs under one deadline, the profile's `typing.max_seconds` + `PRE_SEND_DEADLINE_MARGIN`.
 
@@ -202,7 +251,8 @@ It runs under one deadline, the profile's `typing.max_seconds` + `PRE_SEND_DEADL
 
 Since CYR-38 every row that reaches the pre-send part gets exactly four INFO lines with the message
 `outbox row step` from the logger `cyrano.services.outbox_sender`, one per step, in this order:
-`mark_read`, `pause`, `typing`, `send`. The `send` line comes before the `outbox row sent` line,
+`mark_read`, `pause`, `typing`, `send`. A later part of a reply gets two, `typing` and `send`, with the
+same fields; its skipped read mark and pause are not logged. The `send` line comes before the `outbox row sent` line,
 which is unchanged. A row that stops earlier (stale, refused by the first guard, held by a limit or a
 window, an unreadable profile) has only its own line and no step lines.
 
@@ -275,10 +325,25 @@ alone, so the stale rule still measures from the original time: a row held by a 
 6 h past its `due_at`, by a daily limit for example, is cancelled as `stale` when it comes back, and
 the owner is told in the stale summary notice.
 
+**Every part counts.** Each part of a reply is one outgoing message, so it counts toward every limit
+and is held by a reached limit like any other row; the parts sent before it stay sent. With the
+default `SEND_LIMIT_CONTACT_MINUTE` of 2, the third part of a three-part reply waits until the first
+part is a minute old.
+
 **Notices.** An hourly or a daily limit notifies the owner at most once per hour per kind. A kind is
 a scope and a window, so there are four. A second contact reaching the same per-contact limit within
 that hour gets no notice of its own. A minute limit never notifies. The dedupe is in memory, so a
 restart may repeat a notice.
+
+The limiter reports every reached limit with its scope, window and configured value, the number of
+outgoing messages it counted in the window (`LimitHit.counted`, counted with one more query and at
+most `LIMIT_COUNT_CAP`, 10000) and the time its slot frees up. The notice (CYR-36) names the limit and
+the setting that controls it (`SEND_LIMIT_HOUR`, `SEND_LIMIT_DAY`, `SEND_LIMIT_CONTACT_HOUR` or
+`SEND_LIMIT_CONTACT_DAY`), gives the count and the configured value, shows the next free slot as a local
+time (`DD.MM HH:MM`) in the schedule profile's time zone, says that nothing is lost and that a message
+still waiting 6 hours after its due time is cancelled as outdated, and points to `outbox status`. Only
+the two per-contact notices carry the internal contact id; no notice carries a text, a name or a
+Telegram id.
 
 ## Sender state
 
@@ -373,7 +438,8 @@ and shown is the Telethon class name, never the base class of a subclass.
 | Any other exception | Same as `SendUncertain` | `uncertain` | Once |
 | The send deadline passed | Same as `SendUncertain` | `uncertain` | Once |
 | Storing the failure or `complete_send` failed | The row stays `sending`; the stale check fails it | `interrupted` | Once, by the stale check |
-| A newer message than the trigger exists (`autopilot` rows with a trigger only) | `cancelled`, reason `superseded`; nothing is sent, nothing counted | none | None |
+| A newer message than the trigger exists (`autopilot` rows with a trigger only; for a later part of a reply a newer incoming message than the first part's trigger) | `cancelled`, reason `superseded`; nothing is sent, nothing counted | none | None |
+| The part before this one is `failed` or `cancelled` | `cancelled` before any claim, reason `predecessor`; nothing is sent | none | None |
 | The row is stale when claimed | `cancelled`, reason `stale`; nothing is sent | none (`cancel_reason = stale`) | A summary with the count, first at once, then at most hourly |
 
 **Only a flood wait, a reached limit and a closed window put a row back.** In all three, the message
@@ -399,7 +465,8 @@ call, so in production `SendFloodWait` normally means more than 60 s.
 The owner reads the chat on the second account. If the message arrived, nothing is left to do: the
 row stays `failed`. If it did not, `outbox retry ID --yes` sets the row back to `scheduled`, and the
 sender handles it like any other row: one call, and the guard first. The command also accepts rows
-that failed as `interrupted` or with a certain refusal.
+that failed as `interrupted` or with a certain refusal. For a part of a multi-part reply only that part
+is sent again; the parts after it were cancelled as `predecessor` and are not taken back.
 
 ### A stuck row is never sent again
 
@@ -459,7 +526,7 @@ database up. The sending itself is done by the running app.
 | Command | Makefile | What it does |
 | --- | --- | --- |
 | `outbox enqueue CONTACT_ID TEXT [--in-seconds N]` | `make outbox-enqueue CONTACT=... TEXT="..." [IN=...]` | Adds a `manual_test` row, due in N seconds (default 5, 0 to 86400). Prints the row id and the planned time |
-| `outbox list [--state S] [--limit N]` | `make outbox-list [STATE=...] [LIMIT=...]` | Newest first (default 50, 1 to 1000): id, contact id, source, state, `send_at`, `due_at`, error class, `cancel_reason`. An empty value prints `-`. The reason is a stored constant such as `cancelled_by_owner`, `stale`, `superseded`, `send_rejected` or a guard refusal, so a stale cancel is told apart from an owner cancel. Never a text |
+| `outbox list [--state S] [--limit N]` | `make outbox-list [STATE=...] [LIMIT=...]` | Newest first (default 50, 1 to 1000): id, contact id, source, state, `send_at`, `due_at`, error class, `cancel_reason`. An empty value prints `-`. The reason is a stored constant such as `cancelled_by_owner`, `stale`, `superseded`, `predecessor`, `send_rejected` or a guard refusal, so a stale cancel is told apart from an owner cancel. Never a text |
 | `outbox cancel ID` | `make outbox-cancel ID=...` | Cancels a `scheduled` row. A row in any other state is refused with a message |
 | `outbox retry ID [--in-seconds N] [--yes]` | `make outbox-retry ID=... [IN=...] [YES=1]` | Only for a `failed` row; any other state is refused with a message. Without `--yes` it prints a reminder to check the chat first and changes nothing. With `--yes` it sets `scheduled`, `send_at` and `due_at` to now + N seconds (default 5, 0 to 86400), clears `error_class` and `cancel_reason`, and prints the row id and the planned time |
 | `outbox status` | `make outbox-status` | The sender state (running, paused with the time and reason, stopped with the reason), the six counters against their limits, and the rows per state (both sources; `autopilot status` counts the `autopilot` rows alone). Never a text, a name or a Telegram id |
@@ -476,7 +543,7 @@ and its internal id, because the command takes no contact argument.
 | Sender stopped | The account is restricted or lost; nothing is sent until you act | Check the account in Telegram, then `outbox resume --yes`. If the session is gone (`AuthKeyUnregisteredError`, `AuthKeyInvalidError`, `AuthKeyPermEmptyError`, `AuthKeyDuplicatedError`, `SessionRevokedError`, `SessionExpiredError`, `SessionPasswordNeededError`, `ActiveUserRequiredError` or a bare `UnauthorizedError`), run `make login` and restart the app first. `FrozenMethodInvalidError` means Telegram froze the account: check it in Telegram, no new login helps. The reminder repeats every 6 h until you resume |
 | Stop reminder | The sender is still stopped; sent every 6 h | The same as for the stop notice |
 | Stale summary | Rows were cancelled as `stale` instead of being sent hours late; the notice gives the count and up to 5 contact ids | Nothing is needed. `outbox list --state cancelled` shows them; enqueue again only what you still want sent |
-| Hourly or daily limit | Rows are postponed until a slot frees up; a row more than 6 h past its `due_at` is cancelled as `stale` when it comes back | Usually nothing. `outbox status` shows the counters. Raise the setting only if you mean it |
+| Hourly or daily limit | Rows are postponed until the slot the notice names frees up; a row more than 6 h past its `due_at` is cancelled as `stale` when it comes back. The notice gives the count, the limit and the setting | Usually nothing. `outbox status` shows the counters. Raise the named setting only if you mean it |
 | Contact paused after a rejection | This contact cannot be written to; the contact's queue is cancelled | Nothing is needed. The contact is stored as `paused` with the reason `send_rejected` (CYR-21); the Resume button exists only on the manual-pause and the hand-over notices, so the contact stays paused until the owner decides, and a general Resume is CYR-26 |
 | Contact paused by a manual message | You wrote to this contact by hand; the contact's scheduled rows are cancelled with the reason `manual_message` | Press «Возобновить автоответы» on the notice when you want automatic replies again. Nothing is sent before that |
 | Contact handed over on a stop-trigger | The contact wrote about a topic the assistant never answers itself (see [stop-triggers.md](stop-triggers.md)); the contact is paused and its scheduled rows are cancelled with the reason `stop_trigger` | Answer the contact yourself, then press «Возобновить автоответы», «Оставить на паузе» or «Игнорировать» on the notice. Nothing is sent before that |
@@ -492,8 +559,3 @@ class names. They never carry a message text, a name, a username, a Telegram id 
 `ScheduledMessage.text` is excluded from the model's `repr`. A driver error is never passed on with
 its message, because PostgreSQL can quote row values in it.
 
-## Not built yet
-
-| What | Ticket |
-| --- | --- |
-| Splitting a reply into several messages | CYR-36 |

@@ -32,6 +32,7 @@ MIN_CHARS_PER_SECOND = 1
 MAX_CHARS_PER_SECOND = 50
 MAX_TYPING_SECONDS = 60
 MAX_SPREAD_MINUTES = 120
+MAX_SPLIT_PAUSE_SECONDS = 60
 DEFAULT_NIGHT_START = (time(1, 0), time(2, 0))
 DEFAULT_NIGHT_END_WEEKDAY = (time(9, 0), time(9, 0))
 DEFAULT_NIGHT_END_WEEKEND = (time(11, 0), time(12, 0))
@@ -43,6 +44,7 @@ DEFAULT_CHARS_PER_SECOND = 5
 DEFAULT_TYPING_MIN_SECONDS = 2
 DEFAULT_TYPING_MAX_SECONDS = 25
 DEFAULT_SPREAD_MINUTES = (1, 15)
+DEFAULT_SPLIT_PAUSE_SECONDS = (3, 8)
 WEEKDAYS = tuple(Weekday)
 TIME_PATTERN = re.compile(r"(?:[01]\d|2[0-3]):[0-5]\d")
 TIME_SEPARATOR = ":"
@@ -99,6 +101,8 @@ ReadPauseSeconds = Annotated[StrictInt, Field(ge=0, le=MAX_READ_PAUSE_SECONDS)]
 ReadPauseRange = Annotated[tuple[ReadPauseSeconds, ReadPauseSeconds], AfterValidator(_ordered)]
 SpreadMinutes = Annotated[StrictInt, Field(ge=0, le=MAX_SPREAD_MINUTES)]
 SpreadRange = Annotated[tuple[SpreadMinutes, SpreadMinutes], AfterValidator(_ordered)]
+SplitPauseSeconds = Annotated[StrictInt, Field(ge=0, le=MAX_SPLIT_PAUSE_SECONDS)]
+SplitPauseRange = Annotated[tuple[SplitPauseSeconds, SplitPauseSeconds], AfterValidator(_ordered)]
 TypingSeconds = Annotated[StrictInt, Field(ge=0, le=MAX_TYPING_SECONDS)]
 TimezoneName = Annotated[str, AfterValidator(_known_timezone)]
 Days = Annotated[tuple[Weekday, ...], AfterValidator(_unique_in_week_order)]
@@ -166,6 +170,7 @@ class ScheduleProfile(_ProfilePart):
     read_pause_seconds: ReadPauseRange = DEFAULT_READ_PAUSE_SECONDS
     typing: TypingSettings = Field(default_factory=TypingSettings)
     postponed_spread_minutes: SpreadRange = DEFAULT_SPREAD_MINUTES
+    split_pause_seconds: SplitPauseRange = DEFAULT_SPLIT_PAUSE_SECONDS
 
     @field_validator("version")
     @classmethod

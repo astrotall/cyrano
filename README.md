@@ -12,11 +12,11 @@
 
 **Status.** Working: the userbot that registers unknown senders, the profile collection, the control
 bot with the contact card, the outbox with the one guarded sender, its limits, pause and stop, the
-humanization (send time planner, read mark, typing, quiet hours), the pause on a manual message of the
+humanization (send time planner, read mark, typing, quiet hours, a reply written as several lines sent
+as up to three messages), the pause on a manual message of the
 owner, the stop-triggers with the hand-over, the persona and style examples, the layered reply prompt
 with `reply-preview`, and the autopilot (the Arq worker generates the replies) behind
-`AUTOPILOT_ENABLED`, which is off by default. Planned and not built: splitting a reply into several
-messages (CYR-36), proactive messages (CYR-23), contact summaries (CYR-25), conversation modes beyond
+`AUTOPILOT_ENABLED`, which is off by default. Planned and not built: proactive messages (CYR-23), contact summaries (CYR-25), conversation modes beyond
 the default one (CYR-15), the rest of the control panel (CYR-26) and a contact catalog.
 
 ## About the project
@@ -38,8 +38,8 @@ Key principles:
 - **The owner can always take over.** If you write to a contact by hand from the second account,
   automatic replies to that contact stop at once (see [When you write by hand](#when-you-write-by-hand)).
 - **Pacing and limits are central.** The read mark, typing, quiet hours, rate limits and FloodWait
-  handling live in the sender, not in callers. The delayed send time comes from one planner. Message
-  splitting will join them (CYR-36).
+  handling live in the sender, not in callers. The delayed send time comes from one planner. A reply
+  of several lines goes out as separate messages, in order, a few seconds apart (CYR-36).
 - **Stop-triggers hand over.** Meeting or date proposals, phone and contact exchange, money,
   photo requests, a direct question whether it is a bot or AI, the owner's exes, self-harm, and a
   message the model cannot answer without inventing facts stop the conversation and notify the
@@ -77,14 +77,14 @@ The flow. The boxes marked (planned) do not exist yet. The automatic reply runs 
       v                                                           |
  +-----------------------+   re-check status, build layered       |
  | worker (Arq)          |   prompt, call LLM (DeepSeek)  --------+
- | reply job (CYR-17)    |   write an autopilot outbox row
- +-----------------------+
-      |  outbox row
+ | reply job (CYR-17)    |   write autopilot outbox rows, one per line
+ +-----------------------+   of the reply, at most three (CYR-36)
+      |  outbox rows
       v
  +-----------------------------------------------+
  | sender: outbox, status guard, rate limits,    |
- | read mark, typing, quiet hours (exist);       |  --> Telegram
- | splitting (planned)                           |
+ | read mark, typing, quiet hours, the parts of  |  --> Telegram
+ | a reply in order                              |
  +-----------------------------------------------+
 ```
 
@@ -289,7 +289,10 @@ Rows more than 6 hours past their original due time when sending resumes are can
 not sent late; `make outbox-list` shows the reason, and one notice tells you how many were cancelled.
 
 **After a limit notice.** An hourly or daily limit is reached, and rows are postponed until a slot
-frees up. A row that ends up more than 6 hours past its original due time is cancelled as `stale`
+frees up. The notice names the setting of that limit (`SEND_LIMIT_HOUR`, `SEND_LIMIT_DAY`,
+`SEND_LIMIT_CONTACT_HOUR` or `SEND_LIMIT_CONTACT_DAY`), how many messages were counted in the window,
+the configured value and the local time (in the schedule's time zone) when the next slot frees up; the
+per-contact notices also give the internal contact id. Nothing is lost. A row that ends up more than 6 hours past its original due time is cancelled as `stale`
 instead of going out late, and you get one summary notice with the count (at most once an hour). Usually do nothing; `make outbox-status` shows the counters. The limits are the
 `SEND_LIMIT_*` settings.
 
@@ -311,8 +314,16 @@ goes out (a short delay inside a conversation, a longer one otherwise, past the 
 windows), and the sender marks the chat as read, pauses and shows typing before every message. A failed
 read mark or typing never blocks the message. An autopilot row due inside a window is postponed, not
 dropped; the owner's test rows skip that check but get the read mark and typing too. The autopilot
-asks the planner for the time of every reply it writes; `schedule plan` shows the same plan. Splitting
-a reply is CYR-36.
+asks the planner for the time of every reply it writes; `schedule plan` shows the same plan.
+
+**Multi-line replies (CYR-36).** When the model writes several lines, each line is sent as its own
+message, at most three (more lines are joined into the third). The first part gets the read mark, the
+pause and typing; every later part only its own typing, `split_pause_seconds` after the part before it
+was sent (a `[lo, hi]` pair of whole seconds in the schedule profile, 0 to 60, default `[3, 8]`; a
+profile imported before the field existed uses the default, and `make schedule-show` prints it as
+`split pause: 3-8 s`), even inside a busy window, because the reply has started. If a part
+fails or is cancelled, or the contact writes in between, the rest of that reply is not sent. Every part
+counts toward the send limits.
 
 Without an imported file the built-in default profile is used: night from 01:00-02:00 until 09:00, on
 Saturday and Sunday until 11:00-12:00, no busy windows, in `TIMEZONE`.
@@ -338,7 +349,8 @@ queue, 12 s later (`AUTOPILOT_DEBOUNCE_SECONDS`). When several messages arrive i
 of the last one writes a reply. The worker checks the contact, the message (not older than 6 h, not
 from before a resume, not answered yet), runs the stop-trigger check on the whole burst, generates the
 reply with your persona and examples, asks the planner for the send time and writes an `autopilot`
-row; the app's sender sends it with the usual guard, limits, read mark and typing. A sweep in the app
+row, or one row per line of a multi-line reply; the app's sender sends them with the usual guard,
+limits, read mark and typing. A sweep in the app
 every minute picks up messages whose job was lost, and those that arrived while a contact was still
 waiting for your decision.
 
@@ -437,7 +449,7 @@ What exists now:
 ├── alembic.ini                   # points at migrations/; no URL, it comes from Settings
 ├── migrations/
 │   ├── env.py                    # async environment, URL from Settings
-│   └── versions/                 # 0001 creates the contacts, messages and modes tables and seeds the default mode; 0002 creates persona and style_examples; 0003 creates scheduled_messages (the outbox); 0004 creates sender_state and the index of the send limits; 0005 adds due_at to scheduled_messages; 0006 creates schedule_profile; 0007 adds contacts.pause_reason; 0008 allows stop_trigger as a pause reason; 0009 adds contacts.reply_after and creates autopilot_state
+│   └── versions/                 # 0001 creates the contacts, messages and modes tables and seeds the default mode; 0002 creates persona and style_examples; 0003 creates scheduled_messages (the outbox); 0004 creates sender_state and the index of the send limits; 0005 adds due_at to scheduled_messages; 0006 creates schedule_profile; 0007 adds contacts.pause_reason; 0008 allows stop_trigger as a pause reason; 0009 adds contacts.reply_after and creates autopilot_state; 0010 adds scheduled_messages.follows_id (the parts of a reply)
 ├── examples/                     # invented sample persona, style examples and schedule (the real files go to data/, never to git)
 ├── .dockerignore
 ├── .gitignore
@@ -783,8 +795,10 @@ line (model, tokens, examples and messages kept of offered, prompt characters). 
 judge the style before the autopilot is switched on. It needs a complete `.env` with `DEEPSEEK_API_KEY`, the
 database up and an imported persona. It sends nothing to Telegram and writes nothing to the
 database. `--show-prompt` prints the two messages of the prompt first, with a warning: they contain
-personal data. If the model asks to hand the conversation over (a sensitive topic, see above), the
-first line is `needs owner (model signal)` instead of a reply. Errors print one line with the error
+personal data. A reply of several lines prints one numbered line per message the autopilot would send
+(`[1/2] ...`, `[2/2] ...`); a one-line reply prints as before. If the model asks to hand the
+conversation over (a sensitive topic, see above), the first line is `needs owner (model signal)`
+instead of a reply. Errors print one line with the error
 class and exit with 1. Layers, budget, cleaning and what the prompt contains: [.claude/docs/reply-generation.md](.claude/docs/reply-generation.md).
 
 ### Migrations

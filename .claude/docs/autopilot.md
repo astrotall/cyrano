@@ -27,7 +27,8 @@ Redis: Arq job "reply_to_contact", id reply-<contact id>-<message id>, deferred 
 worker: ReplyJobRunner.run ---- skips, hand-over, stop or cooldown pause (tables below)
      |
      v
-HumanizationPlanner.plan (send time) ----> OutboxService.enqueue (guard, text, row 'autopilot')
+HumanizationPlanner.plan (send time) ----> split_reply ----> OutboxService.enqueue_sequence
+                                                 (guard once, every part's text, one chain of 'autopilot' rows)
                                                  |
                                                  v
                                 app: OutboxSender (guard again, limits, window, read, typing, send)
@@ -41,6 +42,7 @@ HumanizationPlanner.plan (send time) ----> OutboxService.enqueue (guard, text, r
 | `domain/enums.py` | `AutopilotStopReason`, `AutopilotPauseReason`, `ReplyJobOutcome`, `ReplyJobReason` |
 | `domain/errors.py` | `RetryJob(defer_seconds, error_class)`, `ReplyAfterRefused`, `AutopilotStateMissing` |
 | `services/reply_job.py` | `ReplyJobRunner`, `AutopilotNotices`, `burst_texts`. No Arq import |
+| `services/reply_split.py` | `split_reply`: the pure split of a reply into at most `MAX_REPLY_PARTS` parts (CYR-36) |
 | `services/autopilot.py` | `AutopilotScheduler`, `AutopilotSweeper`, `autopilot_running` |
 | `services/reply_job_queue.py` | The one-method `ReplyJobQueue` Protocol |
 | `services/repositories.py` | `AutopilotStateRepository` (`get`, `stop`, `pause_until`, `resume`) and `ReplyBacklogRepository` (`awaiting_reply`, `count_unanswered_active`) |
@@ -73,16 +75,19 @@ is handled by [one reply per burst](#one-reply-per-burst).
 CYR-41. A contact that writes three messages within a minute gets ONE reply, written for the last one.
 A row of source `autopilot` is cancelled with the reason `superseded` (no owner notice) in two places:
 
-1. **In the job**, after the planner gave a send time and before `OutboxService.enqueue`: the contact's
-   other `autopilot` rows that are still `scheduled` and whose trigger message is older than the new
-   trigger, by `(created_at, id)`, are cancelled in one statement
-   (`OutboxRepository.cancel_superseded_autopilot_rows`). A row in state `sending` cannot be cancelled
+1. **In the job**, after the planner gave a send time and before `OutboxService.enqueue_sequence`: the
+   contact's other `autopilot` rows that are still `scheduled` and whose trigger message is older than
+   the new trigger, by `(created_at, id)`, are cancelled in one statement
+   (`OutboxRepository.cancel_superseded_autopilot_rows`). Since CYR-36 this includes the waiting later
+   parts of an older reply, identified by the trigger of their first part, also when that first part
+   was already sent; a sent part is never touched. A row in state `sending` cannot be cancelled
    there; it is covered by the sender. `manual_test` rows, rows of other contacts, `sent` rows and rows
    without a trigger are never touched. The idempotent skip when a row for the new trigger exists
    (step 5) is unchanged.
 2. **In the sender**, for the row it is about to send: before `mark_read` and again right before
    `send_text` ([the supersession check](outbox-and-sender.md#the-supersession-check)). A newer message,
-   incoming or outgoing, than the row's trigger cancels it.
+   incoming or outgoing, than the row's trigger cancels it. A later part of a reply is cancelled only by a
+   newer incoming message than its first part's trigger; its own earlier parts are outgoing and newer.
 
 A burst end to end, with an invented timeline: messages at 0, 40 and 80 s, jobs at 12, 52 and 92 s.
 The job at 12 s writes row 1 for 48 s (the planner drew a delay of 48 s). The second message arrives at
@@ -104,7 +109,7 @@ many hours ago is old by its own time however recently it was stored.
 ## The job
 
 `ReplyJobRunner.run(contact_id, trigger_message_id, *, attempt)` returns a `ReplyJobResult` (outcome,
-reason, an optional detail and the row id) or raises `RetryJob(defer_seconds)` for a transient failure.
+reason, an optional detail, the row id of the first part and the number of parts) or raises `RetryJob(defer_seconds)` for a transient failure.
 `attempt` is Arq's `job_try`. Every check reads fresh data; nothing is cached between jobs.
 
 1. The switch is off, the autopilot is stopped, or a cooldown pause lasts beyond now: skip.
@@ -132,8 +137,13 @@ reason, an optional detail and the row id) or raises `RetryJob(defer_seconds)` f
    (`provider_unavailable`), one notice per new pause, and no row is written.
 9. `HumanizationPlanner.plan(contact_id, trigger_message_id, now)`; `PlanNotPossible` is a skip.
 10. Before the enqueue, the contact's older scheduled `autopilot` rows are cancelled as `superseded`
-    ([One reply per burst](#one-reply-per-burst)). Then `OutboxService.enqueue(contact_id, text, send_at, autopilot, trigger_message_id)`; an
-    `EnqueueRefused` is a skip with its reason as the detail. A duplicate enqueue returns the stored row.
+    ([One reply per burst](#one-reply-per-burst)). Then the reply is split (`split_reply`, CYR-36): at
+    every run of line breaks, each part stripped, empty parts dropped, the order kept, at most
+    `MAX_REPLY_PARTS` (3) parts, and any further lines merged into the last part with one space. Then
+    `OutboxService.enqueue_sequence(contact_id, parts, send_at, autopilot, trigger_message_id)` stores one
+    chain ([multi-part replies](outbox-and-sender.md#multi-part-replies)): every part validated, the guard
+    once, one transaction. An `EnqueueRefused` (one bad part refuses the whole reply) is a skip with its
+    reason as the detail. A duplicate enqueue returns the stored chain and creates no part.
 
 Everything is idempotent: a job run twice, a retried job or a job that races the sweeper's job for the
 same message writes one row at most (step 5 and the partial unique index of the outbox).
@@ -142,7 +152,7 @@ same message writes one row at most (step 5 and the partial unique index of the 
 
 | Outcome | Reason | When |
 | --- | --- | --- |
-| `queued` | `queued` | A row was written; the detail is the planner's reason (`delayed`, `ongoing`, `postponed_night`, ...) |
+| `queued` | `queued` | A reply was written; the detail is the planner's reason (`delayed`, `ongoing`, `postponed_night`, ...), the row id is its first part, and `parts` is the number of parts |
 | `skipped` | `switch_off`, `autopilot_stopped`, `autopilot_paused` | Step 1 |
 | `skipped` | `contact_missing`, `contact_not_active` | Step 2 (`contact_missing` also when the generator no longer finds it) |
 | `skipped` | `trigger_missing`, `trigger_not_incoming`, `trigger_before_resume`, `trigger_stale` | Step 3 |
@@ -180,7 +190,8 @@ written and the sender checks the guard again. The notices go through the 15 s d
 ### Logs
 
 Logger `cyrano.services.reply_job`: one INFO line `reply job finished` per run with the contact id, the
-trigger message id, the attempt, the outcome, the reason, the detail and the row id; one INFO line
+trigger message id, the attempt, the outcome, the reason, the detail, the row id and `parts` (the
+number of parts of a queued reply, otherwise empty); one INFO line
 `reply job will be retried` with the error class and the delay instead when the job is retried;
 WARNING `autopilot notice was not sent` with the class name. Logger `cyrano.services.autopilot`: INFO
 `reply job enqueued` (ids and the delay), WARNING `reply job was not enqueued` (class name), INFO
@@ -307,5 +318,5 @@ outbox and are cancelled by the sender's guard (`autopilot_disabled`).
 - Voice, video, stickers and other media: they are stored as an empty text (`[no text]` in the
   prompt) and the reply is written without knowing them.
 - Contact summaries: the prompt has no summary until CYR-25.
-- Splitting a reply into several messages (CYR-36), proactive messages (CYR-23).
+- Proactive messages (CYR-23).
 - A switch per contact (an open question).

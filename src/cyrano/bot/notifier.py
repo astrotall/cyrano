@@ -32,6 +32,7 @@ OUTBOX_NOTICES = SenderNotices(
         (LimitScope.CONTACT, LimitWindow.HOUR): messages.OUTBOX_LIMIT_CONTACT_HOUR,
         (LimitScope.CONTACT, LimitWindow.DAY): messages.OUTBOX_LIMIT_CONTACT_DAY,
     },
+    limit_time_format=messages.OUTBOX_LIMIT_TIME_FORMAT,
 )
 
 AUTOPILOT_NOTICES = AutopilotNotices(

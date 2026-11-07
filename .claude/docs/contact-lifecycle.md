@@ -93,7 +93,7 @@ otherwise the `default` mode. If `default` itself is missing or disabled they ra
 | 7 | When the job runs it re-checks the switch, the autopilot state, the status, `reply_after`, the age, supersession and an existing row, runs the stop-trigger detector on the burst again, and only then generates; anything but `active` ends the job with no reply. The model signal hands the contact over | CYR-17, CYR-20 |
 | 8 | The layered prompt is built: persona, mode fragment with few-shot examples, contact summary, last N messages | CYR-14, CYR-15, CYR-16, CYR-25 |
 | 9 | The LLM is called through the LLM interface; the response is validated | CYR-13 |
-| 10 | The job asks the planner for the send time ([humanization.md](humanization.md)) and writes an `autopilot` row. The sender sends it: status guard, FloodWait handling, rate limits, the read mark, typing and quiet hours (see [outbox-and-sender.md](outbox-and-sender.md)); splitting (CYR-36) | CYR-19, CYR-22, CYR-18, CYR-17, CYR-36 |
+| 10 | The job asks the planner for the send time ([humanization.md](humanization.md)) and writes an `autopilot` row, or a chain of up to three when the reply has several lines, one message per line (CYR-36). The sender sends it: status guard, FloodWait handling, rate limits, the read mark, typing and quiet hours, the parts in order (see [outbox-and-sender.md](outbox-and-sender.md)) | CYR-19, CYR-22, CYR-18, CYR-17, CYR-36 |
 | 11 | Background: contact summaries, proactive messages, reminders for undecided cards | CYR-25, CYR-23, CYR-24 |
 
 Stop-triggers are detected three times: by the pattern detector on the incoming text (step 5), by

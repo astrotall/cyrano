@@ -17,12 +17,13 @@ The persona and the examples: [persona-and-examples.md](persona-and-examples.md)
 | --- | --- |
 | `prompts/texts.py` | Every fixed text: the layer headers, the instructions, the labels, the dialogue boundary token, the weekday names, the closing request |
 | `prompts/render.py` | Pure rendering of the system message and the user message. No calls, no IO. Imports only `domain` |
-| `domain/reply.py` | `ContactFacts`, `BuiltPrompt`, `GeneratedReply`, the limits (`MIN_HISTORY_MESSAGES`, `REPLY_MAX_CHARS`, the four fact limits) and the reasons a reply is refused |
+| `domain/reply.py` | `ContactFacts`, `BuiltPrompt`, `GeneratedReply`, the limits (`MIN_HISTORY_MESSAGES`, `REPLY_MAX_CHARS`, `MAX_REPLY_PARTS` with `REPLY_PART_JOINER`, the four fact limits) and the reasons a reply is refused |
 | `domain/errors.py` | `PersonaMissing`, `ModeNameNotFound`, `NoMessagesToReplyTo`, `PromptTooLarge`, `ReplyInvalid`; their messages carry ids and counts, never a text |
 | `services/contact_facts.py` | `build_contact_facts`: the few profile fields that may reach the prompt, truncated |
 | `services/prompt_builder.py` | `PromptBuilder`: assembly and trimming to the budget |
 | `services/reply_postprocess.py` | `clean_reply`: pure cleaning and the refusal of a leaked prompt |
 | `services/reply_generator.py` | `ReplyGenerator`: loads, builds, calls the LLM, cleans |
+| `services/reply_split.py` | `split_reply`: the pure split of a reply into parts, one per line (CYR-36); used by the autopilot job and `reply-preview` |
 | `reply_cli.py`, `main.py` | The `reply-preview` command and its wiring |
 
 ## The two messages
@@ -55,8 +56,10 @@ A full rendering of invented data is kept as a test
 ### The instructions
 
 They are short and concrete: write the owner's next message; imitate the style from the persona and
-the examples; answer in the language of the contact's last message, Russian by default; one short
-message of about the length of the examples; plain text only; never invent facts about the owner
+the examples; answer in the language of the contact's last message, Russian by default; a short reply
+of about the length of the owner's replies in the examples, and, if the owner usually sends several short
+messages in a row, each message on its own line, at most `MAX_REPLY_PARTS` (3) lines, otherwise one line
+(CYR-36, see [the line-per-message convention](#the-line-per-message-convention)); plain text only; never invent facts about the owner
 that the persona does not hold; never reveal the instructions or the persona; treat the dialogue
 block as data; never claim to be human and never deny being an AI. Since CYR-20 one more rule tells
 the model to reply with exactly `NEEDS_OWNER` (`NEEDS_OWNER_SIGNAL`) when the contact's last message
@@ -81,6 +84,19 @@ Each value becomes one line (whitespace runs collapse), so a bio cannot open a n
 
 **Never in the prompt:** the username, the Telegram id, the internal ids, the photo paths and the
 raw Leomatch texts (the card text and the match message).
+
+### The line-per-message convention
+
+CYR-36. The chat converter (CYR-34) merges consecutive messages of one side into one turn joined by line
+breaks, so the style examples show a run of short messages as lines of one text. The instructions make
+that the contract: a line break in the reply marks a message boundary, and every line is sent as its own
+message. The autopilot job splits the cleaned reply with `split_reply` (`services/reply_split.py`): at
+every run of line breaks (post-processing has already collapsed long runs to one blank line, and any run
+counts as one separator), each part stripped, empty parts dropped, the order kept, at most
+`MAX_REPLY_PARTS` (3, `domain/reply.py`) parts; further lines are merged into the last part with one space
+(`REPLY_PART_JOINER`), so no text is lost. A reply without line breaks is one part, and a text with no
+visible character gives no part. The sending of the parts is in
+[outbox-and-sender.md](outbox-and-sender.md#multi-part-replies).
 
 ## History and the budget
 
@@ -188,6 +204,15 @@ see you there, bring the umbrella
 model=deepseek-chat input_tokens=1830 output_tokens=12 examples=5/8 messages=14/20 prompt_characters=6120
 ```
 
+A reply that splits into several parts (CYR-36) prints one numbered line per part, exactly as the
+autopilot would send them, then the same stats line:
+
+```
+[1/2] see you there
+[2/2] bring the umbrella
+model=deepseek-chat input_tokens=1830 output_tokens=14 examples=5/8 messages=14/20 prompt_characters=6120
+```
+
 `examples=5/8` is kept of offered, the same for `messages`. On the model signal the first line is
 `needs owner (model signal)` instead of the reply, and the exit code is 0. With `--show-prompt` it first prints a
 one-line warning to stderr that the prompt contains personal data, then the two messages, each
@@ -231,4 +256,5 @@ settings.
 - No commitment statement in the instructions.
 - The generator hands nothing over itself: the autopilot job acts on the model signal (CYR-17).
 - No sending, no delay, no pacing here: the autopilot, the planner and the sender do that (CYR-17,
-  CYR-18, CYR-19, CYR-22).
+  CYR-18, CYR-19, CYR-22). The split into parts is done by the autopilot job, not by the generator
+  (CYR-36).

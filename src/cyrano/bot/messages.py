@@ -102,9 +102,15 @@ OUTBOX_CONTACT_PAUSED = (
     "Его запланированные сообщения отменены."
 )
 OUTBOX_LIMIT_NOTE = (
-    "Сообщения отложены до освобождения слота. Всё, что к тому времени будет ждать дольше "
-    "6 часов после запланированного времени, отменяется как устаревшее. "
+    "Ничего не потеряно: сообщения ждут в очереди и уйдут, когда слот освободится. "
+    "Сообщение, которое к тому времени будет ждать дольше 6 часов после запланированного "
+    "времени, отменяется как устаревшее. "
     "Счётчики показывает команда: python -m cyrano outbox status"
+)
+OUTBOX_LIMIT_TIME_FORMAT = "%d.%m %H:%M"
+OUTBOX_LIMIT_NUMBERS = (
+    "Отправлено за окно: {counted}, лимит: {limit}. Следующий слот освободится "
+    "в {free_at} ({timezone})."
 )
 OUTBOX_STALE_SUMMARY = (
     "Отменено как устаревших сообщений: {count}. Они ждали дольше 6 часов после "
@@ -115,13 +121,21 @@ OUTBOX_STOP_REMINDER = (
     "Вся отправка по-прежнему остановлена ({kind}). Сначала проверьте аккаунт вручную, "
     "затем снимите остановку командой: python -m cyrano outbox resume --yes"
 )
-OUTBOX_LIMIT_GLOBAL_HOUR = f"Достигнут общий лимит отправки за час. {OUTBOX_LIMIT_NOTE}"
-OUTBOX_LIMIT_GLOBAL_DAY = f"Достигнут общий лимит отправки за сутки. {OUTBOX_LIMIT_NOTE}"
+OUTBOX_LIMIT_GLOBAL_HOUR = (
+    "Достигнут общий лимит отправки за час (настройка SEND_LIMIT_HOUR). "
+    f"{OUTBOX_LIMIT_NUMBERS} {OUTBOX_LIMIT_NOTE}"
+)
+OUTBOX_LIMIT_GLOBAL_DAY = (
+    "Достигнут общий лимит отправки за сутки (настройка SEND_LIMIT_DAY). "
+    f"{OUTBOX_LIMIT_NUMBERS} {OUTBOX_LIMIT_NOTE}"
+)
 OUTBOX_LIMIT_CONTACT_HOUR = (
-    f"Достигнут лимит отправки за час для контакта #{{contact_id}}. {OUTBOX_LIMIT_NOTE}"
+    "Достигнут лимит отправки за час для контакта #{contact_id} "
+    f"(настройка SEND_LIMIT_CONTACT_HOUR). {OUTBOX_LIMIT_NUMBERS} {OUTBOX_LIMIT_NOTE}"
 )
 OUTBOX_LIMIT_CONTACT_DAY = (
-    f"Достигнут лимит отправки за сутки для контакта #{{contact_id}}. {OUTBOX_LIMIT_NOTE}"
+    "Достигнут лимит отправки за сутки для контакта #{contact_id} "
+    f"(настройка SEND_LIMIT_CONTACT_DAY). {OUTBOX_LIMIT_NUMBERS} {OUTBOX_LIMIT_NOTE}"
 )
 
 AUTOPILOT_STOPPED = (

@@ -62,7 +62,12 @@ from cyrano.domain.models import (
     ModeCreate,
     StatusChange,
 )
-from cyrano.domain.outbox import OutgoingPeak, ScheduledMessage, SenderState
+from cyrano.domain.outbox import (
+    CANCEL_REASON_PREDECESSOR,
+    OutgoingPeak,
+    ScheduledMessage,
+    SenderState,
+)
 from cyrano.domain.schedule import ScheduleProfile
 from cyrano.domain.style import ExamplesAddResult, Persona, StyleExample, StyleExampleCreate
 from cyrano.domain.transitions import transition_needed
@@ -464,6 +469,30 @@ def _require_state(row: ScheduledMessageRow, *allowed: OutboxState) -> None:
         raise OutboxStateConflict(row.id, row.state)
 
 
+async def _stored_chain(
+    session: AsyncSession, contact_id: int, trigger_message_id: int | None
+) -> list[ScheduledMessage]:
+    first = (
+        await session.scalars(
+            select(ScheduledMessageRow).where(
+                ScheduledMessageRow.contact_id == contact_id,
+                ScheduledMessageRow.trigger_message_id == trigger_message_id,
+            )
+        )
+    ).one()
+    chain = [first]
+    while True:
+        follower = await session.scalar(
+            select(ScheduledMessageRow)
+            .where(ScheduledMessageRow.follows_id == chain[-1].id)
+            .order_by(ScheduledMessageRow.id)
+            .limit(1)
+        )
+        if follower is None:
+            return [ScheduledMessage.model_validate(row) for row in chain]
+        chain.append(follower)
+
+
 class SqlOutboxRepository:
     def __init__(self, session_factory: SessionFactory) -> None:
         self._session_factory = session_factory
@@ -511,6 +540,65 @@ class SqlOutboxRepository:
         except IntegrityError:
             raise OutboxRowInvalid from None
 
+    async def enqueue_sequence(
+        self,
+        contact_id: int,
+        texts: Sequence[str],
+        send_at: datetime,
+        source: OutboxSource,
+        trigger_message_id: int | None = None,
+    ) -> list[ScheduledMessage]:
+        _require_aware(send_at)
+        if not texts:
+            raise OutboxRowInvalid
+        first_part = (
+            insert(ScheduledMessageRow)
+            .values(
+                contact_id=contact_id,
+                trigger_message_id=trigger_message_id,
+                text=texts[0],
+                source=source,
+                send_at=send_at,
+                due_at=send_at,
+            )
+            .on_conflict_do_nothing(
+                index_elements=[
+                    ScheduledMessageRow.contact_id,
+                    ScheduledMessageRow.trigger_message_id,
+                ],
+                index_where=ScheduledMessageRow.trigger_message_id.is_not(None),
+            )
+            .returning(ScheduledMessageRow)
+        )
+        try:
+            async with self._session_factory.begin() as session:
+                if await session.get(ContactRow, contact_id) is None:
+                    raise ContactNotFound(contact_id)
+                first = await session.scalar(first_part)
+                if first is None:
+                    return await _stored_chain(session, contact_id, trigger_message_id)
+                chain = [first]
+                for text in texts[1:]:
+                    part = await session.scalar(
+                        insert(ScheduledMessageRow)
+                        .values(
+                            contact_id=contact_id,
+                            trigger_message_id=None,
+                            text=text,
+                            source=source,
+                            send_at=send_at,
+                            due_at=send_at,
+                            follows_id=chain[-1].id,
+                        )
+                        .returning(ScheduledMessageRow)
+                    )
+                    if part is None:
+                        raise OutboxRowInvalid
+                    chain.append(part)
+                return [ScheduledMessage.model_validate(row) for row in chain]
+        except IntegrityError:
+            raise OutboxRowInvalid from None
+
     async def get(self, row_id: int) -> ScheduledMessage | None:
         async with self._session_factory() as session:
             row = await session.get(ScheduledMessageRow, row_id)
@@ -518,11 +606,21 @@ class SqlOutboxRepository:
 
     async def claim_due(self, now: datetime) -> ScheduledMessage | None:
         _require_aware(now)
+        predecessor = aliased(ScheduledMessageRow)
+        predecessor_sent = (
+            select(predecessor.id)
+            .where(
+                predecessor.id == ScheduledMessageRow.follows_id,
+                predecessor.state == OutboxState.SENT,
+            )
+            .exists()
+        )
         due = (
             select(ScheduledMessageRow)
             .where(
                 ScheduledMessageRow.state == OutboxState.SCHEDULED,
                 ScheduledMessageRow.send_at <= now,
+                or_(ScheduledMessageRow.follows_id.is_(None), predecessor_sent),
             )
             .order_by(ScheduledMessageRow.send_at, ScheduledMessageRow.id)
             .limit(1)
@@ -646,18 +744,78 @@ class SqlOutboxRepository:
                 tuple_(MessageRow.created_at, MessageRow.id)
                 < tuple_(trigger.created_at, trigger.id),
             )
+            older_roots = (
+                select(ScheduledMessageRow.id)
+                .where(
+                    ScheduledMessageRow.contact_id == contact_id,
+                    ScheduledMessageRow.source == OutboxSource.AUTOPILOT,
+                    ScheduledMessageRow.trigger_message_id.in_(older_triggers),
+                )
+                .cte(recursive=True)
+            )
+            follower = aliased(ScheduledMessageRow)
+            older_chains = older_roots.union_all(
+                select(follower.id).where(follower.follows_id == older_roots.c.id)
+            )
             statement = (
                 update(ScheduledMessageRow)
                 .where(
                     ScheduledMessageRow.contact_id == contact_id,
                     ScheduledMessageRow.source == OutboxSource.AUTOPILOT,
                     ScheduledMessageRow.state == OutboxState.SCHEDULED,
-                    ScheduledMessageRow.trigger_message_id.in_(older_triggers),
+                    ScheduledMessageRow.id.in_(select(older_chains.c.id)),
                 )
                 .values(state=OutboxState.CANCELLED, cancel_reason=reason)
                 .returning(ScheduledMessageRow.id)
             )
             return len((await session.scalars(statement)).all())
+
+    async def schedule_followers(self, row_id: int, send_at: datetime) -> int:
+        _require_aware(send_at)
+        statement = (
+            update(ScheduledMessageRow)
+            .where(
+                ScheduledMessageRow.follows_id == row_id,
+                ScheduledMessageRow.state == OutboxState.SCHEDULED,
+            )
+            .values(send_at=send_at)
+            .returning(ScheduledMessageRow.id)
+        )
+        async with self._session_factory.begin() as session:
+            return len((await session.scalars(statement)).all())
+
+    async def cancel_orphaned_followers(self) -> int:
+        predecessor = aliased(ScheduledMessageRow)
+        predecessor_ended = (
+            select(predecessor.id)
+            .where(
+                predecessor.id == ScheduledMessageRow.follows_id,
+                predecessor.state.in_([OutboxState.FAILED, OutboxState.CANCELLED]),
+            )
+            .exists()
+        )
+        statement = (
+            update(ScheduledMessageRow)
+            .where(
+                ScheduledMessageRow.state == OutboxState.SCHEDULED,
+                ScheduledMessageRow.follows_id.is_not(None),
+                predecessor_ended,
+            )
+            .values(state=OutboxState.CANCELLED, cancel_reason=CANCEL_REASON_PREDECESSOR)
+            .returning(ScheduledMessageRow.id)
+        )
+        cancelled = 0
+        async with self._session_factory.begin() as session:
+            while found := len((await session.scalars(statement)).all()):
+                cancelled += found
+        return cancelled
+
+    async def root_trigger_id(self, row_id: int) -> int | None:
+        async with self._session_factory() as session:
+            row = await session.get(ScheduledMessageRow, row_id)
+            while row is not None and row.follows_id is not None:
+                row = await session.get(ScheduledMessageRow, row.follows_id)
+            return None if row is None else row.trigger_message_id
 
     async def has_sending_row(self, contact_id: int) -> bool:
         statement = select(

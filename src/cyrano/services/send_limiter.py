@@ -10,6 +10,8 @@ from cyrano.domain.enums import LimitScope, LimitWindow
 from cyrano.domain.outbox import LIMIT_WINDOW_SECONDS, SendLimit
 from cyrano.services.repositories import MessageRepository
 
+LIMIT_COUNT_CAP = 10_000
+
 
 class LimitSettings(Protocol):
     @property
@@ -31,11 +33,20 @@ class LimitSettings(Protocol):
     def send_limit_contact_day(self) -> int: ...
 
 
+class LimitHit(BaseModel):
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    limit: SendLimit
+    counted: int
+    frees_at: datetime
+
+
 class LimitDecision(BaseModel):
     model_config = ConfigDict(frozen=True, extra="forbid")
 
     free_at: datetime | None = None
     reached: tuple[SendLimit, ...] = ()
+    hits: tuple[LimitHit, ...] = ()
 
 
 class LimitUsage(BaseModel):
@@ -58,14 +69,16 @@ def slot_frees_at(limit: SendLimit, times: Sequence[datetime], now: datetime) ->
 
 
 def decide(samples: Iterable[tuple[SendLimit, Sequence[datetime]]], now: datetime) -> LimitDecision:
-    reached: list[SendLimit] = []
+    hits: list[LimitHit] = []
     free_at: datetime | None = None
     for limit, times in samples:
         frees_at = slot_frees_at(limit, times, now)
         if frees_at is not None:
-            reached.append(limit)
+            hits.append(LimitHit(limit=limit, counted=len(times), frees_at=frees_at))
             free_at = frees_at if free_at is None else max(free_at, frees_at)
-    return LimitDecision(free_at=free_at, reached=tuple(reached))
+    return LimitDecision(
+        free_at=free_at, reached=tuple(hit.limit for hit in hits), hits=tuple(hits)
+    )
 
 
 def limits_from(settings: LimitSettings) -> tuple[SendLimit, ...]:
@@ -102,7 +115,14 @@ class SendLimiter:
 
     async def check(self, contact_id: int, now: datetime) -> LimitDecision:
         samples = [(limit, await self._times(limit, contact_id, now)) for limit in self._limits]
-        return decide(samples, now)
+        decision = decide(samples, now)
+        if not decision.hits:
+            return decision
+        hits = [
+            hit.model_copy(update={"counted": await self._counted(hit.limit, contact_id, now)})
+            for hit in decision.hits
+        ]
+        return decision.model_copy(update={"hits": tuple(hits)})
 
     async def usage(self, now: datetime) -> list[LimitUsage]:
         return [await self._usage_of(limit, now) for limit in self._limits]
@@ -113,6 +133,15 @@ class SendLimiter:
             limit.maximum,
             contact_id if limit.scope is LimitScope.CONTACT else None,
         )
+
+    async def _counted(self, limit: SendLimit, contact_id: int, now: datetime) -> int:
+        start = now - window_of(limit)
+        times = await self._messages.outgoing_times(
+            start,
+            LIMIT_COUNT_CAP,
+            contact_id if limit.scope is LimitScope.CONTACT else None,
+        )
+        return sum(moment > start for moment in times)
 
     async def _usage_of(self, limit: SendLimit, now: datetime) -> LimitUsage:
         start = now - window_of(limit)

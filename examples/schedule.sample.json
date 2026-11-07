@@ -20,5 +20,6 @@
     "min_seconds": 2,
     "max_seconds": 25
   },
-  "postponed_spread_minutes": [1, 15]
+  "postponed_spread_minutes": [1, 15],
+  "split_pause_seconds": [3, 8]
 }

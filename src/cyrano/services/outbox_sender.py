@@ -12,6 +12,7 @@ from cyrano.domain.enums import (
     ContactStatus,
     LimitScope,
     LimitWindow,
+    MessageDirection,
     OutboxSource,
     PauseReason,
     RejectionReason,
@@ -42,7 +43,7 @@ from cyrano.domain.outbox import (
     ScheduledMessage,
     SenderState,
 )
-from cyrano.domain.schedule import MAX_TYPING_SECONDS
+from cyrano.domain.schedule import MAX_TYPING_SECONDS, ScheduleProfile
 from cyrano.services.humanization import ScheduleService, postponed_after, typing_seconds
 from cyrano.services.message_transport import MessageTransport
 from cyrano.services.owner_notifier import OwnerNotifier
@@ -53,7 +54,7 @@ from cyrano.services.repositories import (
     SenderStateRepository,
 )
 from cyrano.services.send_guard import SendGuard
-from cyrano.services.send_limiter import LimitDecision, SendLimiter
+from cyrano.services.send_limiter import LimitDecision, LimitHit, SendLimiter
 
 logger = logging.getLogger("cyrano.services.outbox_sender")
 
@@ -70,6 +71,7 @@ OWNER_NOTIFY_DEADLINE = 15.0
 NOTIFIED_LIMIT_WINDOWS = frozenset({LimitWindow.HOUR, LimitWindow.DAY})
 STEP_LOG_MESSAGE = "outbox row step"
 STEP_DURATION_UNIT = timedelta(milliseconds=1)
+FOLLOWER_HISTORY_MESSAGES = 20
 _SYSTEM_RANDOM = random.SystemRandom()
 
 
@@ -118,6 +120,7 @@ class SenderNotices:
     stale_summary: str
     stop_reminder: str
     limit_reached: Mapping[tuple[LimitScope, LimitWindow], str]
+    limit_time_format: str
 
 
 @dataclass(frozen=True, slots=True)
@@ -194,6 +197,9 @@ class OutboxSender:
         await self._remind_about_stop(state, now)
         if state.stopped or state.is_paused(now):
             return False
+        orphaned = await self._outbox.cancel_orphaned_followers()
+        if orphaned:
+            logger.info("outbox parts cancelled after their predecessor", extra={"count": orphaned})
         row = await self._outbox.claim_due(now)
         if row is None:
             return False
@@ -251,12 +257,18 @@ class OutboxSender:
         if limits.free_at is not None:
             await self._hold_for_limit(row, limits, limits.free_at, now)
             return
-        if row.source is OutboxSource.AUTOPILOT and await self._hold_outside_hours(row, now):
+        follower = row.follows_id is not None
+        if (
+            row.source is OutboxSource.AUTOPILOT
+            and not follower
+            and await self._hold_outside_hours(row, now)
+        ):
             return
         if await self._cancel_if_superseded(row):
             return
+        profile = await self._schedule.get_profile()
         try:
-            await self._before_send(row, contact.tg_id)
+            await self._before_send(row, contact.tg_id, profile)
         except (SendFloodWait, SendAccountBlocked) as exc:
             self._log_step(row, SendStep.SEND, StepOutcome.SKIPPED)
             await self._handle_failure(row, exc)
@@ -288,9 +300,15 @@ class OutboxSender:
             row.id, row.contact_id, row.text, sent.tg_message_id, sent.sent_at
         )
         logger.info("outbox row sent", extra={"row_id": row.id, "contact_id": row.contact_id})
+        pause = self._rng.uniform(*profile.split_pause_seconds)
+        await self._outbox.schedule_followers(row.id, self._clock() + timedelta(seconds=pause))
 
     async def _is_superseded(self, row: ScheduledMessage) -> bool:
-        if row.source is not OutboxSource.AUTOPILOT or row.trigger_message_id is None:
+        if row.source is not OutboxSource.AUTOPILOT:
+            return False
+        if row.follows_id is not None:
+            return await self._is_follower_superseded(row)
+        if row.trigger_message_id is None:
             return False
         trigger = await self._messages.get(row.trigger_message_id)
         if trigger is None:
@@ -299,6 +317,20 @@ class OutboxSender:
         return bool(latest) and (latest[0].created_at, latest[0].id) > (
             trigger.created_at,
             trigger.id,
+        )
+
+    async def _is_follower_superseded(self, row: ScheduledMessage) -> bool:
+        root_trigger_id = await self._outbox.root_trigger_id(row.id)
+        if root_trigger_id is None:
+            return False
+        trigger = await self._messages.get(root_trigger_id)
+        if trigger is None:
+            return False
+        recent = await self._messages.list_last(row.contact_id, FOLLOWER_HISTORY_MESSAGES)
+        return any(
+            message.direction is MessageDirection.INCOMING
+            and (message.created_at, message.id) > (trigger.created_at, trigger.id)
+            for message in recent
         )
 
     async def _cancel_if_superseded(self, row: ScheduledMessage) -> bool:
@@ -324,17 +356,21 @@ class OutboxSender:
         )
         return True
 
-    async def _before_send(self, row: ScheduledMessage, tg_id: int) -> None:
-        profile = await self._schedule.get_profile()
-        pause = self._rng.uniform(*profile.read_pause_seconds)
+    async def _before_send(
+        self, row: ScheduledMessage, tg_id: int, profile: ScheduleProfile
+    ) -> None:
         typing = typing_seconds(row.text, profile)
         pending = [
-            _PlannedStep(SendStep.MARK_READ, lambda: self._transport.mark_read(tg_id), True),
-            _PlannedStep(SendStep.PAUSE, lambda: self._sleep(pause), False, pause),
             _PlannedStep(
                 SendStep.TYPING, lambda: self._transport.show_typing(tg_id, typing), True, typing
-            ),
+            )
         ]
+        if row.follows_id is None:
+            pause = self._rng.uniform(*profile.read_pause_seconds)
+            pending[:0] = [
+                _PlannedStep(SendStep.MARK_READ, lambda: self._transport.mark_read(tg_id), True),
+                _PlannedStep(SendStep.PAUSE, lambda: self._sleep(pause), False, pause),
+            ]
         started = self._clock()
         try:
             async with asyncio.timeout(profile.typing.max_seconds + self._timings.pre_send_margin):
@@ -429,20 +465,28 @@ class OutboxSender:
                 "limits": [f"{limit.scope}_{limit.window}" for limit in limits.reached],
             },
         )
-        for limit in limits.reached:
-            if limit.window in NOTIFIED_LIMIT_WINDOWS:
-                await self._notify_limit(limit.scope, limit.window, row.contact_id, now)
+        for hit in limits.hits:
+            if hit.limit.window in NOTIFIED_LIMIT_WINDOWS:
+                await self._notify_limit(hit, row.contact_id, now)
 
-    async def _notify_limit(
-        self, scope: LimitScope, window: LimitWindow, contact_id: int, now: datetime
-    ) -> None:
-        last = self._limit_notified_at.get((scope, window))
+    async def _notify_limit(self, hit: LimitHit, contact_id: int, now: datetime) -> None:
+        kind = (hit.limit.scope, hit.limit.window)
+        last = self._limit_notified_at.get(kind)
         interval = timedelta(seconds=self._timings.limit_notice_interval)
         if last is not None and now - last < interval:
             return
-        self._limit_notified_at[(scope, window)] = now
+        profile = await self._schedule.get_profile()
+        self._limit_notified_at[kind] = now
         await self._notify(
-            self._notices.limit_reached[(scope, window)].format(contact_id=contact_id)
+            self._notices.limit_reached[kind].format(
+                contact_id=contact_id,
+                limit=hit.limit.maximum,
+                counted=hit.counted,
+                free_at=hit.frees_at.astimezone(profile.zone).strftime(
+                    self._notices.limit_time_format
+                ),
+                timezone=profile.timezone,
+            )
         )
 
     async def _handle_failure(self, row: ScheduledMessage, failure: SendFailure) -> None:

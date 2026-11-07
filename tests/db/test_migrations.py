@@ -67,6 +67,7 @@ EXPECTED_CONSTRAINTS = {
     "uq_style_examples_content_hash",
     "pk_scheduled_messages",
     "fk_scheduled_messages_contact_id_contacts",
+    "fk_scheduled_messages_follows_id_scheduled_messages",
     "ck_scheduled_messages_text_not_empty",
     "ck_scheduled_messages_state_allowed",
     "ck_scheduled_messages_source_allowed",
@@ -83,6 +84,7 @@ EXPECTED_INDEXES = {
     "ix_messages_contact_id_created_at",
     "ix_messages_direction_created_at",
     "ix_scheduled_messages_state_send_at",
+    "ix_scheduled_messages_follows_id",
 }
 PARTIAL_UNIQUE_INDEX = "uq_scheduled_messages_contact_id_trigger_message_id"
 BACKFILL_CONTACT_ID = 1
@@ -247,13 +249,86 @@ async def test_revision_0008_follows_0007(alembic_config: Config) -> None:
     assert revision.down_revision == "0007"
 
 
-async def test_revision_0009_is_the_head_and_follows_0008(alembic_config: Config) -> None:
+async def test_revision_0009_follows_0008(alembic_config: Config) -> None:
     script = ScriptDirectory.from_config(alembic_config)
 
-    assert script.get_heads() == ["0009"]
     revision = script.get_revision("0009")
     assert revision is not None
     assert revision.down_revision == "0008"
+
+
+async def test_revision_0010_is_the_head_and_follows_0009(alembic_config: Config) -> None:
+    script = ScriptDirectory.from_config(alembic_config)
+
+    assert script.get_heads() == ["0010"]
+    revision = script.get_revision("0010")
+    assert revision is not None
+    assert revision.down_revision == "0009"
+
+
+async def _follows_id_columns(url: URL) -> list[tuple[object, ...]]:
+    return await fetch_all(
+        url,
+        "SELECT is_nullable, data_type FROM information_schema.columns "
+        "WHERE table_name = 'scheduled_messages' AND column_name = 'follows_id'",
+    )
+
+
+async def test_revision_0010_adds_follows_id_and_downgrades_to_0009_keeping_the_rows(
+    database_url: URL, alembic_config: Config
+) -> None:
+    await asyncio.to_thread(command.upgrade, alembic_config, "0009")
+    await execute(
+        database_url,
+        "INSERT INTO contacts (tg_id, status) "  # noqa: S608
+        f"VALUES ({FAKE_TELEGRAM_ID}, 'active')",
+    )
+    await execute(
+        database_url,
+        "INSERT INTO scheduled_messages (contact_id, text, source, send_at, due_at) "
+        "SELECT id, 'invented part one', 'autopilot', now(), now() FROM contacts",
+    )
+
+    await asyncio.to_thread(command.upgrade, alembic_config, "0010")
+
+    assert await _follows_id_columns(database_url) == [("YES", "bigint")]
+    assert await fetch_all(database_url, "SELECT follows_id FROM scheduled_messages") == [(None,)]
+    await execute(
+        database_url,
+        "INSERT INTO scheduled_messages (contact_id, text, source, send_at, due_at, follows_id) "
+        "SELECT contact_id, 'invented part two', 'autopilot', now(), now(), id "
+        "FROM scheduled_messages",
+    )
+
+    await asyncio.to_thread(command.downgrade, alembic_config, "0009")
+
+    assert await _follows_id_columns(database_url) == []
+    assert await fetch_all(
+        database_url, "SELECT text, state, cancel_reason FROM scheduled_messages ORDER BY id"
+    ) == [
+        ("invented part one", "scheduled", None),
+        ("invented part two", "cancelled", "predecessor"),
+    ]
+
+    await asyncio.to_thread(command.upgrade, alembic_config, "head")
+
+    assert await _follows_id_columns(database_url) == [("YES", "bigint")]
+
+
+async def test_follows_id_refuses_a_row_that_does_not_exist(migrated_url: URL) -> None:
+    await execute(
+        migrated_url,
+        "INSERT INTO contacts (tg_id, status) "  # noqa: S608
+        f"VALUES ({FAKE_TELEGRAM_ID}, 'active')",
+    )
+
+    with pytest.raises(DBAPIError):
+        await execute(
+            migrated_url,
+            "INSERT INTO scheduled_messages "
+            "(contact_id, text, source, send_at, due_at, follows_id) "
+            "SELECT id, 'invented part', 'autopilot', now(), now(), 987654 FROM contacts",
+        )
 
 
 async def _autopilot_state_rows(url: URL) -> list[tuple[object, ...]]:

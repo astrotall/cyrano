@@ -65,6 +65,7 @@ from cyrano.domain.outbox import (
     ERROR_RATE_LIMITED,
     ERROR_UNCERTAIN,
     LIMIT_NOTICE_INTERVAL_SECONDS,
+    LIMIT_WINDOW_SECONDS,
     ROW_STALE_AFTER_SECONDS,
     STALE_NOTICE_CONTACT_IDS_MAX,
     STALE_NOTICE_INTERVAL_SECONDS,
@@ -107,6 +108,7 @@ DISPLAY_NAME = "SafetyNameMarkerZq"
 OTHER_TG_ID = FAKE_TELEGRAM_ID + 1
 FAST_POLL = SenderTimings(poll_interval=0.001)
 NOTICE_INTERVAL = LIMIT_NOTICE_INTERVAL_SECONDS
+LIMIT_NOTICE_TIMEZONE = "UTC"
 ACCOUNT_KINDS = [
     "PeerFloodError",
     "UserDeactivatedError",
@@ -393,6 +395,28 @@ async def test_a_limited_row_of_a_contact_paused_meanwhile_is_cancelled_when_it_
     assert len(transport.calls) == 1
 
 
+def _limit_notice(
+    scope: LimitScope,
+    window: LimitWindow,
+    contact_id: int,
+    free_at: datetime,
+    *,
+    limit: int = 1,
+    counted: int = 1,
+) -> str:
+    return OUTBOX_NOTICES.limit_reached[(scope, window)].format(
+        contact_id=contact_id,
+        limit=limit,
+        counted=counted,
+        free_at=free_at.strftime(OUTBOX_NOTICES.limit_time_format),
+        timezone=LIMIT_NOTICE_TIMEZONE,
+    )
+
+
+def _limit_kind(notice: str) -> str:
+    return notice.split(". ", 1)[0]
+
+
 @pytest.mark.parametrize(
     ("limits", "scope", "window"),
     [
@@ -408,7 +432,9 @@ async def test_an_hourly_or_daily_limit_notifies_once_an_hour_for_its_kind(
     sender = rig.sender(rig.transport(), limits)
     await rig.row()
     await sender.send_next()
-    expected = OUTBOX_NOTICES.limit_reached[(scope, window)].format(contact_id=rig.contact.id)
+    expected = _limit_notice(
+        scope, window, rig.contact.id, FAKE_NOW + timedelta(seconds=LIMIT_WINDOW_SECONDS[window])
+    )
 
     await rig.row()
     await sender.send_next()
@@ -423,7 +449,8 @@ async def test_an_hourly_or_daily_limit_notifies_once_an_hour_for_its_kind(
     await rig.row()
     await sender.send_next()
     await sender.send_next()
-    assert rig.notifier.texts == [expected, expected]
+    assert len(rig.notifier.texts) == 2
+    assert _limit_kind(rig.notifier.texts[1]) == _limit_kind(expected)
 
 
 async def test_a_held_row_coming_back_does_not_repeat_the_notice_within_the_hour(rig: Rig) -> None:
@@ -465,11 +492,17 @@ async def test_two_kinds_at_once_give_one_notice_each(rig: Rig) -> None:
 
     assert sorted(rig.notifier.texts) == sorted(
         [
-            OUTBOX_NOTICES.limit_reached[(LimitScope.GLOBAL, LimitWindow.HOUR)].format(
-                contact_id=rig.contact.id
+            _limit_notice(
+                LimitScope.GLOBAL,
+                LimitWindow.HOUR,
+                rig.contact.id,
+                FAKE_NOW + timedelta(seconds=LIMIT_WINDOW_SECONDS[LimitWindow.HOUR]),
             ),
-            OUTBOX_NOTICES.limit_reached[(LimitScope.CONTACT, LimitWindow.DAY)].format(
-                contact_id=rig.contact.id
+            _limit_notice(
+                LimitScope.CONTACT,
+                LimitWindow.DAY,
+                rig.contact.id,
+                FAKE_NOW + timedelta(seconds=LIMIT_WINDOW_SECONDS[LimitWindow.DAY]),
             ),
         ]
     )

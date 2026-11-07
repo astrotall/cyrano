@@ -45,12 +45,15 @@ What exists now:
   the examples and the reply generator and writes an `autopilot` outbox row, and the app's sender sends
   it (one reply per burst by supersession, CYR-41). The sweeper, `reply_after`, the autopilot stop and
   cooldown and the `autopilot` command belong to it.
+- Multi-line replies (CYR-36): the model puts each message on its own line, the job splits the reply
+  into at most three parts and stores them as one chain of outbox rows (`follows_id`), and the sender
+  sends the parts in order, a short pause apart; the limit notice names the limit, its setting and its
+  numbers.
 - The owner's commands: `login`, `llm-check`, `persona`, `examples`, `reply-preview`, `outbox`,
   `schedule`, `stop-check` and `autopilot` (the list is in the README).
 
 Still planned, each marked with its ticket key where there is one: conversation modes beyond the
-default one (CYR-15), the rest of the control panel (CYR-26), splitting a reply into several lines
-(CYR-36), proactive messages with their limits (CYR-23), contact summaries (CYR-25), the background
+default one (CYR-15), the rest of the control panel (CYR-26), proactive messages with their limits (CYR-23), contact summaries (CYR-25), the background
 jobs of the worker (CYR-23, CYR-24, CYR-25) and a catalog of contacts (no ticket yet).
 Never describe planned behaviour as existing.
 
@@ -136,6 +139,7 @@ Changing any of these is a large change (see Workflow expectations). Reasons:
 │   │                             chat_dialogues (dialogue candidates), chat_export_converter (export to a draft file),
 │   │                             contact_facts (the profile facts that may reach a prompt),
 │   │                             prompt_builder (the layered prompt and its budget), reply_postprocess (reply cleaning),
+│   │                             reply_split (the parts of a multi-line reply),
 │   │                             reply_generator (build, call the LLM, clean),
 │   │                             send_guard (the status guard), send_limiter (the six send limits),
 │   │                             outbox_service (validation and enqueue), outbox_sender (the one sender),
@@ -248,7 +252,7 @@ CYR-18 added the humanization: `domain/schedule.py` (`ScheduleProfile` with its 
 `OutboxSender` (the availability check for autopilot rows; read mark, pause and typing for every row;
 the second guard; `SENDING_STALE_AFTER` computed, 195 s), `schedule_cli.py` with the `schedule` commands and
 their Makefile targets, `examples/schedule.sample.json`, the `schedule*.json` ignore rule, and the
-tests. Splitting a reply is CYR-36.
+tests. Splitting a reply came with CYR-36.
 CYR-21 added the auto-pause on a manual message: the `PauseReason` enum and the nullable
 `contacts.pause_reason` (migration `0007`, a check constraint, no backfill), the `pause_reason`
 argument and the `changed` flag of `ContactRepository.set_status` (`StatusChange`), the recipient-rejection pause
@@ -301,6 +305,18 @@ migrations and the service modules against the README, `architecture.md` and thi
 CYR-42 removed every docstring and comment from `src/`, `tests/` and `migrations/` (only tool pragmas
 stay), moved the two argparse descriptions that read `__doc__` into named constants, and added
 `tests/test_no_comments_or_docstrings.py`, which enforces the rule.
+CYR-36 added the multi-line replies: `MAX_REPLY_PARTS` and `REPLY_PART_JOINER` in `domain/reply.py`,
+`services/reply_split.py` (`split_reply`), `ScheduledMessage.follows_id` and `CANCEL_REASON_PREDECESSOR`,
+migration `0010` (`scheduled_messages.follows_id`, a nullable indexed foreign key to the same table), the
+repository operations `enqueue_sequence`, `schedule_followers`, `cancel_orphaned_followers` and
+`root_trigger_id` with the extended claim rule and the extended job-time cancellation,
+`OutboxService.enqueue_sequence`, the split in the reply job (`ReplyJobResult.parts`), the follower rules
+of `OutboxSender` (claim after the predecessor was sent, typing only, no availability check, the split
+pause, supersession by a newer incoming message only, the orphan cancel each poll), the profile field
+`split_pause_seconds` with its `schedule show` line and the sample, the new length rule of the
+instructions, the numbered parts of `reply-preview`, `LimitHit` in the limiter and the limit notice with
+its numbers, setting and local time (`SenderNotices.limit_time_format`), and the tests with the new scans
+in `tests/test_one_sender.py`.
 
 ## Detailed guides
 

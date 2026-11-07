@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass, field
-from datetime import timedelta
+from datetime import datetime, timedelta
 
 import pytest
 
@@ -266,10 +266,15 @@ class _StatusRecordingContacts(SqlContactRepository):
         *,
         mode_id: int | None = None,
         pause_reason: PauseReason | None = None,
+        reply_after: datetime | None = None,
     ) -> StatusChange:
         self.status_calls.append(status)
         return await super().set_status(
-            contact_id, status, mode_id=mode_id, pause_reason=pause_reason
+            contact_id,
+            status,
+            mode_id=mode_id,
+            pause_reason=pause_reason,
+            reply_after=reply_after,
         )
 
 
@@ -344,6 +349,7 @@ async def test_a_pause_made_first_by_another_writer_gets_no_notice(
             *,
             mode_id: int | None = None,
             pause_reason: PauseReason | None = None,
+            reply_after: datetime | None = None,
         ) -> StatusChange:
             await super().set_status(contact_id, status, pause_reason=PauseReason.MANUAL_MESSAGE)
             return await super().set_status(contact_id, status, pause_reason=pause_reason)
@@ -368,6 +374,7 @@ async def test_a_refused_transition_is_not_active(rig: Rig, contacts: SqlContact
             *,
             mode_id: int | None = None,
             pause_reason: PauseReason | None = None,
+            reply_after: datetime | None = None,
         ) -> StatusChange:
             raise InvalidStatusTransition(ContactStatus.IGNORED, status)
 

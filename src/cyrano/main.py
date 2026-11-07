@@ -14,17 +14,26 @@ from datetime import UTC, datetime
 
 from sqlalchemy.exc import SQLAlchemyError
 
+from cyrano.autopilot_cli import (
+    AutopilotCommands,
+    AutopilotRequest,
+    AutopilotUsageError,
+    add_autopilot_parser,
+    autopilot_request,
+)
 from cyrano.bot.app import ControlBot
 from cyrano.bot.errors import ControlBotError, PollingFailed
 from cyrano.bot.notifier import OUTBOX_NOTICES
 from cyrano.config import ConfigError, Settings, load_settings
 from cyrano.convert_cli import add_convert_parser, convert_request, run_convert
 from cyrano.db.repositories import (
+    SqlAutopilotStateRepository,
     SqlContactRepository,
     SqlMessageRepository,
     SqlModeRepository,
     SqlOutboxRepository,
     SqlPersonaRepository,
+    SqlReplyBacklogRepository,
     SqlScheduleProfileRepository,
     SqlSenderStateRepository,
     SqlStyleExampleRepository,
@@ -56,6 +65,7 @@ from cyrano.schedule_cli import (
     add_schedule_parser,
     schedule_request,
 )
+from cyrano.services.autopilot import AutopilotScheduler, AutopilotSweeper
 from cyrano.services.card_actions import CardActions
 from cyrano.services.card_announcer import CardAnnouncer
 from cyrano.services.contact_events import InMemoryContactEvents
@@ -91,6 +101,7 @@ from cyrano.userbot.leomatch_source import TelethonLeomatchSource
 from cyrano.userbot.login import run_login
 from cyrano.userbot.profile_source import TelethonProfileSource
 from cyrano.userbot.runner import Userbot
+from cyrano.worker.queue import ArqReplyJobQueue
 
 logger = logging.getLogger("cyrano")
 
@@ -104,6 +115,7 @@ EXIT_REPLY_PREVIEW_ERROR = 1
 EXIT_OUTBOX_ERROR = 1
 EXIT_SCHEDULE_ERROR = 1
 EXIT_STOP_CHECK_ERROR = 1
+EXIT_AUTOPILOT_ERROR = 1
 LOGIN_CANCELLED_MESSAGE = "Login cancelled. Nothing was saved."
 POLLING_ENDED_REASON = "polling ended unexpectedly"
 STORAGE_FAILED_MESSAGE = "storage failed: {error}"
@@ -131,6 +143,18 @@ def _report_sender_exit(task: asyncio.Task[None]) -> None:
     error = task.exception()
     if error is not None:
         logger.error("outbox sender stopped", extra={"error": type(error).__name__})
+
+
+def _report_sweeper_exit(task: asyncio.Task[None]) -> None:
+    if task.cancelled():
+        return
+    error = task.exception()
+    if error is not None:
+        logger.error("autopilot sweeper stopped", extra={"error": type(error).__name__})
+
+
+def _utc_now() -> datetime:
+    return datetime.now(UTC)
 
 
 def _watch_polling(
@@ -171,7 +195,24 @@ async def run(
     outbox = SqlOutboxRepository(session_factory)
     control_bot = ControlBot(settings, CardActions(contacts, modes), PauseActions(contacts))
     hand_over = HandOverService(contacts, messages, outbox, control_bot.hand_over_notifier)
-    intake = IntakeService(contacts, messages, new_contacts, hand_over=hand_over)
+    autopilot_state = SqlAutopilotStateRepository(session_factory)
+    reply_jobs = ArqReplyJobQueue(settings)
+    scheduler = AutopilotScheduler(
+        contacts,
+        autopilot_state,
+        reply_jobs,
+        settings,
+        debounce_seconds=settings.autopilot_debounce_seconds,
+        clock=_utc_now,
+    )
+    intake = IntakeService(
+        contacts,
+        messages,
+        new_contacts,
+        hand_over=hand_over,
+        scheduler=scheduler,
+        clock=_utc_now,
+    )
     detector = ManualMessageDetector(contacts, messages, outbox, control_bot.manual_pause_notifier)
     access = client_factory(settings)
     client = access.client
@@ -196,13 +237,23 @@ async def run(
         SendGuard(settings),
         OUTBOX_NOTICES,
     )
+    sweeper = AutopilotSweeper(
+        SqlReplyBacklogRepository(session_factory),
+        autopilot_state,
+        reply_jobs,
+        settings,
+        debounce_seconds=settings.autopilot_debounce_seconds,
+        clock=_utc_now,
+    )
     heartbeat = asyncio.create_task(heartbeat_loop(settings.heartbeat_path, heartbeat_interval))
     collector_task: asyncio.Task[None] | None = None
     announcer_task: asyncio.Task[None] | None = None
     polling_task: asyncio.Task[None] | None = None
     sender_task: asyncio.Task[None] | None = None
+    sweeper_task: asyncio.Task[None] | None = None
     polling_failures: list[ControlBotError] = []
     try:
+        await reply_jobs.start()
         await userbot.start(stop)
         if not stop.is_set():
             collector_task = asyncio.create_task(collector.run())
@@ -215,11 +266,16 @@ async def run(
             )
             sender_task = asyncio.create_task(sender.run())
             sender_task.add_done_callback(_report_sender_exit)
+            sweeper_task = asyncio.create_task(sweeper.run())
+            sweeper_task.add_done_callback(_report_sweeper_exit)
         await userbot.run_until(stop)
         if polling_failures:
             raise polling_failures[0]
     finally:
         logger.info("cyrano shutting down", extra={"service": "app"})
+        if sweeper_task is not None:
+            sweeper_task.cancel()
+            await asyncio.gather(sweeper_task, return_exceptions=True)
         if sender_task is not None:
             sender_task.cancel()
             await asyncio.gather(sender_task, return_exceptions=True)
@@ -234,6 +290,7 @@ async def run(
             collector_task.cancel()
             await asyncio.gather(collector_task, return_exceptions=True)
         await userbot.stop()
+        await reply_jobs.close()
         heartbeat.cancel()
         with contextlib.suppress(asyncio.CancelledError):
             await heartbeat
@@ -380,6 +437,25 @@ async def _run_stop_check_command(settings: Settings, contact_id: int) -> int:
         await engine.dispose()
 
 
+async def _run_autopilot_command(settings: Settings, request: AutopilotRequest) -> int:
+    engine = build_engine(settings)
+    session_factory = build_session_factory(engine)
+    commands = AutopilotCommands(
+        SqlAutopilotStateRepository(session_factory),
+        SqlOutboxRepository(session_factory),
+        SqlReplyBacklogRepository(session_factory),
+        enabled=settings.autopilot_enabled,
+        clock=_utc_now,
+    )
+    try:
+        return await commands.run(request)
+    except (SQLAlchemyError, OSError) as exc:
+        print(STORAGE_FAILED_MESSAGE.format(error=type(exc).__name__), file=sys.stderr)
+        return EXIT_AUTOPILOT_ERROR
+    finally:
+        await engine.dispose()
+
+
 def _parse_args(argv: Sequence[str] | None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(prog="python -m cyrano", description=__doc__)
     commands = parser.add_subparsers(dest="command")
@@ -390,6 +466,7 @@ def _parse_args(argv: Sequence[str] | None) -> argparse.Namespace:
     add_outbox_parser(commands)
     add_schedule_parser(commands)
     add_stop_check_parser(commands)
+    add_autopilot_parser(commands)
     return parser.parse_args(argv)
 
 
@@ -413,6 +490,11 @@ def main(argv: Sequence[str] | None = None) -> int:
     except StopCheckUsageError as exc:
         print(exc, file=sys.stderr)
         return EXIT_STOP_CHECK_ERROR
+    try:
+        autopilot = autopilot_request(args)
+    except AutopilotUsageError as exc:
+        print(exc, file=sys.stderr)
+        return EXIT_AUTOPILOT_ERROR
     if stop_check is not None and stop_check.text is not None:
         return run_text_check(stop_check.text)
     try:
@@ -427,6 +509,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         return asyncio.run(_run_outbox_command(settings, outbox))
     if schedule is not None:
         return asyncio.run(_run_schedule_command(settings, schedule))
+    if autopilot is not None:
+        return asyncio.run(_run_autopilot_command(settings, autopilot))
     if stop_check is not None and stop_check.contact_id is not None:
         return asyncio.run(_run_stop_check_command(settings, stop_check.contact_id))
     preview = reply_preview_request(args)

@@ -254,7 +254,7 @@ person or says more than needed, then import it with
 `make examples-import FILE=data/style-examples.json`.
 
 **Privacy.** The examples, **including the other person's lines**, are sent to the LLM provider
-inside prompts (`reply-preview` does it today, the autopilot will). Redact names and intimate details, and keep only the context that is needed: a
+inside prompts (`reply-preview` and, since CYR-17, the autopilot's reply job). Redact names and intimate details, and keep only the context that is needed: a
 smaller `--window` means less of the other person's text. The export, the draft and the command
 output are personal data (S9 in [safety-rules.md](safety-rules.md)): they stay under `data/`, which
 git and Docker ignore, and the command never logs or prints a text, a name, an id or a number from

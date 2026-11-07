@@ -1,4 +1,4 @@
-"""Contact statuses, directions, LLM, dialogue, outbox, schedule and stop-trigger vocabulary."""
+"""Statuses, directions, LLM, dialogue, outbox, schedule, stop-trigger and autopilot vocabulary."""
 
 from __future__ import annotations
 
@@ -147,3 +147,50 @@ class HandOverOutcome(StrEnum):
     NOT_ACTIVE = "not_active"
     ALREADY_PAUSED = "already_paused"
     NOT_FOUND = "not_found"
+
+
+class AutopilotStopReason(StrEnum):
+    PROVIDER_AUTH = "provider_auth"
+    PROVIDER_REQUEST = "provider_request"
+    PERSONA_MISSING = "persona_missing"
+
+
+class AutopilotPauseReason(StrEnum):
+    PROVIDER_UNAVAILABLE = "provider_unavailable"
+
+
+class ReplyJobOutcome(StrEnum):
+    QUEUED = "queued"
+    SKIPPED = "skipped"
+    HANDED_OVER = "handed_over"
+    STOPPED = "stopped"
+    PAUSED = "paused"
+
+
+class ReplyJobReason(StrEnum):
+    QUEUED = "queued"
+    SWITCH_OFF = "switch_off"
+    AUTOPILOT_STOPPED = "autopilot_stopped"
+    AUTOPILOT_PAUSED = "autopilot_paused"
+    CONTACT_MISSING = "contact_missing"
+    CONTACT_NOT_ACTIVE = "contact_not_active"
+    TRIGGER_MISSING = "trigger_missing"
+    TRIGGER_NOT_INCOMING = "trigger_not_incoming"
+    TRIGGER_BEFORE_RESUME = "trigger_before_resume"
+    TRIGGER_STALE = "trigger_stale"
+    SUPERSEDED = "superseded"
+    ANSWERED = "answered"
+    ROW_EXISTS = "row_exists"
+    TEXT_TRIGGER = "text_trigger"
+    NEEDS_OWNER = "needs_owner"
+    TRUNCATED = "truncated"
+    REPLY_INVALID = "reply_invalid"
+    PROMPT_TOO_LARGE = "prompt_too_large"
+    MODE_UNAVAILABLE = "mode_unavailable"
+    NO_MESSAGES = "no_messages"
+    PERSONA_MISSING = "persona_missing"
+    PROVIDER_AUTH = "provider_auth"
+    PROVIDER_REQUEST = "provider_request"
+    PROVIDER_UNAVAILABLE = "provider_unavailable"
+    PLAN_NOT_POSSIBLE = "plan_not_possible"
+    ENQUEUE_REFUSED = "enqueue_refused"

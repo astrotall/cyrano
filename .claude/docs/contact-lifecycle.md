@@ -8,9 +8,10 @@ buttons move `pending` to `active` or `ignored`. The outbox and the guarded send
 CYR-19 ([outbox-and-sender.md](outbox-and-sender.md)), and only the owner's test command can add a
 row. Since CYR-22 a recipient rejection moves an `active` contact to `paused`. Since CYR-21 a message
 the owner writes by hand to a contact from the second account does the same, and the owner can resume
-from the notice ([Manual intervention](#manual-intervention-cyr-21)). The other flows that drive the
-lifecycle are **planned**, each marked with its ticket; nothing replies to an `active` contact
-automatically yet.
+from the notice ([Manual intervention](#manual-intervention-cyr-21)). Since CYR-17 the autopilot
+answers `active` contacts automatically, but only with `AUTOPILOT_ENABLED=true`
+([autopilot.md](autopilot.md)). The other flows that drive the lifecycle are **planned**, each
+marked with its ticket.
 
 ## Statuses
 
@@ -20,7 +21,7 @@ automatically yet.
 | --- | --- | --- | --- |
 | `new` | Registered by the userbot from an unknown sender | Never | userbot (CYR-10, exists) |
 | `pending` | A card was delivered to the owner, waiting for a decision | No | card announcer (CYR-12, exists) |
-| `active` | The owner pressed Reply and chose a mode | Yes, via the sender only (the sender exists, CYR-19; the autopilot is CYR-17, so nothing replies automatically yet) | owner (CYR-12 exists, modes CYR-15) |
+| `active` | The owner pressed Reply and chose a mode | Yes: the autopilot writes the reply (CYR-17, only with `AUTOPILOT_ENABLED=true`) and the sender sends it (CYR-19) | owner (CYR-12 exists, modes CYR-15) |
 | `paused` | Stopped by Telegram refusing to deliver to the contact, by a stop-trigger, by a manual message of the owner, by two unanswered proactive messages, or by the owner. The column `pause_reason` says which | No | sender (CYR-22, exists), manual-message detector (CYR-21, exists), hand-over on a stop-trigger (CYR-20, exists), system (CYR-23) or owner |
 | `ignored` | The owner pressed Ignore on the card or on the hand-over notice | Never; silence forever | owner (CYR-12, CYR-20, exist) |
 
@@ -37,7 +38,7 @@ The triggers marked "exists" are implemented; the others are planned. Changing t
 | --- | --- | --- | --- | --- |
 | (none) | `new` | An unknown sender writes to the second account | userbot | CYR-10 (exists) |
 | `new` | `pending` | The card is delivered to the owner (the sender returned success) | card announcer | CYR-12 (exists) |
-| `pending` | `active` | Owner presses Reply and chooses a mode | owner, through the card | CYR-12 (exists), modes CYR-15 |
+| `pending` | `active` | Owner presses Reply and chooses a mode; `reply_after` stays empty | owner, through the card | CYR-12 (exists), modes CYR-15 |
 | `pending` | `ignored` | Owner presses Ignore | owner, through the card | CYR-12 (exists) |
 | `active` | `paused` | Telegram refused a send because of the recipient (blocked, privacy, deactivated, not found, forbidden) | sender | CYR-22 (exists) |
 | `active` | `paused` | A stop-trigger fires on a new incoming message (`pause_reason = stop_trigger`) | `HandOverService` | CYR-20 (exists) |
@@ -45,7 +46,7 @@ The triggers marked "exists" are implemented; the others are planned. Changing t
 | `active` | `paused` | Two proactive messages in a row stay unanswered | system | CYR-23 |
 | `active` | `paused` | The owner pauses the contact | owner | none yet |
 | `active` | `ignored` | The owner ignores the contact | owner | none yet |
-| `paused` | `active` | Owner presses Resume on the manual-pause or the hand-over notice | owner, through `PauseActions` | CYR-21, CYR-20 (exist) |
+| `paused` | `active` | Owner presses Resume on the manual-pause or the hand-over notice; `reply_after` is set to the resume time (CYR-17) | owner, through `PauseActions` | CYR-21, CYR-20 (exist) |
 | `paused` | `ignored` | Owner presses Ignore on the hand-over notice | owner, through `PauseActions.ignore` | CYR-20 (exists) |
 
 Rules:
@@ -67,6 +68,12 @@ Rules:
   CYR-21 has no reason (`NULL`). `set_status` returns the contact plus a `changed` flag, true only
   when the status really changed; a caller that must act once per real change (the notice of a
   manual pause, the hand-over notice) uses that flag.
+- `reply_after` (CYR-17) may be passed only together with `active`; with any other status
+  `ReplyAfterRefused` is raised. It is stored by a call that really activates the contact, a
+  same-status call keeps the stored value, and nothing clears it. `PauseActions.resume` always passes
+  the resume time; the first activation from the card passes nothing, so it stays empty. The autopilot
+  never answers a message whose time is at or before it. See
+  [autopilot.md](autopilot.md#reply_after).
 
 A contact may keep a mode that is later disabled. The mode is resolved when it is used:
 `ModeRepository.resolve_by_id` and `resolve_by_name` return the requested mode if it is enabled and
@@ -81,17 +88,18 @@ otherwise the `default` mode. If `default` itself is missing or disabled they ra
 | 2 | The profile collector gathers nick, name, bio, photo and the matching-bot profile text if present, stores them in `profile` and publishes a `ContactReadyEvent`. Exists, see [Profile collection](#profile-collection-cyr-11) | CYR-11 |
 | 3 | The card announcer sends the owner a card with a Reply button per enabled mode and an Ignore button through the control bot; after the card is delivered the contact becomes `pending`. It starts from the `ContactReadyEvent` or from the sweep. Exists, see [Card announcement](#card-announcement-cyr-12) | CYR-12 |
 | 4 | On Reply the contact becomes `active` with the chosen mode; on Ignore it becomes `ignored`. Exists | CYR-12 |
-| 5 | Each incoming message from an `active` contact schedules one delayed Arq job; a burst of messages is debounced into one job | CYR-17, CYR-19 |
-| 6 | When the job runs it re-checks the status; anything but `active` ends the job with no reply | CYR-19 |
-| 7 | Stop-triggers: the new incoming message of an `active` contact is checked right after it is stored; on a hit the contact becomes `paused`, its scheduled rows are cancelled, the owner is notified and no reply is sent. Exists, see [Stop-triggers](#stop-triggers-cyr-20). The model signal is checked after step 9 by the generator; the autopilot that acts on it is CYR-17 | CYR-20 |
+| 5 | Stop-triggers: the new incoming message of an `active` contact is checked right after it is stored; on a hit the contact becomes `paused`, its scheduled rows are cancelled, the owner is notified and nothing is enqueued. Exists, see [Stop-triggers](#stop-triggers-cyr-20) | CYR-20 |
+| 6 | Each incoming message from an `active` contact enqueues one delayed Arq job (`AUTOPILOT_DEBOUNCE_SECONDS`); of a burst only the job of the newest message generates, the others find a newer message and skip. A sweep every 60 s enqueues what was lost. Exists, behind `AUTOPILOT_ENABLED`, see [autopilot.md](autopilot.md) | CYR-17 |
+| 7 | When the job runs it re-checks the switch, the autopilot state, the status, `reply_after`, the age, supersession and an existing row, runs the stop-trigger detector on the burst again, and only then generates; anything but `active` ends the job with no reply. The model signal hands the contact over | CYR-17, CYR-20 |
 | 8 | The layered prompt is built: persona, mode fragment with few-shot examples, contact summary, last N messages | CYR-14, CYR-15, CYR-16, CYR-25 |
 | 9 | The LLM is called through the LLM interface; the response is validated | CYR-13 |
-| 10 | The reply goes through the sender: status guard, FloodWait handling, rate limits, the read mark, typing and quiet hours (exist, see [outbox-and-sender.md](outbox-and-sender.md)); the delayed send time comes from the planner (exists, see [humanization.md](humanization.md)), which the autopilot will call (CYR-17); splitting (CYR-36) | CYR-19, CYR-22, CYR-18, CYR-17, CYR-36 |
+| 10 | The job asks the planner for the send time ([humanization.md](humanization.md)) and writes an `autopilot` row. The sender sends it: status guard, FloodWait handling, rate limits, the read mark, typing and quiet hours (see [outbox-and-sender.md](outbox-and-sender.md)); splitting (CYR-36) | CYR-19, CYR-22, CYR-18, CYR-17, CYR-36 |
 | 11 | Background: contact summaries, proactive messages, reminders for undecided cards | CYR-25, CYR-23, CYR-24 |
 
-Stop-triggers are detected twice: by the pattern detector on the incoming text (step 7) and by the
-model's `NEEDS_OWNER` signal in the generated reply (after step 9). Low model confidence is that
-signal; there is no numeric threshold.
+Stop-triggers are detected three times: by the pattern detector on the incoming text (step 5), by
+the same detector on the whole burst in the job (step 7), and by the model's `NEEDS_OWNER` signal in
+the generated reply (after step 9). Low model confidence is that signal; there is no numeric
+threshold.
 
 ## Registration (CYR-10)
 
@@ -110,8 +118,8 @@ Steps of `IntakeService.handle`:
 | --- | --- |
 | 1 | NUL bytes are removed from the text, the username and the display name. PostgreSQL rejects them in text and JSONB, so this happens before any repository call |
 | 2 | The contact is read by `tg_id`. If it is missing, it is created with status `new`; there is no transition to `pending` here (the card announcer makes it, CYR-12) |
-| 3 | The message is appended as `incoming`; the unique `(contact_id, tg_message_id)` makes a redelivery a no-op |
-| 4 | `last_message_at` is touched; it only moves forward |
+| 3 | The message is appended as `incoming` with Telegram's send time as `created_at` (see [Message times](#message-times)); the unique `(contact_id, tg_message_id)` makes a redelivery a no-op |
+| 4 | `last_message_at` is touched with the stored `created_at` of that message; it only moves forward |
 | 5 | Only if this call created the contact: a `NewContactEvent` (contact id, message id) is published |
 
 - **What is stored.** On creation the contact gets `tg_id`, `username` and `display_name` (first and
@@ -165,7 +173,7 @@ disconnects. It never sends and never changes a status.
   on Telegram low. Every exception of one event is caught and logged with the class name and a
   counter; only cancellation stops the loop.
 - **Per contact.** Skip if `collected_at` is already set (idempotent; a skipped contact publishes
-  no ready event, its first run did). Otherwise three parts run in order, each in its own
+  no ready event, its first run did). Otherwise four parts run in order, each in its own
   `try/except`, so one failure never affects another:
 
   | Part | What | Source |
@@ -299,9 +307,10 @@ cancelled first on shutdown. It talks to the owner only through the `CardSender`
   stale card shows the truth), and removes the buttons. On `refused`, `not_found` and
   `mode_unavailable` it shows a short alert; if the contact is no longer `pending`, the buttons are
   removed. A card that can no longer be edited is only answered.
-- **Not yet.** Nothing replies to an `active` contact automatically. The autopilot (CYR-17) must also answer
-  messages that arrived while the contact was `pending`. Pausing and resuming from the card is
-  CYR-26; the stop-trigger notice exists (CYR-20).
+- **After Reply.** With `AUTOPILOT_ENABLED=true` the autopilot (CYR-17) also answers the messages that
+  arrived while the contact was `pending`: the first activation leaves `reply_after` empty, and the
+  sweeper finds the newest unanswered message if it is not older than 6 h. Pausing and resuming from
+  the card is CYR-26; the stop-trigger notice exists (CYR-20).
 
 ## Manual intervention (CYR-21)
 
@@ -356,8 +365,9 @@ notice loses the notice, not the pause; the owner then finds the contact paused 
 
 **Resume.** The button calls `PauseActions.resume(contact_id)` through a callback with its own prefix
 (`pause`), handled by the owner-only control bot. Under a lock: the contact must be `paused` and have
-a mode; it becomes `active` with the mode it already had (`set_status` is called without a mode), and
-`pause_reason` is cleared. Outcomes: `applied`; `already_applied` (the contact is already `active`, a
+a mode; it becomes `active` with the mode it already had (`set_status` is called without a mode),
+`pause_reason` is cleared, and `reply_after` is set to the resume time (CYR-17), so the autopilot
+answers only what the contact writes after the resume. Outcomes: `applied`; `already_applied` (the contact is already `active`, a
 second click); `refused` (not paused, or no mode, or the transition is not allowed); `not_found`.
 The bot always answers the callback query. On `applied` and `already_applied` it edits the notice and
 removes the button; otherwise it shows a short alert. A contact paused by a recipient rejection
@@ -392,15 +402,16 @@ Fixed in CYR-9. Table `contacts`:
 | `username`, `display_name` | Nick and name; both may be missing |
 | `status` | One of the statuses above, starts as `new` |
 | `mode_id` | Chosen mode, nullable, foreign key to `modes` |
-| `pause_reason` | Why the contact is `paused`: `manual_message`, `send_rejected` or `owner`; `NULL` for every other status and for contacts paused before CYR-21. A check constraint allows only these values (migration `0007`, no backfill) |
+| `pause_reason` | Why the contact is `paused`: `manual_message`, `send_rejected`, `owner` or `stop_trigger`; `NULL` for every other status and for contacts paused before CYR-21. A check constraint allows only these values (migration `0007`, widened by `0008`, no backfill) |
 | `profile` | JSONB object: bio, photo path, matching-bot card text and card photo paths, `collected_at`. Structure: [The stored profile](#the-stored-profile) (CYR-11) |
 | `summary` | JSONB object: contact summary. Its schema arrives with CYR-25 |
-| `last_message_at` | Time of the latest message **from the contact**; only moves forward, a late event does not take it back. A message we send does not move it (CYR-19) |
+| `last_message_at` | Time of the latest message **from the contact**, in the message time of [Message times](#message-times); only moves forward, a late event or an older replayed message does not take it back. A message we send does not move it (CYR-19) |
+| `reply_after` | When the owner last resumed the contact, or `NULL`; the autopilot never answers a message whose time is at or before it (migration `0009`, CYR-17) |
 | `created_at`, `updated_at` | `updated_at` moves only when a row really changes |
 
 Message history is in table `messages` (the "last N messages" come from here), one row per Telegram
 message: `contact_id`, `direction` (`incoming`, `outgoing`), `text`, `tg_message_id`, `created_at`.
-`incoming` rows are written by the registration above; `outgoing` rows by the sender's
+`incoming` rows are written by the registration above, with Telegram's send time as `created_at`; `outgoing` rows by the sender's
 `complete_send`, in one transaction with marking the outbox row sent, with the Telegram message id and
 Telegram's send time (CYR-19), and, for messages the owner wrote by hand, by the manual-message
 detector with Telegram's send time as `created_at` and without moving `last_message_at` (CYR-21).
@@ -409,6 +420,33 @@ The counter of unanswered proactive messages does not exist yet; CYR-23 adds it 
 All timestamps are `timestamptz` stored in UTC. All of it is personal data: it stays in the database
 and the media volume, is never logged at INFO or above and never goes to git
 ([S9](safety-rules.md)).
+
+## Message times
+
+Both directions store Telegram's send time as `messages.created_at`, never the moment the row was
+inserted. After downtime the userbot catches up on what arrived meanwhile, and an old message must
+look old: the stale age of 6 hours, the job's age check, the sweeper, the `reply_after` comparison, the
+planner's burst and ongoing-conversation rules and the history in the prompt all read this time.
+
+- **The rule for an incoming message** (`message_time` in `services/intake.py`): the time Telegram
+  gives (`IncomingMessage.sent_at`) is stored. If it is more than `MAX_FUTURE_SKEW` (5 minutes,
+  `domain/models.py`) ahead of the clock the intake was built with, the clock's `now` is stored
+  instead, because a clock that is wrong must not make a message newer than every reply. A time
+  within the skew is kept as given. A missing time, or a naive one (an `IncomingMessage` turns a naive
+  `datetime` into a missing time), also becomes `now`. `contacts.last_message_at` is touched with the
+  value that ended up stored.
+- **A second delivery changes nothing.** The unique `(contact_id, tg_message_id)` keeps the first
+  row, so the stored time is the first one even when the second delivery would have been clamped to
+  a later `now`; `last_message_at` is touched with the stored time, so it does not move either.
+- **Ordering is by the pair `(created_at, id)`, never by `id` alone and never by `created_at` alone.**
+  A catch-up can insert an older message with a larger `id`; `created_at` decides which is newer and
+  `id` only breaks a tie (Telegram's time has one-second resolution). It applies to: the last-N
+  listing (`list_last`: the history of the prompt, the planner, the job, the hand-over lines, the
+  card, `stop-check`), the job's supersession and "answered" check (the last element of that listing
+  against the trigger), the planner's burst (a run in that order), the sweeper's and the status
+  count's "latest message of the contact" and the `outgoing_times` of the limits.
+- **Rows stored before this rule keep their old times.** Nothing is migrated: an incoming row stored
+  earlier has the time of its insertion and ages out by the same rules.
 
 ## Idempotency of messages
 
@@ -420,13 +458,15 @@ when both events arrive at the same time. `list_last` returns the newest N in ch
 
 ## Debounce and re-check rules
 
-- Each incoming message schedules one delayed job. A burst of messages must produce one reply,
-  not one per message. The debounce mechanism and the window length are decided in CYR-17.
-- The status is checked twice: when the job is scheduled and again right before the send. Both
-  checks exist in the outbox since CYR-19 ([outbox-and-sender.md](outbox-and-sender.md#the-guard)); the
-  job itself is CYR-17. The second check is made by the sender, not by the caller, so a status change between scheduling,
-  prompt building and sending (for example a stop-trigger or a manual message of the owner) always
-  cancels the reply.
+- Each incoming message of an `active` contact enqueues one job, deferred by
+  `AUTOPILOT_DEBOUNCE_SECONDS` (12 s), with the id `reply-<contact id>-<message id>`. The debounce is
+  by supersession: a job whose message is no longer the latest message of the contact skips, so a
+  burst produces one reply, from the job of its newest message (CYR-17,
+  [autopilot.md](autopilot.md#the-debounce)).
+- The status is checked when the job is enqueued, when it runs, in `OutboxService.enqueue` and again
+  right before the send. The last check is made by the sender, not by the caller, so a status change
+  between scheduling, prompt building and sending (for example a stop-trigger or a manual message of
+  the owner) always cancels the reply ([outbox-and-sender.md](outbox-and-sender.md#the-guard)).
 - A job whose contact is not `active` when it runs finishes without sending.
 - A manual message of the owner in the chat pauses the contact (CYR-21, exists); a job already
   scheduled then ends at the status re-check, and the sender's rows of that contact are cancelled

@@ -131,6 +131,61 @@ async def test_several_incoming_with_a_long_gap_before_them_are_a_new_conversati
     assert NEW_RANGE[0] <= _seconds(plan.send_at, NOON) <= NEW_RANGE[1]
 
 
+async def _store_in_arrival_order(
+    messages: SqlMessageRepository,
+    contact: Contact,
+    *history: tuple[MessageDirection, datetime],
+) -> list[int]:
+    ids: list[int] = []
+    for number, (direction, at) in enumerate(history, start=1):
+        message = await messages.append(
+            MessageCreate(
+                contact_id=contact.id,
+                direction=direction,
+                text=TEXT,
+                tg_message_id=700_000 + number,
+                created_at=at,
+            )
+        )
+        ids.append(message.id)
+    return ids
+
+
+async def test_a_caught_up_message_from_before_a_long_gap_is_not_part_of_the_burst(
+    planner: HumanizationPlanner, messages: SqlMessageRepository, contact: Contact
+) -> None:
+    owner, recent, caught_up = await _store_in_arrival_order(
+        messages,
+        contact,
+        (OUTGOING, NOON - timedelta(minutes=5)),
+        (INCOMING, NOON - timedelta(minutes=1)),
+        (INCOMING, NOON - timedelta(hours=8)),
+    )
+
+    after_gap = await planner.plan(contact.id, recent, NOON)
+    before_gap = await planner.plan(contact.id, caught_up, NOON)
+
+    assert owner < recent < caught_up
+    assert after_gap.reason is PlanReason.ONGOING
+    assert before_gap.reason is PlanReason.DELAYED
+
+
+async def test_plan_latest_follows_the_telegram_time_not_the_arrival_order(
+    planner: HumanizationPlanner, messages: SqlMessageRepository, contact: Contact
+) -> None:
+    await _store_in_arrival_order(
+        messages,
+        contact,
+        (OUTGOING, NOON - timedelta(minutes=5)),
+        (INCOMING, NOON - timedelta(minutes=1)),
+        (INCOMING, NOON - timedelta(hours=8)),
+    )
+
+    plan = await planner.plan_latest(contact.id, NOON)
+
+    assert plan.reason is PlanReason.ONGOING
+
+
 async def test_ongoing_is_measured_from_the_first_message_of_the_burst_not_the_trigger(
     planner: HumanizationPlanner,
     messages: SqlMessageRepository,

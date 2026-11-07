@@ -10,21 +10,30 @@ from cyrano.db.repositories import SqlContactRepository, SqlMessageRepository
 from cyrano.db.session import SessionFactory
 from cyrano.domain.enums import ContactStatus, MessageDirection
 from cyrano.domain.errors import ContactAlreadyExists
-from cyrano.domain.models import Contact, ContactCreate, IncomingMessage, NewContactEvent
+from cyrano.domain.models import (
+    MAX_FUTURE_SKEW,
+    Contact,
+    ContactCreate,
+    IncomingMessage,
+    NewContactEvent,
+)
 from cyrano.services.contact_events import InMemoryContactEvents
-from cyrano.services.intake import IntakeResult, IntakeService
+from cyrano.services.intake import IntakeResult, IntakeService, message_time
 from tests.privacy import FAKE_TELEGRAM_ID, assert_absent
+from tests.services.outbox_fakes import FakeClock
 
 FAKE_TEXT = "fake-intake-text-that-must-not-leak"
 FAKE_NAME = "Fakeintake Person"
 FIRST_SENT_AT = datetime(2025, 3, 1, 12, 0, tzinfo=UTC)
+CLOCK_NOW = datetime(2026, 11, 4, 12, 0, tzinfo=UTC)
+ONE_SECOND = timedelta(seconds=1)
 
 
 def _incoming(
     tg_id: int = FAKE_TELEGRAM_ID,
     tg_message_id: int = 1,
     text: str = FAKE_TEXT,
-    sent_at: datetime = FIRST_SENT_AT,
+    sent_at: datetime | None = FIRST_SENT_AT,
     username: str | None = "fake_intake_user",
     display_name: str | None = FAKE_NAME,
 ) -> IncomingMessage:
@@ -281,3 +290,116 @@ async def test_intake_logs_no_message_text_names_or_telegram_ids(
     assert "cyrano.services.intake" in {r.name for r in caplog.records}
     for personal in (FAKE_TEXT, FAKE_NAME, "fake_intake_user", str(FAKE_TELEGRAM_ID)):
         assert_absent(personal, logged)
+
+
+def _clocked(
+    contacts: SqlContactRepository,
+    messages: SqlMessageRepository,
+    events: InMemoryContactEvents[NewContactEvent],
+    clock: FakeClock,
+) -> IntakeService:
+    return IntakeService(contacts, messages, events, clock=clock)
+
+
+async def _stored_times(
+    messages: SqlMessageRepository, contacts: SqlContactRepository
+) -> tuple[list[datetime], datetime | None]:
+    contact = await contacts.get_by_tg_id(FAKE_TELEGRAM_ID)
+    assert contact is not None
+    stored = await messages.list_last(contact.id, 10)
+    return [message.created_at for message in stored], contact.last_message_at
+
+
+async def test_an_old_message_is_stored_with_its_telegram_time(
+    contacts: SqlContactRepository,
+    messages: SqlMessageRepository,
+    events: InMemoryContactEvents[NewContactEvent],
+) -> None:
+    clock = FakeClock(CLOCK_NOW)
+    sent_at = CLOCK_NOW - timedelta(hours=8)
+
+    await _clocked(contacts, messages, events, clock).handle(_incoming(sent_at=sent_at))
+
+    assert await _stored_times(messages, contacts) == ([sent_at], sent_at)
+
+
+@pytest.mark.parametrize(
+    ("offset", "kept"),
+    [
+        (timedelta(0), True),
+        (MAX_FUTURE_SKEW - ONE_SECOND, True),
+        (MAX_FUTURE_SKEW, True),
+        (MAX_FUTURE_SKEW + ONE_SECOND, False),
+        (timedelta(days=2), False),
+    ],
+)
+async def test_a_future_time_beyond_the_skew_is_replaced_by_now(
+    contacts: SqlContactRepository,
+    messages: SqlMessageRepository,
+    events: InMemoryContactEvents[NewContactEvent],
+    offset: timedelta,
+    kept: bool,
+) -> None:
+    clock = FakeClock(CLOCK_NOW)
+    sent_at = CLOCK_NOW + offset
+
+    await _clocked(contacts, messages, events, clock).handle(_incoming(sent_at=sent_at))
+
+    expected = sent_at if kept else CLOCK_NOW
+    assert await _stored_times(messages, contacts) == ([expected], expected)
+
+
+@pytest.mark.parametrize("missing", [None, datetime(2026, 11, 4, 11, 0)])
+async def test_a_missing_or_naive_time_falls_back_to_now(
+    contacts: SqlContactRepository,
+    messages: SqlMessageRepository,
+    events: InMemoryContactEvents[NewContactEvent],
+    missing: datetime | None,
+) -> None:
+    clock = FakeClock(CLOCK_NOW)
+
+    await _clocked(contacts, messages, events, clock).handle(_incoming(sent_at=missing))
+
+    assert await _stored_times(messages, contacts) == ([CLOCK_NOW], CLOCK_NOW)
+
+
+def test_message_time_keeps_a_past_time_and_replaces_a_missing_or_far_future_one() -> None:
+    past = CLOCK_NOW - timedelta(hours=1)
+
+    assert message_time(past, CLOCK_NOW) == past
+    assert message_time(None, CLOCK_NOW) == CLOCK_NOW
+    assert message_time(CLOCK_NOW + MAX_FUTURE_SKEW, CLOCK_NOW) == CLOCK_NOW + MAX_FUTURE_SKEW
+    assert message_time(CLOCK_NOW + MAX_FUTURE_SKEW + ONE_SECOND, CLOCK_NOW) == CLOCK_NOW
+
+
+async def test_an_older_replayed_message_does_not_move_last_message_at_backwards(
+    contacts: SqlContactRepository,
+    messages: SqlMessageRepository,
+    events: InMemoryContactEvents[NewContactEvent],
+) -> None:
+    clock = FakeClock(CLOCK_NOW)
+    service = _clocked(contacts, messages, events, clock)
+    newer = CLOCK_NOW - timedelta(hours=1)
+    older = CLOCK_NOW - timedelta(hours=5)
+
+    await service.handle(_incoming(tg_message_id=2, sent_at=newer))
+    await service.handle(_incoming(tg_message_id=1, sent_at=older))
+
+    assert await _stored_times(messages, contacts) == ([older, newer], newer)
+
+
+async def test_a_second_delivery_of_the_same_message_changes_nothing(
+    contacts: SqlContactRepository,
+    messages: SqlMessageRepository,
+    events: InMemoryContactEvents[NewContactEvent],
+) -> None:
+    clock = FakeClock(CLOCK_NOW)
+    service = _clocked(contacts, messages, events, clock)
+    future = _incoming(tg_message_id=7, sent_at=CLOCK_NOW + timedelta(days=1))
+
+    first = await service.handle(future)
+    clock.advance(3600)
+    second = await service.handle(future)
+
+    assert second.message_id == first.message_id
+    assert await _stored_times(messages, contacts) == ([CLOCK_NOW], CLOCK_NOW)

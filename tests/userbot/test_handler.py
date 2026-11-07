@@ -183,19 +183,28 @@ async def test_malformed_event_does_not_propagate() -> None:
     intake = FakeIntake()
     handler = IncomingHandler(intake)
 
-    await handler.handle(FakeEvent(date=datetime(2025, 1, 1)))
     await handler.handle(FakeEvent(id=0))
     await handler.handle(FakeEvent(sender=FakeSender(id=-5)))
 
-    assert handler.failed == 3
+    assert handler.failed == 2
     assert intake.received == []
+
+
+async def test_a_naive_event_time_reaches_the_intake_as_a_missing_time() -> None:
+    intake = FakeIntake()
+    handler = IncomingHandler(intake)
+
+    await handler.handle(FakeEvent(date=datetime(2025, 1, 1)))
+
+    assert [m.sent_at for m in intake.received] == [None]
+    assert handler.failed == 0
 
 
 async def test_one_failure_does_not_stop_later_messages() -> None:
     intake = FakeIntake()
     handler = IncomingHandler(intake)
 
-    await handler.handle(FakeEvent(date=datetime(2025, 1, 1)))
+    await handler.handle(FakeEvent(id=0))
     await handler.handle(FakeEvent(id=79))
 
     assert [m.tg_message_id for m in intake.received] == [79]
@@ -357,7 +366,7 @@ async def test_a_malformed_event_is_not_retried() -> None:
     intake = FakeIntake()
     handler = IncomingHandler(intake, sleep=sleep)
 
-    await handler.handle(FakeEvent(date=datetime(2025, 1, 1)))
+    await handler.handle(FakeEvent(id=0))
 
     assert intake.calls == 0
     assert sleep.delays == []

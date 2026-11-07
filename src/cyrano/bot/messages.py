@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from cyrano.domain.enums import TriggerClass
+from cyrano.domain.enums import AutopilotPauseReason, AutopilotStopReason, TriggerClass
 
 START_TEXT = (
     "Привет! Я пульт управления Cyrano. Когда в аккаунт придёт новый контакт, "
@@ -54,8 +54,8 @@ HAND_OVER_PAUSED = (
 )
 HAND_OVER_REASON = "Причина: {classes}."
 HAND_OVER_SOURCE_TEXT = "Сработало по тексту сообщения контакта."
-HAND_OVER_SOURCE_MODEL = "Модель попросила передать разговор вам."
-HAND_OVER_NO_CLASSES = "тема, на которую ассистент не отвечает сам"
+HAND_OVER_SOURCE_MODEL = "Сработало при подготовке ответа моделью."
+HAND_OVER_NO_CLASSES = "ассистент не может ответить сам, нужно ваше решение"
 HAND_OVER_LINES_TITLE = "Последние сообщения:"
 HAND_OVER_NO_LINES = "Сообщения недоступны."
 HAND_OVER_LINE = "{number}. {speaker}: {text}"
@@ -125,3 +125,25 @@ OUTBOX_LIMIT_CONTACT_HOUR = (
 OUTBOX_LIMIT_CONTACT_DAY = (
     f"Достигнут лимит отправки за сутки для контакта #{{contact_id}}. {OUTBOX_LIMIT_NOTE}"
 )
+
+AUTOPILOT_STOPPED = (
+    "Автопилот остановлен: {reason} ({error}). Новые ответы не готовятся, контактам ничего "
+    "нового не пишется. Устраните причину, затем снимите остановку командой: "
+    "python -m cyrano autopilot resume --yes"
+)
+AUTOPILOT_PAUSED = (
+    "Автопилот на паузе {minutes} мин: {reason} ({error}). После паузы он сам ответит на "
+    "сообщения, которым не больше 6 часов. Снять паузу раньше: python -m cyrano autopilot resume"
+)
+AUTOPILOT_STOP_REASONS = {
+    AutopilotStopReason.PROVIDER_AUTH: "провайдер LLM не принимает ключ",
+    AutopilotStopReason.PROVIDER_REQUEST: (
+        "провайдер LLM отклоняет запросы, например закончился баланс"
+    ),
+    AutopilotStopReason.PERSONA_MISSING: "персона не импортирована",
+}
+AUTOPILOT_PAUSE_REASONS = {
+    AutopilotPauseReason.PROVIDER_UNAVAILABLE: (
+        "провайдер LLM недоступен или ответ не удалось получить после нескольких попыток"
+    ),
+}

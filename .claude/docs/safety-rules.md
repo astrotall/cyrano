@@ -1,11 +1,12 @@
 # Safety rules
 
 **All rules below are planned until their tickets land, except where a rule says it exists.** S1
-and S2 are enforced since CYR-19: one guarded sender is the only way to a contact, and nothing
-writes to the outbox except the owner's explicit test command, so nothing is sent automatically.
+and S2 are enforced since CYR-19: one guarded sender is the only way to a contact. Since CYR-17 the
+autopilot job writes `autopilot` rows too, only with `AUTOPILOT_ENABLED=true`, and the same sender sends
+them.
 S8 is enforced since CYR-12. S5 is enforced since CYR-22. S4 is enforced since CYR-21. S6 is enforced since CYR-18, except the
-splitting (CYR-36). S3 and S10 are enforced since CYR-20 for incoming texts; the model signal exists in
-the generator, which no app code calls yet (CYR-17). The other rules are
+splitting (CYR-36). S3 and S10 are enforced since CYR-20 for incoming texts, and since CYR-17 for the
+whole burst in the autopilot job and for the model signal, on which the job hands over. The other rules are
 not enforced by code yet; they are the contract that the tickets must implement and test. Changing or dropping a rule is a large change (see [CLAUDE.md](../../CLAUDE.md)) and ships
 with the code and the test ([CONTRIBUTING.md](../../CONTRIBUTING.md)). Statuses:
 [contact-lifecycle.md](contact-lifecycle.md).
@@ -22,13 +23,18 @@ only.
   `OutboxService.enqueue`, which refuses without storing anything, and in `OutboxSender` right before
   sending, on a contact it has just re-read; a refusal there cancels the row and nothing is sent. An
   `autopilot` row also needs `AUTOPILOT_ENABLED`; a `manual_test` row does not, but the status check
-  applies to it. Planned: the worker job that schedules automatic replies (CYR-17). Details:
-  [outbox-and-sender.md](outbox-and-sender.md).
+  applies to it. Since CYR-17 the status is also checked when the app enqueues a reply job
+  (`AutopilotScheduler`) and when the job runs (`ReplyJobRunner`, which also skips messages at or before
+  `contacts.reply_after`, older than 6 h, or already answered). Details:
+  [outbox-and-sender.md](outbox-and-sender.md), [autopilot.md](autopilot.md).
 - **How it is tested:** exists. `tests/services/test_send_guard.py` runs the guard over every status,
   source and switch value and an unknown contact, and proves a refused enqueue stores nothing.
   `tests/services/test_outbox_sender.py` proves on real PostgreSQL that a contact that became `paused`
   or `ignored` after the enqueue, a `new` or `pending` contact, a contact missing at send time and an
-  `autopilot` row with the switch off all get no transport call.
+  `autopilot` row with the switch off all get no transport call. `tests/services/test_reply_job.py`,
+  `test_autopilot.py` and `test_autopilot_end_to_end.py` (CYR-17) prove that the job and the scheduler
+  do nothing for a contact that is not `active`, with the switch off, or while the autopilot is stopped
+  or paused, and that a manual message between the job and the send cancels the reply.
 
 ## S2. One sender is the only way out
 
@@ -79,8 +85,10 @@ only.
   sender's second guard; the paused status is honoured by S1. The reply instructions tell the model
   to answer with exactly `NEEDS_OWNER` on the same topics; the generator turns the signal (exact or
   embedded) into `needs_owner` with an empty text, so no text of such a reply can be sent. Low model
-  confidence has no numeric threshold; it is this signal. The autopilot that will hand over on the
-  signal is CYR-17. Details: [stop-triggers.md](stop-triggers.md).
+  confidence has no numeric threshold; it is this signal. Since CYR-17 the autopilot job hands over on
+  the signal (source `model`, no classes) and writes no row, and runs the detector again on the whole
+  burst before it calls the model. Details: [stop-triggers.md](stop-triggers.md),
+  [autopilot.md](autopilot.md).
 - **How it is tested:** exists. `tests/services/test_stop_triggers.py` with
   `tests/services/stop_trigger_phrases.py`: at least 15 positive and 15 close but harmless phrases
   per class, the accepted false positives, case, `ё`, repeats, punctuation, emoji, invisible and
@@ -168,7 +176,7 @@ only.
   and are not sent during quiet hours.
 - **Why:** instant, uniform replies at any hour look automated and draw limits.
 - **Enforced where:** exists (CYR-18), except the splitting (CYR-36, planned). `plan_send_time` in
-  `services/humanization.py` proposes the delayed time; the autopilot that will call it is CYR-17. The
+  `services/humanization.py` proposes the delayed time; the autopilot job calls it since CYR-17. The
   sender, `services/outbox_sender.py`, enforces the rest for itself: an `autopilot` row inside a night or
   busy window goes back to `scheduled` with `error_class = outside_hours`, never dropped, and every row
   goes through the read mark, a pause and typing before the send. A failed read mark or typing never
@@ -235,6 +243,9 @@ only.
   passes `--allow-any-path`.
   Owner notifications about the outbox (CYR-19, CYR-22) carry internal ids, class names, seconds and counts only.
   The manual-pause notice (CYR-21) carries the internal contact id only.
+  The autopilot notices (CYR-17, stopped and paused) carry the reason in plain words, the error class
+  name and the minutes of a pause only: no id, no text, no name. The reply job and the sweeper log
+  internal ids, outcomes, reasons, counters and class names, never a message text or a generated reply.
   The hand-over notice (CYR-20) is the one exception: it carries the display name (at most 60
   characters) and the last 5 message texts (at most 200 characters each), HTML-escaped, because the
   owner must see what to decide on. It goes only to the owner chat through the owner-only control
@@ -253,8 +264,10 @@ only.
   API id appear in the app and worker startup output or in `safe_summary()`, and that every
   setting is either allowlisted or deliberately withheld; the collector tests assert that no
   username, name, bio, Leomatch text, Telegram id or photo path appears in captured log output,
-  failures included. Planned: tests that run the reply pipeline with a fake message and assert that its text
-  does not appear in captured log output at INFO and above. Exists for the LLM client
+  failures included. Exists for the reply pipeline of the autopilot (CYR-17):
+  `tests/services/test_reply_job.py` runs the job with all loggers at DEBUG and asserts that the
+  generated reply, the message texts, the persona, the name, the username and the Telegram id are
+  absent from the JSON-formatted logs and the owner notices. Exists for the LLM client
   (`tests/llm/test_logging.py`, `tests/llm/test_complete_json.py`): all log output is captured at
   DEBUG during retries, invalid JSON replies and failures, and the prompt, the reply, the response
   body and the key are asserted absent; the raw invalid reply is also absent from the raised error.

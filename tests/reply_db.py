@@ -13,13 +13,13 @@ from cyrano.db.repositories import (
 from cyrano.domain.enums import ContactStatus, MessageDirection
 from cyrano.domain.models import Contact, ContactCreate, MessageCreate
 from cyrano.domain.style import StyleExampleCreate
+from cyrano.services.llm_client import LLMClient
 from cyrano.services.persona_service import PersonaService
 from cyrano.services.reply_generator import ReplyGenerator
 from cyrano.services.style_examples import ExampleSelector
 from tests.db.conftest import fetch_all
 from tests.privacy import FAKE_TELEGRAM_ID
 from tests.reply_data import make_builder
-from tests.services.fakes import ScriptedLLMClient
 
 PERSONA_MARKER = "persona-marker-zq lives in an invented town"
 MESSAGE_MARKER = "message-marker-zq"
@@ -54,7 +54,7 @@ class Repositories:
 
     def generator(
         self,
-        client: ScriptedLLMClient,
+        client: LLMClient,
         *,
         history_limit: int = HISTORY_LIMIT,
         budget: int = 1_000_000,

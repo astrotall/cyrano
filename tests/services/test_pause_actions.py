@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import asyncio
-from datetime import timedelta
+from datetime import datetime, timedelta
 
 import pytest
 from sqlalchemy import update
@@ -169,6 +169,7 @@ async def test_a_refused_transition_during_the_resume_is_refused(
             *,
             mode_id: int | None = None,
             pause_reason: PauseReason | None = None,
+            reply_after: datetime | None = None,
         ) -> StatusChange:
             raise InvalidStatusTransition(ContactStatus.IGNORED, status)
 
@@ -329,6 +330,7 @@ async def test_a_refused_transition_during_the_ignore_is_refused(
             *,
             mode_id: int | None = None,
             pause_reason: PauseReason | None = None,
+            reply_after: datetime | None = None,
         ) -> StatusChange:
             raise InvalidStatusTransition(ContactStatus.IGNORED, status)
 
@@ -354,3 +356,65 @@ async def test_an_ignored_contact_cannot_be_resumed(
     await actions.ignore(paused.id)
 
     assert await actions.resume(paused.id) is ResumeOutcome.REFUSED
+
+
+async def test_resume_stores_the_resume_time_as_reply_after(
+    contacts: SqlContactRepository, modes: SqlModeRepository
+) -> None:
+    paused = await _paused_by_manual_message(contacts, modes)
+    clock = FakeClock()
+
+    outcome = await PauseActions(contacts, clock=clock).resume(paused.id)
+
+    current = await contacts.get_by_id(paused.id)
+    assert outcome is ResumeOutcome.APPLIED
+    assert current is not None
+    assert (current.status, current.reply_after) == (ContactStatus.ACTIVE, clock())
+
+
+async def test_a_second_resume_keeps_the_first_reply_after(
+    contacts: SqlContactRepository, modes: SqlModeRepository
+) -> None:
+    paused = await _paused_by_manual_message(contacts, modes)
+    clock = FakeClock()
+    actions = PauseActions(contacts, clock=clock)
+    await actions.resume(paused.id)
+    first = clock()
+    clock.advance(30)
+
+    assert await actions.resume(paused.id) is ResumeOutcome.ALREADY_APPLIED
+
+    current = await contacts.get_by_id(paused.id)
+    assert current is not None
+    assert current.reply_after == first
+
+
+async def test_resume_always_passes_a_reply_after(
+    contacts: SqlContactRepository, modes: SqlModeRepository
+) -> None:
+    paused = await _paused_by_manual_message(contacts, modes)
+    seen: list[datetime | None] = []
+
+    class _Recording(SqlContactRepository):
+        async def set_status(
+            self,
+            contact_id: int,
+            status: ContactStatus,
+            *,
+            mode_id: int | None = None,
+            pause_reason: PauseReason | None = None,
+            reply_after: datetime | None = None,
+        ) -> StatusChange:
+            seen.append(reply_after)
+            return await super().set_status(
+                contact_id,
+                status,
+                mode_id=mode_id,
+                pause_reason=pause_reason,
+                reply_after=reply_after,
+            )
+
+    await PauseActions(_Recording(contacts._session_factory)).resume(paused.id)
+
+    assert len(seen) == 1
+    assert seen[0] is not None

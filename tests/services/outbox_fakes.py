@@ -365,10 +365,15 @@ class InMemoryOutbox:
         rows = [row for row in self.rows.values() if state is None or row.state is state]
         return sorted(rows, key=lambda row: row.id, reverse=True)[:limit]
 
-    async def count_by_state(self) -> dict[OutboxState, int]:
-        return {
-            state: sum(row.state is state for row in self.rows.values()) for state in OutboxState
-        }
+    async def has_row_for_trigger(self, contact_id: int, trigger_message_id: int) -> bool:
+        return any(
+            (row.contact_id, row.trigger_message_id) == (contact_id, trigger_message_id)
+            for row in self.rows.values()
+        )
+
+    async def count_by_state(self, source: OutboxSource | None = None) -> dict[OutboxState, int]:
+        rows = [row for row in self.rows.values() if source is None or row.source is source]
+        return {state: sum(row.state is state for row in rows) for state in OutboxState}
 
 
 class InMemorySenderState:

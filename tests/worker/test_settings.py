@@ -2,12 +2,20 @@ from __future__ import annotations
 
 import importlib
 import json
+import os
+import subprocess
 import sys
 from collections.abc import Iterator
 
 import pytest
+from sqlalchemy.ext.asyncio import AsyncEngine
 
+from cyrano.bot.app import NoticeBot
+from cyrano.domain.autopilot import JOB_MAX_TRIES, JOB_TIMEOUT_SECONDS, REPLY_JOB_NAME
+from cyrano.llm.factory import LLMClientFactory
 from cyrano.logging import JsonFormatter
+from cyrano.services.reply_job import ReplyJobRunner
+from cyrano.worker.jobs import RUNNER_KEY
 from tests.conftest import PERSONAL_SETTING_NAMES, PERSONAL_VALUES, SECRET_VALUES
 from tests.privacy import assert_absent
 
@@ -90,3 +98,98 @@ def test_health_check_interval_is_set(full_env: dict[str, str]) -> None:
     import cyrano.worker.settings as module
 
     assert module.WorkerSettings.health_check_interval == 60
+
+
+def test_worker_settings_register_only_the_reply_job_with_its_limits(
+    full_env: dict[str, str],
+) -> None:
+    import cyrano.worker.settings as module
+    from cyrano.worker.jobs import reply_to_contact
+
+    settings = module.WorkerSettings
+
+    assert settings.functions == (reply_to_contact,)
+    assert reply_to_contact.__qualname__ == REPLY_JOB_NAME
+    assert not hasattr(module, "noop")
+    assert settings.max_tries == JOB_MAX_TRIES == 4
+    assert settings.keep_result == 0
+    assert settings.job_timeout == JOB_TIMEOUT_SECONDS == 300
+    assert 1 <= settings.max_jobs <= 4
+    assert settings.retry_jobs is True
+    assert settings.health_check_interval == 60
+
+
+async def test_startup_builds_the_runner_and_shutdown_closes_everything(
+    full_env: dict[str, str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import cyrano.worker.settings as module
+
+    closed: list[str] = []
+
+    async def close_bot(self: NoticeBot) -> None:
+        closed.append("bot")
+
+    async def close_llm(self: LLMClientFactory) -> None:
+        closed.append("llm")
+
+    async def dispose(self: AsyncEngine, close: bool = True) -> None:
+        closed.append("engine")
+
+    monkeypatch.setattr(NoticeBot, "close", close_bot)
+    monkeypatch.setattr(LLMClientFactory, "aclose", close_llm)
+    monkeypatch.setattr(AsyncEngine, "dispose", dispose)
+    ctx: dict[str, object] = {}
+
+    await module.startup(ctx)
+    runner = ctx[RUNNER_KEY]
+    await module.shutdown(ctx)
+
+    assert isinstance(runner, ReplyJobRunner)
+    assert closed == ["bot", "llm", "engine"]
+    assert ctx == {}
+
+
+async def test_a_failing_bot_close_still_closes_the_client_and_the_engine(
+    full_env: dict[str, str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from cyrano.config import load_settings
+    from cyrano.worker.composition import build_worker_resources
+
+    closed: list[str] = []
+
+    async def close_bot(self: NoticeBot) -> None:
+        raise RuntimeError("invented close failure")
+
+    async def close_llm(self: LLMClientFactory) -> None:
+        closed.append("llm")
+
+    async def dispose(self: AsyncEngine, close: bool = True) -> None:
+        closed.append("engine")
+
+    monkeypatch.setattr(NoticeBot, "close", close_bot)
+    monkeypatch.setattr(LLMClientFactory, "aclose", close_llm)
+    monkeypatch.setattr(AsyncEngine, "dispose", dispose)
+    resources = build_worker_resources(load_settings(env_file=None))
+
+    with pytest.raises(RuntimeError):
+        await resources.aclose()
+
+    assert closed == ["llm", "engine"]
+
+
+def test_the_worker_never_imports_telethon(full_env: dict[str, str]) -> None:
+    probe = (
+        "import sys, cyrano.worker.settings; "
+        "assert not [name for name in sys.modules if name.split('.')[0] == 'telethon']"
+    )
+    completed = subprocess.run(  # noqa: S603
+        [sys.executable, "-c", probe],
+        capture_output=True,
+        text=True,
+        env={**os.environ, **full_env},
+        cwd="/",
+        timeout=60,
+        check=False,
+    )
+
+    assert completed.returncode == 0, completed.stderr[-400:]

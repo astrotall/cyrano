@@ -106,6 +106,7 @@ class ContactRow(Base):
     profile: Mapped[dict[str, object]] = mapped_column(JSONB, server_default=EMPTY_JSON_OBJECT)
     summary: Mapped[dict[str, object]] = mapped_column(JSONB, server_default=EMPTY_JSON_OBJECT)
     last_message_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    reply_after: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
@@ -133,6 +134,7 @@ class MessageRow(Base):
 PERSONA_ROW_ID = 1
 SENDER_STATE_ROW_ID = 1
 SCHEDULE_PROFILE_ROW_ID = 1
+AUTOPILOT_STATE_ROW_ID = 1
 
 
 class PersonaRow(Base):
@@ -226,6 +228,20 @@ class ScheduleProfileRow(Base):
 
     id: Mapped[int] = mapped_column(SmallInteger, primary_key=True, autoincrement=False)
     data: Mapped[dict[str, object]] = mapped_column(JSONB)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
+    )
+
+
+class AutopilotStateRow(Base):
+    __tablename__ = "autopilot_state"
+    __table_args__ = (CheckConstraint(f"id = {AUTOPILOT_STATE_ROW_ID}", name="single_row"),)
+
+    id: Mapped[int] = mapped_column(SmallInteger, primary_key=True, autoincrement=False)
+    stopped: Mapped[bool] = mapped_column(Boolean, server_default=false())
+    stop_reason: Mapped[str | None] = mapped_column(Text)
+    paused_until: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    pause_reason: Mapped[str | None] = mapped_column(Text)
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
     )

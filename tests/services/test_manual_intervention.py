@@ -459,6 +459,7 @@ async def test_a_refused_transition_during_the_pause_only_stores_the_message(
             *,
             mode_id: int | None = None,
             pause_reason: PauseReason | None = None,
+            reply_after: datetime | None = None,
         ) -> StatusChange:
             raise InvalidStatusTransition(ContactStatus.IGNORED, status)
 
@@ -484,6 +485,7 @@ async def test_a_pause_that_another_writer_made_first_gets_no_second_notice(
             *,
             mode_id: int | None = None,
             pause_reason: PauseReason | None = None,
+            reply_after: datetime | None = None,
         ) -> StatusChange:
             await super().set_status(contact_id, status, pause_reason=PauseReason.SEND_REJECTED)
             return await super().set_status(contact_id, status, pause_reason=pause_reason)
@@ -562,12 +564,17 @@ async def test_a_failure_before_the_pause_is_raised_and_a_repeat_pauses_exactly_
             *,
             mode_id: int | None = None,
             pause_reason: PauseReason | None = None,
+            reply_after: datetime | None = None,
         ) -> StatusChange:
             if self.failures:
                 self.failures -= 1
                 raise ConnectionError("fake database failure")
             return await super().set_status(
-                contact_id, status, mode_id=mode_id, pause_reason=pause_reason
+                contact_id,
+                status,
+                mode_id=mode_id,
+                pause_reason=pause_reason,
+                reply_after=reply_after,
             )
 
     detector = rig.detector(contacts=_FailsOnce(contacts._session_factory))

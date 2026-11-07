@@ -3,10 +3,12 @@
 Exists since CYR-18. Replies should look like they come from a person with a daily routine, and the
 account should stay within safe behaviour. Two parts do this:
 
-- **The planner** decides **when** a reply goes out. It is pure and writes nothing. The autopilot
-  (CYR-17, not built) will call it; today only the owner's `schedule plan` command does.
+- **The planner** decides **when** a reply goes out. It is pure and writes nothing. Since CYR-17 the
+  autopilot job calls it for every reply it writes, with the trigger message and the job's clock, and
+  stores the result as the row's `send_at` and `due_at` ([autopilot.md](autopilot.md)); the owner's
+  `schedule plan` command calls it too.
 - **The pre-send part of the sender** decides **how** it goes out: read mark, a pause, typing, then
-  the message. It runs for every row of the sender today, so also for the owner's test rows.
+  the message. It runs for every row of the sender, the owner's test rows included.
 
 Splitting a reply into several messages is not here: CYR-36. The rule is S6 in
 [safety-rules.md](safety-rules.md); the sender in [outbox-and-sender.md](outbox-and-sender.md).
@@ -78,12 +80,14 @@ Exactly the window length is not ongoing.
 
 **Typing.** `typing_seconds(text, profile) = clamp(len(text) / chars_per_second, min_seconds, max_seconds)`.
 
-**The burst.** `HumanizationPlanner.plan(contact_id, trigger_message_id, now)` reads the last 20
+**The burst.** `HumanizationPlanner.plan(contact_id, trigger_message_id, now)` (called by the
+autopilot job, CYR-17) reads the last 20
 messages of the contact. The burst is the run of consecutive incoming messages that ends with the
 trigger; later messages are ignored. `burst_first_at` is the time of its first message, and
 `previous_activity_at` the time of the message right before it, in either direction, or nothing. A
 trigger that is not an incoming message within those 20 raises `PlanNotPossible`, which carries ids
-only. When the burst fills all 20, there is no previous activity to see, so it counts as new.
+only. When the burst fills all 20, there is no previous activity to see, so it counts as new. A
+`PlanNotPossible` makes the autopilot job skip the message without a row.
 
 `ScheduleService` gives the rest of the code `get_profile()` (stored or default, with the time zone
 filled in) and `blocked_until(now)`.

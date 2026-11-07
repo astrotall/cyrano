@@ -1,4 +1,4 @@
-.PHONY: install check test fmt up down logs migrate revision db-up login login-docker llm-check persona-import examples-import examples-stats examples-convert reply-preview outbox-enqueue outbox-list outbox-cancel outbox-retry outbox-status outbox-resume schedule-import schedule-show schedule-check schedule-plan stop-check setup-hooks
+.PHONY: install check test fmt up down logs migrate revision db-up login login-docker llm-check persona-import examples-import examples-stats examples-convert reply-preview outbox-enqueue outbox-list outbox-cancel outbox-retry outbox-status outbox-resume schedule-import schedule-show schedule-check schedule-plan stop-check autopilot-status autopilot-resume setup-hooks
 
 install:
 	uv sync --locked
@@ -87,6 +87,12 @@ stop-check:
 	@if [ -n "$$CONTACT" ] && [ -n "$$TEXT" ]; then echo 'give exactly one of CONTACT and TEXT' >&2; exit 2; fi
 	@if [ -z "$$CONTACT" ] && [ -z "$$TEXT" ]; then echo 'usage: make stop-check CONTACT=<contact id> | TEXT="<text>"' >&2; exit 2; fi
 	uv run python -m cyrano stop-check $${CONTACT:+"$$CONTACT"} $${TEXT:+--text="$$TEXT"}
+
+autopilot-status:
+	uv run python -m cyrano autopilot status
+
+autopilot-resume:
+	uv run python -m cyrano autopilot resume $${YES:+--yes}
 
 revision:
 	@test -n "$(m)" || (echo 'usage: make revision m="what changed"' >&2; exit 2)

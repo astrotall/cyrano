@@ -13,6 +13,7 @@ from tests.db.conftest import (
     style_examples,
 )
 from tests.reply_db import repos
+from tests.services.autopilot_rig import rig
 
 __all__ = [
     "alembic_config",
@@ -24,6 +25,7 @@ __all__ = [
     "outbox",
     "personas",
     "repos",
+    "rig",
     "schedule_profiles",
     "sender_state",
     "session_factory",

@@ -11,7 +11,7 @@ from pathlib import Path
 from telethon.errors import SessionPasswordNeededError
 
 from cyrano.domain.enums import ContactStatus, ManualMessageOutcome, MessageDirection, PauseReason
-from cyrano.domain.errors import ContactNotFound
+from cyrano.domain.errors import ContactNotFound, ReplyAfterRefused
 from cyrano.domain.models import (
     Contact,
     ContactCreate,
@@ -339,6 +339,7 @@ class InMemoryContacts:
         *,
         mode_id: int | None = None,
         pause_reason: PauseReason | None = None,
+        reply_after: datetime | None = None,
     ) -> StatusChange:
         contact = await self.get_by_id(contact_id)
         if contact is None:
@@ -347,9 +348,13 @@ class InMemoryContacts:
         has_mode = mode_on_activation is not None or contact.mode_id is not None
         if not transition_needed(contact.status, status, has_mode=has_mode):
             return StatusChange.model_validate({**contact.model_dump(), "changed": False})
+        if reply_after is not None and status is not ContactStatus.ACTIVE:
+            raise ReplyAfterRefused(status)
         changes: dict[str, object] = {"status": status, "pause_reason": pause_reason}
         if mode_on_activation is not None:
             changes["mode_id"] = mode_on_activation
+        if reply_after is not None:
+            changes["reply_after"] = reply_after
         changed = contact.model_copy(update=changes)
         self.stored[contact.tg_id] = changed
         self.status_changes.append((contact_id, status))
@@ -421,6 +426,9 @@ class InMemoryContacts:
 class InMemoryMessages:
     def __init__(self) -> None:
         self.stored: list[Message] = []
+
+    async def get(self, message_id: int) -> Message | None:
+        return next((m for m in self.stored if m.id == message_id), None)
 
     async def exists(self, contact_id: int, tg_message_id: int) -> bool:
         return any(

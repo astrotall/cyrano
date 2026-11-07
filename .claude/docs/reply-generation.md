@@ -1,10 +1,11 @@
 # Reply generation
 
-State as of CYR-16: the layered prompt builder, the reply post-processing, the `ReplyGenerator` and
-the `reply-preview` command exist. **Nothing is wired into `main.run`**: no process generates a reply
-by itself, and nothing in this ticket sends a message or writes to the database. The first
-consumer is the autopilot (CYR-17). Since CYR-20 the instructions carry the hand-over rule and the
-generator recognises the `NEEDS_OWNER` signal ([stop-triggers.md](stop-triggers.md)).
+The layered prompt builder, the reply post-processing, the `ReplyGenerator` and the `reply-preview`
+command exist since CYR-16. The generator itself sends nothing and writes nothing. Its consumers are
+`reply-preview` and, since CYR-17, the autopilot job in the worker process
+([autopilot.md](autopilot.md)), which writes the reply to the outbox; `main.run` (the app) does not
+build it. Since CYR-20 the instructions carry the hand-over rule and the generator recognises the
+`NEEDS_OWNER` signal ([stop-triggers.md](stop-triggers.md)).
 
 Code map and import rules: [architecture.md](architecture.md). Reasons: [decisions.md](decisions.md).
 The persona and the examples: [persona-and-examples.md](persona-and-examples.md). The LLM client:
@@ -142,11 +143,18 @@ The LLM client's own errors (`LLMError` family) propagate unchanged.
 
 ## The generator
 
-`ReplyGenerator.generate(contact_id, mode_name=None)` loads the contact (`ContactNotFound`), the
-persona (`PersonaMissing`), the history, the mode and the examples, builds the prompt, calls
-`complete` on the client bound to the `reply` step, cleans the text and returns a `GeneratedReply`
-(text, usage, the counters, the prompt characters). `prepare` and `complete` are the two halves
-`generate` is made of; the preview command uses them to print the prompt in between.
+`ReplyGenerator.generate(contact_id, mode_name=None, *, summary=None, max_tokens=None)` loads the
+contact (`ContactNotFound`), the persona (`PersonaMissing`), the history, the mode and the examples,
+builds the prompt, calls `complete` on the client bound to the `reply` step, cleans the text and
+returns a `GeneratedReply` (text, usage, `needs_owner`, `truncated`, the counters, the prompt
+characters). `prepare` and `complete` are the two halves `generate` is made of; the preview command
+uses them to print the prompt in between.
+
+- **Truncation.** `truncated` is the client's flag (`finish_reason == "length"`). The generator only
+  reports it and still cleans the text; the caller decides. The autopilot generates once more with
+  twice the tokens and hands over after a second truncation.
+- **Token limit.** `max_tokens` overrides the step's `LLM_REPLY_MAX_TOKENS` for this one call; without
+  it the client uses the step default.
 
 - **Mode.** Without a name, the contact's mode, resolved through `resolve_by_id`; with a name,
   `resolve_by_name`. A mode that is disabled falls back to the `default` mode; a missing `default`
@@ -159,7 +167,7 @@ persona (`PersonaMissing`), the history, the mode and the examples, builds the p
   handing the contact over on the signal is the caller's job (the autopilot, CYR-17).
 - **Logging.** One INFO line from `cyrano.services.reply_generator` with counters only
   (`examples_kept`, `messages_kept`, `prompt_characters`, `input_tokens`, `output_tokens`) and the
-  flags `needs_owner` and `needs_owner_leaked`. The prompt and the reply are never logged
+  flags `needs_owner`, `needs_owner_leaked` and `truncated`. The prompt and the reply are never logged
   ([S9](safety-rules.md)).
 
 ## The preview command
@@ -221,6 +229,6 @@ settings.
 
 - No summary is produced: the layer takes any text, and nobody passes one until CYR-25.
 - No commitment statement in the instructions.
-- Nothing hands a contact over on the model signal yet; the autopilot does that (CYR-17).
-- No sending, no delay, no pacing (CYR-17, CYR-18, CYR-19, CYR-22).
-- Nothing is wired into `main.run`.
+- The generator hands nothing over itself: the autopilot job acts on the model signal (CYR-17).
+- No sending, no delay, no pacing here: the autopilot, the planner and the sender do that (CYR-17,
+  CYR-18, CYR-19, CYR-22).

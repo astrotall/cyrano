@@ -24,15 +24,17 @@ STYLE_TABLES = {"persona", "style_examples"}
 OUTBOX_TABLE = "scheduled_messages"
 SENDER_STATE_TABLE = "sender_state"
 SCHEDULE_PROFILE_TABLE = "schedule_profile"
+AUTOPILOT_STATE_TABLE = "autopilot_state"
 TABLES = (
     FIRST_REVISION_TABLES
     | STYLE_TABLES
-    | {OUTBOX_TABLE, SENDER_STATE_TABLE, SCHEDULE_PROFILE_TABLE}
+    | {OUTBOX_TABLE, SENDER_STATE_TABLE, SCHEDULE_PROFILE_TABLE, AUTOPILOT_STATE_TABLE}
 )
 ENUM_TYPES = {"contact_status", "message_direction"}
 TIMESTAMP_COLUMNS = {
     ("contacts", "created_at"),
     ("contacts", "last_message_at"),
+    ("contacts", "reply_after"),
     ("contacts", "updated_at"),
     ("messages", "created_at"),
     ("modes", "created_at"),
@@ -47,6 +49,8 @@ TIMESTAMP_COLUMNS = {
     ("sender_state", "paused_until"),
     ("sender_state", "updated_at"),
     ("schedule_profile", "updated_at"),
+    ("autopilot_state", "paused_until"),
+    ("autopilot_state", "updated_at"),
 }
 EXPECTED_CONSTRAINTS = {
     "pk_contacts",
@@ -71,6 +75,8 @@ EXPECTED_CONSTRAINTS = {
     "pk_schedule_profile",
     "ck_schedule_profile_single_row",
     "ck_contacts_pause_reason_allowed",
+    "pk_autopilot_state",
+    "ck_autopilot_state_single_row",
 }
 EXPECTED_INDEXES = {
     "ix_contacts_status",
@@ -233,13 +239,81 @@ async def test_revision_0007_follows_0006(alembic_config: Config) -> None:
     assert revision.down_revision == "0006"
 
 
-async def test_revision_0008_is_the_head_and_follows_0007(alembic_config: Config) -> None:
+async def test_revision_0008_follows_0007(alembic_config: Config) -> None:
     script = ScriptDirectory.from_config(alembic_config)
 
-    assert script.get_heads() == ["0008"]
     revision = script.get_revision("0008")
     assert revision is not None
     assert revision.down_revision == "0007"
+
+
+async def test_revision_0009_is_the_head_and_follows_0008(alembic_config: Config) -> None:
+    script = ScriptDirectory.from_config(alembic_config)
+
+    assert script.get_heads() == ["0009"]
+    revision = script.get_revision("0009")
+    assert revision is not None
+    assert revision.down_revision == "0008"
+
+
+async def _autopilot_state_rows(url: URL) -> list[tuple[object, ...]]:
+    return await fetch_all(
+        url, "SELECT id, stopped, stop_reason, paused_until, pause_reason FROM autopilot_state"
+    )
+
+
+async def test_revision_0009_adds_reply_after_and_the_seeded_state_and_downgrades_to_0008(
+    database_url: URL, alembic_config: Config
+) -> None:
+    await asyncio.to_thread(command.upgrade, alembic_config, "0008")
+    await execute(
+        database_url,
+        "INSERT INTO contacts (tg_id, status) "  # noqa: S608
+        f"VALUES ({FAKE_TELEGRAM_ID}, 'active')",
+    )
+
+    await asyncio.to_thread(command.upgrade, alembic_config, "0009")
+
+    assert AUTOPILOT_STATE_TABLE in await _tables(database_url)
+    assert await _autopilot_state_rows(database_url) == [(1, False, None, None, None)]
+    assert await fetch_all(database_url, "SELECT tg_id, reply_after FROM contacts") == [
+        (FAKE_TELEGRAM_ID, None)
+    ]
+
+    await asyncio.to_thread(command.downgrade, alembic_config, "0008")
+
+    assert AUTOPILOT_STATE_TABLE not in await _tables(database_url)
+    columns = await fetch_all(
+        database_url,
+        "SELECT column_name FROM information_schema.columns "
+        "WHERE table_name = 'contacts' AND column_name = 'reply_after'",
+    )
+    assert columns == []
+    assert await fetch_all(database_url, "SELECT tg_id FROM contacts") == [(FAKE_TELEGRAM_ID,)]
+
+    await asyncio.to_thread(command.upgrade, alembic_config, "head")
+
+    assert await _autopilot_state_rows(database_url) == [(1, False, None, None, None)]
+
+
+async def test_the_autopilot_state_row_is_seeded_once_and_idempotently(
+    migrated_url: URL, alembic_config: Config
+) -> None:
+    revision = ScriptDirectory.from_config(alembic_config).get_revision("0009")
+    assert revision is not None
+    seed: str = revision.module.SEED_AUTOPILOT_STATE
+
+    await execute(migrated_url, seed)
+    await execute(migrated_url, seed)
+
+    assert await _autopilot_state_rows(migrated_url) == [(1, False, None, None, None)]
+
+
+async def test_the_single_row_check_refuses_a_second_autopilot_state_row(
+    migrated_url: URL,
+) -> None:
+    with pytest.raises(DBAPIError, match="ck_autopilot_state_single_row"):
+        await execute(migrated_url, "INSERT INTO autopilot_state (id) VALUES (2)")
 
 
 async def _check_definition(url: URL) -> str:

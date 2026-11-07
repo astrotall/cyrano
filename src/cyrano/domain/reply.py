@@ -1,5 +1,3 @@
-"""Reply generation models, limits and the reasons a model reply is refused."""
-
 from __future__ import annotations
 
 from pydantic import BaseModel, ConfigDict, Field

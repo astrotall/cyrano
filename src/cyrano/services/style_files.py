@@ -1,5 +1,3 @@
-"""Reading and validating the persona file and the style examples file; pure apart from reading."""
-
 from __future__ import annotations
 
 import json

@@ -1,5 +1,3 @@
-"""The reply-preview command: generate one reply for a stored conversation and print it."""
-
 from __future__ import annotations
 
 import argparse

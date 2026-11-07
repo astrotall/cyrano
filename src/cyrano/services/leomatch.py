@@ -1,5 +1,3 @@
-"""Parsing of Leomatch profile texts. What is observed and what is not: see decisions.md."""
-
 from __future__ import annotations
 
 import re

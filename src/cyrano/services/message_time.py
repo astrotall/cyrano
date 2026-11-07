@@ -1,5 +1,3 @@
-"""The one rule that turns the time of a Telegram message into the time that is stored."""
-
 from __future__ import annotations
 
 from datetime import datetime

@@ -1,5 +1,3 @@
-"""Callback data of the card buttons and of the pause notice buttons."""
-
 from __future__ import annotations
 
 from enum import StrEnum

@@ -1,5 +1,3 @@
-"""Assembly of the owner's card from what is stored about a contact."""
-
 from __future__ import annotations
 
 from collections.abc import Sequence

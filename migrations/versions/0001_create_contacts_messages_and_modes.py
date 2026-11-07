@@ -1,5 +1,3 @@
-"""Create contacts, messages and modes; seed the default mode."""
-
 from __future__ import annotations
 
 from collections.abc import Sequence

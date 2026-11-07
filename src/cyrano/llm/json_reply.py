@@ -1,5 +1,3 @@
-"""Reading a JSON object out of a model reply and describing what is wrong with it."""
-
 from __future__ import annotations
 
 import re

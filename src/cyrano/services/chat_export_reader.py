@@ -1,5 +1,3 @@
-"""Reading a Telegram Desktop JSON export into plain messages; pure apart from the file read."""
-
 from __future__ import annotations
 
 import json

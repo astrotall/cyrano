@@ -1,5 +1,3 @@
-"""Handlers of the control bot: /start, the card buttons and the pause notice buttons."""
-
 from __future__ import annotations
 
 import logging

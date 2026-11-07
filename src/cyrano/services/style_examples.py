@@ -1,5 +1,3 @@
-"""Selection and statistics of the stored style examples."""
-
 from __future__ import annotations
 
 from collections import Counter

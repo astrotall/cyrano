@@ -1,5 +1,3 @@
-"""Pauses a contact when the owner writes to it by hand from the userbot account."""
-
 from __future__ import annotations
 
 import asyncio

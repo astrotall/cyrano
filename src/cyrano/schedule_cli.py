@@ -1,5 +1,3 @@
-"""The owner's schedule commands. They never print a text, a name or a Telegram id."""
-
 from __future__ import annotations
 
 import argparse

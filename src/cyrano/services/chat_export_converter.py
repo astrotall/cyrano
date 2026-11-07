@@ -1,5 +1,3 @@
-"""Turning a Telegram Desktop chat export into a draft of the style examples file."""
-
 from __future__ import annotations
 
 import json

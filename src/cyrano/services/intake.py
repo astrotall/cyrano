@@ -1,5 +1,3 @@
-"""Registration of incoming private messages."""
-
 from __future__ import annotations
 
 import logging

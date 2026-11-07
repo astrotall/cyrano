@@ -1,5 +1,3 @@
-"""Delivery of the card to the owner chat, the only chat this module can address."""
-
 from __future__ import annotations
 
 import asyncio

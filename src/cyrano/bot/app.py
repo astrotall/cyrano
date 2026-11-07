@@ -1,5 +1,3 @@
-"""The control bot: bot, dispatcher and long polling, built from the settings."""
-
 from __future__ import annotations
 
 import asyncio

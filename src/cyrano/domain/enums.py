@@ -1,5 +1,3 @@
-"""Statuses, directions, LLM, dialogue, outbox, schedule, stop-trigger and autopilot vocabulary."""
-
 from __future__ import annotations
 
 from enum import StrEnum

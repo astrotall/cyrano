@@ -1,5 +1,3 @@
-"""Arq worker settings. Start with ``arq cyrano.worker.settings.WorkerSettings``."""
-
 from __future__ import annotations
 
 import logging

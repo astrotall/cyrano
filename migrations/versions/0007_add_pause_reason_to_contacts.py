@@ -1,5 +1,3 @@
-"""Add pause_reason to contacts, the reason a contact is paused."""
-
 from __future__ import annotations
 
 from collections.abc import Sequence

@@ -1,5 +1,3 @@
-"""The schedule profile, its limits, the blocked moment and the send plan."""
-
 from __future__ import annotations
 
 import re

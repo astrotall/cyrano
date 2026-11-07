@@ -1,5 +1,3 @@
-"""Commands that import and inspect the persona and the style examples."""
-
 from __future__ import annotations
 
 import argparse

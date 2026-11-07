@@ -1,5 +1,3 @@
-"""The few profile facts about a contact that may reach the prompt."""
-
 from __future__ import annotations
 
 from cyrano.domain.models import Contact

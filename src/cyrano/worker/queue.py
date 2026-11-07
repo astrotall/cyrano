@@ -1,5 +1,3 @@
-"""The Arq implementation of the reply job queue, used by the app process."""
-
 from __future__ import annotations
 
 import dataclasses

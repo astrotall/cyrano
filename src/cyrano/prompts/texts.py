@@ -1,5 +1,3 @@
-"""Every fixed text of the reply prompt."""
-
 from __future__ import annotations
 
 INSTRUCTIONS_HEADER = "=== INSTRUCTIONS ==="

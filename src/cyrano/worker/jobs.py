@@ -1,5 +1,3 @@
-"""The Arq job functions. They only call the services; nothing here sends to a contact."""
-
 from __future__ import annotations
 
 from arq import Retry

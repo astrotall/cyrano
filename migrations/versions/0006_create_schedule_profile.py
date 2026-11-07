@@ -1,5 +1,3 @@
-"""Create the schedule_profile table, one row at most; no row means the default profile."""
-
 from __future__ import annotations
 
 from collections.abc import Sequence

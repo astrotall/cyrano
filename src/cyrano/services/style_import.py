@@ -1,5 +1,3 @@
-"""Import of the persona and the style examples from local files into storage."""
-
 from __future__ import annotations
 
 import logging

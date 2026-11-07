@@ -1,5 +1,3 @@
-"""Owner-only access: updates from anyone else are dropped without a trace."""
-
 from __future__ import annotations
 
 import logging

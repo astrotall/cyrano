@@ -1,5 +1,3 @@
-"""The reply job: one generated reply per burst of an active contact, written to the outbox."""
-
 from __future__ import annotations
 
 import asyncio

@@ -1,5 +1,3 @@
-"""Puts reply jobs on the queue: once per incoming message, and by a sweep for lost ones."""
-
 from __future__ import annotations
 
 import asyncio

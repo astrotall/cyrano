@@ -1,5 +1,3 @@
-"""Application entrypoint."""
-
 from __future__ import annotations
 
 import argparse
@@ -107,6 +105,7 @@ logger = logging.getLogger("cyrano")
 
 LOGIN_COMMAND = "login"
 LLM_CHECK_COMMAND = "llm-check"
+APP_DESCRIPTION = "Application entrypoint."
 EXIT_USERBOT_ERROR = 1
 EXIT_CONFIG_ERROR = 2
 EXIT_LLM_ERROR = 1
@@ -460,7 +459,7 @@ async def _run_autopilot_command(settings: Settings, request: AutopilotRequest) 
 
 
 def _parse_args(argv: Sequence[str] | None) -> argparse.Namespace:
-    parser = argparse.ArgumentParser(prog="python -m cyrano", description=__doc__)
+    parser = argparse.ArgumentParser(prog="python -m cyrano", description=APP_DESCRIPTION)
     commands = parser.add_subparsers(dest="command")
     commands.add_parser(LOGIN_COMMAND, help="log the second account in and save the session")
     commands.add_parser(LLM_CHECK_COMMAND, help="send one tiny request to the LLM provider")

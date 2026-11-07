@@ -1,5 +1,3 @@
-"""Create the scheduled_messages table, the outbox."""
-
 from __future__ import annotations
 
 from collections.abc import Sequence

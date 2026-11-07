@@ -1,5 +1,3 @@
-"""The outgoing-message handler: Telethon event in, OutgoingMessage to the detector out."""
-
 from __future__ import annotations
 
 import asyncio

@@ -1,5 +1,3 @@
-"""The interface through which the app asks the worker to answer a message."""
-
 from __future__ import annotations
 
 from typing import Protocol

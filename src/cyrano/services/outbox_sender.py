@@ -1,5 +1,3 @@
-"""The one sender: claims due outbox rows and sends them, one at a time, behind the guard."""
-
 from __future__ import annotations
 
 import asyncio

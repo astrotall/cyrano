@@ -1,5 +1,3 @@
-"""The outbox row, the sender state, the send limits and their vocabulary."""
-
 from __future__ import annotations
 
 from datetime import datetime

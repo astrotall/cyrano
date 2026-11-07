@@ -1,5 +1,3 @@
-"""Create the sender_state table and the index the send limits read."""
-
 from __future__ import annotations
 
 from collections.abc import Sequence

@@ -1,5 +1,3 @@
-"""Generation of one reply text for a contact; it stores nothing and sends nothing."""
-
 from __future__ import annotations
 
 import logging

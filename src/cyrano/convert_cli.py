@@ -1,5 +1,3 @@
-"""The command that converts a Telegram Desktop chat export into a style examples draft."""
-
 from __future__ import annotations
 
 import argparse

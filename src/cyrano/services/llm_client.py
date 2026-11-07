@@ -1,5 +1,3 @@
-"""The interface every consumer of a language model depends on."""
-
 from __future__ import annotations
 
 from collections.abc import Sequence

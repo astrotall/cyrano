@@ -1,5 +1,3 @@
-"""Stop-trigger decisions, the hand-over notice and their limits."""
-
 from __future__ import annotations
 
 from pydantic import BaseModel, ConfigDict, Field

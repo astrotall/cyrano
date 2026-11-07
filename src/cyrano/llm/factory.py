@@ -1,5 +1,3 @@
-"""Builds the shared HTTP client once and hands out one bound client per step."""
-
 from __future__ import annotations
 
 import asyncio

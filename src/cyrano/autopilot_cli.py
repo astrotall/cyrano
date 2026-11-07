@@ -1,5 +1,3 @@
-"""The owner's autopilot commands. They print states, reasons and counters only."""
-
 from __future__ import annotations
 
 import argparse

@@ -1,5 +1,3 @@
-"""The only module that touches the Telethon client directly, and the only one that writes."""
-
 from __future__ import annotations
 
 import asyncio

@@ -1,5 +1,3 @@
-"""Building, connecting and closing the Telethon client. The only module that builds it."""
-
 from __future__ import annotations
 
 import asyncio

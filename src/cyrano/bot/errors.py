@@ -1,5 +1,3 @@
-"""Fatal control bot errors with messages meant to be read by the owner."""
-
 from __future__ import annotations
 
 

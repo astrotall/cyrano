@@ -1,5 +1,3 @@
-"""Read access to the stored persona."""
-
 from __future__ import annotations
 
 from cyrano.domain.style import Persona

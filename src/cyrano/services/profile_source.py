@@ -1,5 +1,3 @@
-"""Interfaces to the places a contact's profile data comes from."""
-
 from __future__ import annotations
 
 from dataclasses import dataclass

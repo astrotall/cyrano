@@ -1,5 +1,3 @@
-"""SQLAlchemy models. Timestamps are timestamptz stored in UTC."""
-
 from __future__ import annotations
 
 from datetime import datetime

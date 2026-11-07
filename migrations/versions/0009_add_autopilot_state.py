@@ -1,5 +1,3 @@
-"""Add contacts.reply_after and the autopilot_state table."""
-
 from __future__ import annotations
 
 from collections.abc import Sequence

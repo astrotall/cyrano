@@ -613,6 +613,7 @@ async def test_a_manual_message_during_the_pre_send_part_cancels_the_row_at_the_
     sender = OutboxSender(
         rig.outbox,
         rig.contacts,
+        rig.messages,
         rig.state,
         SendLimiter(rig.messages, FakeLimits()),
         free_schedule(),
@@ -647,6 +648,7 @@ async def test_the_echo_of_a_real_send_is_not_taken_for_a_manual_message(rig: Ri
     sender = OutboxSender(
         rig.outbox,
         rig.contacts,
+        rig.messages,
         rig.state,
         SendLimiter(rig.messages, FakeLimits()),
         free_schedule(),

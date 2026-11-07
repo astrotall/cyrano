@@ -45,11 +45,11 @@ runs twice, a retried job and the sweeper never produce a second row or a second
 | --- | --- | --- | --- |
 | (none) | `scheduled` | `OutboxService.enqueue` | Text and guard passed |
 | `scheduled` | `sending` | `claim_due` in the sender | The row is due |
-| `scheduled` | `cancelled` | `cancel_scheduled` (the owner's command), `cancel_pending_for_contact` (the sender after a recipient rejection, reason `send_rejected`; the manual-message detector, reason `manual_message`, CYR-21; the hand-over on a stop-trigger, reason `stop_trigger`, CYR-20) | |
+| `scheduled` | `cancelled` | `cancel_scheduled` (the owner's command), `cancel_pending_for_contact` (the sender after a recipient rejection, reason `send_rejected`; the manual-message detector, reason `manual_message`, CYR-21; the hand-over on a stop-trigger, reason `stop_trigger`, CYR-20) and `cancel_superseded_autopilot_rows` (the reply job, the contact's older `autopilot` rows, reason `superseded`, CYR-41) | |
 | `sending` | `sent` | `complete_send` in the sender | Telegram accepted the message |
 | `sending` | `scheduled` | `reschedule` in the sender | Flood wait, a reached limit or an autopilot row inside a window, and nothing else |
 | `sending` | `failed` | `mark_failed` in the sender | Certain refusal, account problem, unknown outcome, or `interrupted` |
-| `sending` | `cancelled` | `mark_cancelled` in the sender | The row is stale, or the guard refused it at send time |
+| `sending` | `cancelled` | `mark_cancelled` in the sender | The row is stale, the guard refused it at send time, or a newer message superseded it (`superseded`, CYR-41) |
 | `failed` | `scheduled` | `retry_failed`, only from the owner's `outbox retry --yes` | The owner checked the chat and decided |
 
 `sent` and `cancelled` are final. `failed` is final for the sender: `claim_due` and `reschedule`
@@ -133,9 +133,10 @@ Each poll, in this order:
 4. Re-read the contact and run the guard.
 5. Check the limits. A reached limit puts the row back; see below.
 6. Autopilot rows only: the availability check. See below.
-7. The pre-send part: `mark_read`, a pause, `show_typing`. See below.
-8. Re-read the contact and run the guard again.
-9. `send_text`, then `complete_send`.
+7. Autopilot rows only: the supersession check. See below.
+8. The pre-send part: `mark_read`, a pause, `show_typing`. See below.
+9. Re-read the contact and run the guard again, then the supersession check again.
+10. `send_text`, then `complete_send`.
 
 The startup sweep and the stale check of stuck rows keep running while the sender is paused or
 stopped. They only ever mark rows as failed; they send nothing.
@@ -156,6 +157,29 @@ owner asked for that message now.
 The stale rule runs first, so a row held past 6 h from its `due_at` is cancelled as `stale` when it
 comes back, as for a limit. Why a planned row does not run into this:
 [humanization.md](humanization.md#the-safety-net).
+
+### The supersession check
+
+CYR-41. For rows of source `autopilot` only; a `manual_test` row is never superseded, and neither is a
+row without a `trigger_message_id`. A row is superseded when the latest message of its contact, by
+`(created_at, id)` as everywhere else ([Message times](contact-lifecycle.md#message-times)), is newer
+than its trigger message. Any newer message counts, incoming (the contact wrote again) or outgoing (the
+owner or the sender answered). An older message that a catch-up stored later, with a larger id, does not.
+
+The check runs twice: after the availability check and before `mark_read`, and again after the pre-send
+part together with the second guard check, right before `send_text`, so a message that arrives during
+the read pause or the typing still cancels the send. A superseded row becomes `cancelled` with the reason
+`superseded` (`CANCEL_REASON_SUPERSEDED`). The owner gets no notice and nothing counts as an attempt: the
+transport was not called for the send. The first check logs the INFO line `outbox row superseded by a
+newer message` (ids only) and no step lines; the second one logs the same line and the `send` step as
+`skipped`. A row that was already sent is never touched: only a row the sender has claimed (`sending`)
+is cancelled, and `sent` is final.
+
+Why: the reaction delay (20 to 120 s) is longer than the debounce window (12 s), so the job of an earlier
+message may have written its row before the next message arrived. Without this check every message
+that came after an earlier job ran got its own reply. The reply job cancels such rows too, see
+[autopilot.md](autopilot.md#one-reply-per-burst); the sender check covers the gap before that job runs,
+a row of a job that failed or lags, and the time spent in the pre-send part.
 
 ### The pre-send part
 
@@ -349,6 +373,7 @@ and shown is the Telethon class name, never the base class of a subclass.
 | Any other exception | Same as `SendUncertain` | `uncertain` | Once |
 | The send deadline passed | Same as `SendUncertain` | `uncertain` | Once |
 | Storing the failure or `complete_send` failed | The row stays `sending`; the stale check fails it | `interrupted` | Once, by the stale check |
+| A newer message than the trigger exists (`autopilot` rows with a trigger only) | `cancelled`, reason `superseded`; nothing is sent, nothing counted | none | None |
 | The row is stale when claimed | `cancelled`, reason `stale`; nothing is sent | none (`cancel_reason = stale`) | A summary with the count, first at once, then at most hourly |
 
 **Only a flood wait, a reached limit and a closed window put a row back.** In all three, the message
@@ -434,7 +459,7 @@ database up. The sending itself is done by the running app.
 | Command | Makefile | What it does |
 | --- | --- | --- |
 | `outbox enqueue CONTACT_ID TEXT [--in-seconds N]` | `make outbox-enqueue CONTACT=... TEXT="..." [IN=...]` | Adds a `manual_test` row, due in N seconds (default 5, 0 to 86400). Prints the row id and the planned time |
-| `outbox list [--state S] [--limit N]` | `make outbox-list [STATE=...] [LIMIT=...]` | Newest first (default 50, 1 to 1000): id, contact id, source, state, `send_at`, `due_at`, error class, `cancel_reason`. An empty value prints `-`. The reason is a stored constant such as `cancelled_by_owner`, `stale`, `send_rejected` or a guard refusal, so a stale cancel is told apart from an owner cancel. Never a text |
+| `outbox list [--state S] [--limit N]` | `make outbox-list [STATE=...] [LIMIT=...]` | Newest first (default 50, 1 to 1000): id, contact id, source, state, `send_at`, `due_at`, error class, `cancel_reason`. An empty value prints `-`. The reason is a stored constant such as `cancelled_by_owner`, `stale`, `superseded`, `send_rejected` or a guard refusal, so a stale cancel is told apart from an owner cancel. Never a text |
 | `outbox cancel ID` | `make outbox-cancel ID=...` | Cancels a `scheduled` row. A row in any other state is refused with a message |
 | `outbox retry ID [--in-seconds N] [--yes]` | `make outbox-retry ID=... [IN=...] [YES=1]` | Only for a `failed` row; any other state is refused with a message. Without `--yes` it prints a reminder to check the chat first and changes nothing. With `--yes` it sets `scheduled`, `send_at` and `due_at` to now + N seconds (default 5, 0 to 86400), clears `error_class` and `cancel_reason`, and prints the row id and the planned time |
 | `outbox status` | `make outbox-status` | The sender state (running, paused with the time and reason, stopped with the reason), the six counters against their limits, and the rows per state (both sources; `autopilot status` counts the `autopilot` rows alone). Never a text, a name or a Telegram id |

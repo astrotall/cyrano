@@ -43,6 +43,7 @@ from cyrano.domain.errors import (
     RetryJob,
 )
 from cyrano.domain.models import Message
+from cyrano.domain.outbox import CANCEL_REASON_SUPERSEDED
 from cyrano.domain.reply import GeneratedReply
 from cyrano.services.hand_over import HandOverService
 from cyrano.services.humanization import HumanizationPlanner
@@ -229,6 +230,9 @@ class ReplyJobRunner:
             plan = await self._planner.plan(contact_id, trigger_id, now)
         except PlanNotPossible:
             return _skip(ReplyJobReason.PLAN_NOT_POSSIBLE)
+        await self._outbox.cancel_superseded_autopilot_rows(
+            contact_id, trigger_id, CANCEL_REASON_SUPERSEDED
+        )
         try:
             row = await self._enqueuer.enqueue(
                 contact_id, reply.text, plan.send_at, OutboxSource.AUTOPILOT, trigger_id

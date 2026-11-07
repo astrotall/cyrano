@@ -8,13 +8,15 @@ from cyrano.db.repositories import SqlSenderStateRepository
 from cyrano.domain.enums import (
     ContactStatus,
     ManualMessageOutcome,
+    MessageDirection,
     OutboxState,
     ReplyJobOutcome,
 )
 from cyrano.domain.models import Contact, IncomingMessage, OutgoingMessage
-from cyrano.domain.outbox import CANCEL_REASON_MANUAL_MESSAGE
+from cyrano.domain.outbox import CANCEL_REASON_MANUAL_MESSAGE, CANCEL_REASON_SUPERSEDED
 from cyrano.services.autopilot import AutopilotScheduler, AutopilotSweeper
 from cyrano.services.contact_events import InMemoryContactEvents
+from cyrano.services.humanization import HumanizationPlanner
 from cyrano.services.intake import IntakeService
 from cyrano.services.manual_intervention import ManualMessageDetector
 from cyrano.services.outbox_sender import OutboxSender
@@ -41,6 +43,11 @@ SEND_DELAY_SECONDS = 600
 OWNER_TG_MESSAGE_ID = 880011
 EIGHT_HOURS_SECONDS = 8 * 3600
 MEETING_TEXT = "давай встретимся завтра вечером"
+BURST_OFFSETS_SECONDS = (0, 40, 80)
+BURST_PLANNER_SEED = 184
+TICK_SECONDS = 2
+SIMULATION_SECONDS = 260
+BURST_FIRST_TG_MESSAGE_ID = 600
 
 
 class _Pipeline:
@@ -101,6 +108,7 @@ class _Pipeline:
         return OutboxSender(
             self.rig.outbox,
             self.rig.contacts,
+            self.rig.messages,
             SqlSenderStateRepository(self.rig.session_factory),
             SendLimiter(self.rig.messages, FakeLimits()),
             free_schedule(),
@@ -210,3 +218,49 @@ async def test_a_fresh_message_after_an_old_one_is_still_answered(rig: Autopilot
 
     assert outcomes == [ReplyJobOutcome.SKIPPED, ReplyJobOutcome.QUEUED]
     assert len(await rig.outbox.list_rows(None, 10)) == 1
+
+
+async def test_three_messages_within_a_minute_get_one_reply_for_the_last_one(
+    rig: AutopilotRig,
+) -> None:
+    pipeline = _Pipeline(rig)
+    contact = await rig.contact()
+    planner = HumanizationPlanner(rig.messages, rig.schedule, random.Random(BURST_PLANNER_SEED))
+    runner = rig.runner(pipeline.client, planner=planner)
+    sender = pipeline.sender()
+    start = rig.clock()
+    waiting: list[tuple[datetime, int, int]] = []
+    queued_before = 0
+    outcomes: list[ReplyJobOutcome] = []
+
+    for second in range(0, SIMULATION_SECONDS + 1, TICK_SECONDS):
+        rig.clock.now = start + timedelta(seconds=second)
+        for number, offset in enumerate(BURST_OFFSETS_SECONDS):
+            if offset == second:
+                await pipeline.receive(
+                    contact, f"invented burst part {number}", BURST_FIRST_TG_MESSAGE_ID + number
+                )
+        for contact_id, message_id, delay in pipeline.queue.jobs[queued_before:]:
+            waiting.append((rig.clock() + timedelta(seconds=delay), contact_id, message_id))
+        queued_before = len(pipeline.queue.jobs)
+        for job in [job for job in waiting if job[0] <= rig.clock()]:
+            waiting.remove(job)
+            outcomes.append((await runner.run(job[1], job[2])).outcome)
+        await sender.send_next()
+
+    rows = sorted(await rig.outbox.list_rows(None, 10), key=lambda row: row.id)
+    history = await rig.messages.list_last(contact.id, 10)
+    incoming = [message for message in history if message.direction is MessageDirection.INCOMING]
+    assert outcomes == [ReplyJobOutcome.QUEUED] * len(BURST_OFFSETS_SECONDS)
+    assert [row.trigger_message_id for row in rows] == [message.id for message in incoming]
+    assert [(row.state, row.cancel_reason) for row in rows] == [
+        (OutboxState.CANCELLED, CANCEL_REASON_SUPERSEDED),
+        (OutboxState.CANCELLED, CANCEL_REASON_SUPERSEDED),
+        (OutboxState.SENT, None),
+    ]
+    assert rows[0].send_at > incoming[1].created_at
+    assert rows[1].send_at > incoming[2].created_at
+    assert pipeline.transport.steps == ["mark_read", PAUSE_STEP, "show_typing", "send_text"]
+    assert pipeline.transport.calls == [(contact.tg_id, REPLY_TEXT_ZQ)]
+    assert history[-1].direction is MessageDirection.OUTGOING
+    assert [message.direction for message in history[:-1]] == [MessageDirection.INCOMING] * 3

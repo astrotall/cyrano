@@ -63,6 +63,39 @@ message is never queued twice while its job exists. A burst therefore makes one 
 every job but the newest one finds a newer incoming message when it runs and skips (`superseded`).
 Only the job of the last message of the burst generates, and the whole burst is in its prompt.
 
+A job can only skip itself when the newer message already exists at the time it runs. The reaction
+delay of the planner (20 to 120 s from the trigger's time) is longer than the debounce window (12 s), so
+the job of an earlier message may already have written its row when the next message arrives. That row
+is handled by [one reply per burst](#one-reply-per-burst).
+
+## One reply per burst
+
+CYR-41. A contact that writes three messages within a minute gets ONE reply, written for the last one.
+A row of source `autopilot` is cancelled with the reason `superseded` (no owner notice) in two places:
+
+1. **In the job**, after the planner gave a send time and before `OutboxService.enqueue`: the contact's
+   other `autopilot` rows that are still `scheduled` and whose trigger message is older than the new
+   trigger, by `(created_at, id)`, are cancelled in one statement
+   (`OutboxRepository.cancel_superseded_autopilot_rows`). A row in state `sending` cannot be cancelled
+   there; it is covered by the sender. `manual_test` rows, rows of other contacts, `sent` rows and rows
+   without a trigger are never touched. The idempotent skip when a row for the new trigger exists
+   (step 5) is unchanged.
+2. **In the sender**, for the row it is about to send: before `mark_read` and again right before
+   `send_text` ([the supersession check](outbox-and-sender.md#the-supersession-check)). A newer message,
+   incoming or outgoing, than the row's trigger cancels it.
+
+A burst end to end, with an invented timeline: messages at 0, 40 and 80 s, jobs at 12, 52 and 92 s.
+The job at 12 s writes row 1 for 48 s (the planner drew a delay of 48 s). The second message arrives at
+40 s, so when the sender claims row 1 at 48 s it finds a newer message and cancels it. The job at 52 s
+writes row 2 for 84 s. The third message arrives at 80 s: the sender cancels row 2 at 84 s. The job at
+92 s writes row 3 for 193 s; no newer message arrives, and it is sent, the only message the contact
+receives. Had a job run while an older row was still waiting, it would have cancelled that row itself.
+Every skip or cancel in this story writes no notice and counts no attempt.
+
+An outgoing message newer than the trigger also supersedes the row. The detector of a manual message
+cancels the contact's scheduled rows as well (`manual_message`); the check covers the row that was
+already claimed.
+
 "Newer" means newer by the pair `(created_at, id)` and `created_at` is Telegram's send time for both
 directions ([Message times](contact-lifecycle.md#message-times)). A message that a catch-up stores late
 but that was written earlier is older than the trigger and never supersedes it, and a message written
@@ -98,7 +131,8 @@ reason, an optional detail and the row id) or raises `RetryJob(defer_seconds)` f
    raise `RetryJob` with the next delay; on the last try the autopilot pauses for the cooldown
    (`provider_unavailable`), one notice per new pause, and no row is written.
 9. `HumanizationPlanner.plan(contact_id, trigger_message_id, now)`; `PlanNotPossible` is a skip.
-10. `OutboxService.enqueue(contact_id, text, send_at, autopilot, trigger_message_id)`; an
+10. Before the enqueue, the contact's older scheduled `autopilot` rows are cancelled as `superseded`
+    ([One reply per burst](#one-reply-per-burst)). Then `OutboxService.enqueue(contact_id, text, send_at, autopilot, trigger_message_id)`; an
     `EnqueueRefused` is a skip with its reason as the detail. A duplicate enqueue returns the stored row.
 
 Everything is idempotent: a job run twice, a retried job or a job that races the sweeper's job for the
@@ -217,7 +251,7 @@ failing sweep or queue is logged with the class name and never stops the loop.
 | `TRUNCATION_MAX_TOKENS` | 1600 | Cap of that retry |
 | `JOB_TIMEOUT_SECONDS` | 300 | Arq's limit for one try |
 | `WORKER_MAX_JOBS` | 2 | Jobs one worker runs at the same time |
-| `BURST_HISTORY_MESSAGES` | 20 | Messages read for the supersession check and the burst |
+| `BURST_HISTORY_MESSAGES` | 20 | Messages read for the job's supersession check and the burst |
 
 The worker runs with `max_tries=4`, `job_timeout=300`, `keep_result=0` (no result key, so the same job
 id can be enqueued again after the job ended), `max_jobs=2`, `retry_jobs` on and the health check every

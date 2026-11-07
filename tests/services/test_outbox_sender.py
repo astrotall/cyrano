@@ -125,6 +125,7 @@ class Harness:
         return OutboxSender(
             self.outbox,
             self.contacts,
+            self.messages,
             self.state,
             self.limiter,
             free_schedule(),
@@ -407,6 +408,7 @@ async def test_the_running_loop_never_sends_an_uncertain_row_again(harness: Harn
     sender = OutboxSender(
         harness.outbox,
         harness.contacts,
+        harness.messages,
         harness.state,
         harness.limiter,
         free_schedule(),
@@ -679,6 +681,7 @@ async def test_the_loop_runs_the_stale_check_on_its_interval(harness: Harness) -
     sender = OutboxSender(
         harness.outbox,
         harness.contacts,
+        harness.messages,
         harness.state,
         harness.limiter,
         free_schedule(),

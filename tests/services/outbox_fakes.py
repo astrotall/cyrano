@@ -235,6 +235,7 @@ class InMemoryOutbox:
     def __init__(self) -> None:
         self.rows: dict[int, ScheduledMessage] = {}
         self.completed: list[tuple[int, int, int]] = []
+        self.trigger_times: dict[int, datetime] = {}
 
     def _update(self, row_id: int, **changes: object) -> ScheduledMessage:
         row = self.rows.get(row_id)
@@ -345,6 +346,24 @@ class InMemoryOutbox:
         for row in pending:
             self._update(row.id, state=OutboxState.CANCELLED, cancel_reason=reason)
         return len(pending)
+
+    async def cancel_superseded_autopilot_rows(
+        self, contact_id: int, trigger_message_id: int, reason: str
+    ) -> int:
+        newest = (self.trigger_times.get(trigger_message_id, FAKE_NOW), trigger_message_id)
+        older = [
+            row
+            for row in self.rows.values()
+            if row.contact_id == contact_id
+            and row.source is OutboxSource.AUTOPILOT
+            and row.state is OutboxState.SCHEDULED
+            and row.trigger_message_id is not None
+            and (self.trigger_times.get(row.trigger_message_id, FAKE_NOW), row.trigger_message_id)
+            < newest
+        ]
+        for row in older:
+            self._update(row.id, state=OutboxState.CANCELLED, cancel_reason=reason)
+        return len(older)
 
     async def has_sending_row(self, contact_id: int) -> bool:
         return any(

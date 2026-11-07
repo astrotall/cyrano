@@ -1,5 +1,3 @@
-"""SQLAlchemy repositories. Every method is one transaction and returns domain models."""
-
 from __future__ import annotations
 
 from collections.abc import Sequence

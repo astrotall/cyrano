@@ -1,5 +1,3 @@
-"""Read-only Telethon calls that fetch a contact's profile and photo."""
-
 from __future__ import annotations
 
 from pathlib import Path

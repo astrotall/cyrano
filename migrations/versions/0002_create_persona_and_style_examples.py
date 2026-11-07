@@ -1,5 +1,3 @@
-"""Create the persona and style_examples tables."""
-
 from __future__ import annotations
 
 from collections.abc import Sequence

@@ -1,5 +1,3 @@
-"""The owner's decision on a paused contact: resume automatic replies or ignore it."""
-
 from __future__ import annotations
 
 import asyncio

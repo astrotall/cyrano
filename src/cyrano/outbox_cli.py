@@ -1,5 +1,3 @@
-"""The owner's test commands for the outbox. They never print a message text."""
-
 from __future__ import annotations
 
 import argparse

@@ -1,5 +1,3 @@
-"""The parts of the provider's response that the client reads."""
-
 from __future__ import annotations
 
 from pydantic import BaseModel, ConfigDict, Field

@@ -1,5 +1,3 @@
-"""The autopilot state, the reply job result and every constant of the autopilot."""
-
 from __future__ import annotations
 
 from datetime import datetime

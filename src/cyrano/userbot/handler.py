@@ -1,5 +1,3 @@
-"""The incoming-message handler: Telethon event in, IncomingMessage to the intake out."""
-
 from __future__ import annotations
 
 import asyncio

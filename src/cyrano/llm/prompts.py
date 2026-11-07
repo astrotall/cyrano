@@ -1,5 +1,3 @@
-"""Texts the client adds to a request when it asks for JSON."""
-
 from __future__ import annotations
 
 SCHEMA_INSTRUCTION = (

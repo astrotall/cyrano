@@ -1,5 +1,3 @@
-"""Replacing e-mails, phones, links, usernames and names with neutral tokens; pure."""
-
 from __future__ import annotations
 
 import re

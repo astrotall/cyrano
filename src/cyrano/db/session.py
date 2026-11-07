@@ -1,5 +1,3 @@
-"""Engine and session factory. The composition root owns their lifecycle."""
-
 from __future__ import annotations
 
 from sqlalchemy.ext.asyncio import (

@@ -1,5 +1,3 @@
-"""Fatal userbot errors with messages meant to be read by the owner."""
-
 from __future__ import annotations
 
 LOGIN_HINT = "Run `make login` (or `make login-docker` in Docker) to create the session."

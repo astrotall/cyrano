@@ -1,5 +1,3 @@
-"""Reading and validating the schedule file, and storing it; validation comes first."""
-
 from __future__ import annotations
 
 import logging

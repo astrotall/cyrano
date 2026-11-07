@@ -1,5 +1,3 @@
-"""Removal of characters that PostgreSQL text and JSONB columns reject."""
-
 from __future__ import annotations
 
 from cyrano.domain.models import IncomingMessage

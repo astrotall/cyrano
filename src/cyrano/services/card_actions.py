@@ -1,5 +1,3 @@
-"""The owner's decisions on a card: Reply with a mode, or Ignore."""
-
 from __future__ import annotations
 
 import asyncio

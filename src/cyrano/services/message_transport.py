@@ -1,5 +1,3 @@
-"""The interface through which a message reaches a contact. Only the sender may call it."""
-
 from __future__ import annotations
 
 from typing import Protocol

@@ -1,5 +1,3 @@
-"""Shows every new contact to the owner once and moves it to pending after delivery."""
-
 from __future__ import annotations
 
 import asyncio

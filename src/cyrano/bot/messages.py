@@ -1,5 +1,3 @@
-"""Every text the control bot shows to the owner."""
-
 from __future__ import annotations
 
 from cyrano.domain.enums import AutopilotPauseReason, AutopilotStopReason, TriggerClass

@@ -1,5 +1,3 @@
-"""Collection of everything known about a new contact, so the owner can decide from one card."""
-
 from __future__ import annotations
 
 import asyncio

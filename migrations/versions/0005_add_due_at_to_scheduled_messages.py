@@ -1,5 +1,3 @@
-"""Add due_at to scheduled_messages, the originally intended send time of a row."""
-
 from __future__ import annotations
 
 from collections.abc import Sequence

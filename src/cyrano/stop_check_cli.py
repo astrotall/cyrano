@@ -1,5 +1,3 @@
-"""The stop-check command: a dry run of the stop-trigger detector that never writes or echoes."""
-
 from __future__ import annotations
 
 import argparse

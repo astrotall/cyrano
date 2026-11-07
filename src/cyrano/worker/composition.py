@@ -1,5 +1,3 @@
-"""Builds and closes everything the reply job needs inside the worker process."""
-
 from __future__ import annotations
 
 import random

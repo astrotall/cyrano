@@ -1,5 +1,3 @@
-"""Heartbeat file and the container healthcheck entry point."""
-
 from __future__ import annotations
 
 import argparse
@@ -17,6 +15,7 @@ logger = logging.getLogger("cyrano.health")
 HEARTBEAT_ENV = "HEARTBEAT_PATH"
 HEARTBEAT_INTERVAL = 10.0
 DEFAULT_MAX_AGE = 60.0
+HEALTHCHECK_DESCRIPTION = "Heartbeat file and the container healthcheck entry point."
 
 
 def default_heartbeat_path() -> Path:
@@ -45,7 +44,9 @@ async def heartbeat_loop(path: Path, interval: float = HEARTBEAT_INTERVAL) -> No
 
 
 def main(argv: Sequence[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(prog="python -m cyrano.health", description=__doc__)
+    parser = argparse.ArgumentParser(
+        prog="python -m cyrano.health", description=HEALTHCHECK_DESCRIPTION
+    )
     parser.add_argument("--max-age", type=float, default=DEFAULT_MAX_AGE, help="seconds")
     parser.add_argument("--path", type=Path, default=None, help=f"default: ${HEARTBEAT_ENV}")
     args = parser.parse_args(argv)

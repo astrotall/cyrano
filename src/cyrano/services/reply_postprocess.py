@@ -1,5 +1,3 @@
-"""Pure cleaning of a model reply before anyone sees it."""
-
 from __future__ import annotations
 
 import re

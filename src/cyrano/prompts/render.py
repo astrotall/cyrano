@@ -1,5 +1,3 @@
-"""Pure rendering of the system and user messages of a reply prompt."""
-
 from __future__ import annotations
 
 from collections.abc import Sequence

@@ -1,5 +1,3 @@
-"""Domain errors. Messages carry internal ids and statuses only, never personal data."""
-
 from __future__ import annotations
 
 from collections.abc import Sequence

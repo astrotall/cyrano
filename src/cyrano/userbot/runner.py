@@ -1,5 +1,3 @@
-"""Lifecycle of the userbot: register, connect, catch up, listen, stop."""
-
 from __future__ import annotations
 
 import asyncio

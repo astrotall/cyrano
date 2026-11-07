@@ -1,5 +1,3 @@
-"""Allow stop_trigger as the reason a contact is paused."""
-
 from __future__ import annotations
 
 from collections.abc import Sequence

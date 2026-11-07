@@ -1,5 +1,3 @@
-"""The interactive `login` command. Phone, code and password are only passed on, never kept."""
-
 from __future__ import annotations
 
 import getpass

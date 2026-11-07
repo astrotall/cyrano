@@ -1,5 +1,3 @@
-"""Every number and string of the LLM client in one place."""
-
 from __future__ import annotations
 
 CHAT_COMPLETIONS_PATH = "/chat/completions"

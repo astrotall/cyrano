@@ -1,5 +1,3 @@
-"""The small surface of Telethon the application uses, so tests need no real Telethon objects."""
-
 from __future__ import annotations
 
 import asyncio

@@ -1,5 +1,3 @@
-"""Pure decisions about which messages of the matching-bot chat belong to one person."""
-
 from __future__ import annotations
 
 import re

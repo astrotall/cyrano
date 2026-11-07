@@ -1,5 +1,3 @@
-"""Pure stop-trigger detection on contact texts: normalisation, word patterns and number rules."""
-
 from __future__ import annotations
 
 import re

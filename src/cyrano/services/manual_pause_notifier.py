@@ -1,5 +1,3 @@
-"""The interface through which the owner learns that a contact was paused by a manual message."""
-
 from __future__ import annotations
 
 from typing import Protocol

@@ -1,5 +1,3 @@
-"""Hands a conversation over to the owner when a stop-trigger fires; never writes to the contact."""
-
 from __future__ import annotations
 
 import asyncio

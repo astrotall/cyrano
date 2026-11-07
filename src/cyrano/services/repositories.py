@@ -1,5 +1,3 @@
-"""Storage interfaces owned by services and satisfied by db."""
-
 from __future__ import annotations
 
 from collections.abc import Sequence

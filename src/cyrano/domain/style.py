@@ -1,5 +1,3 @@
-"""Persona and style example models, their limits and the content hash."""
-
 from __future__ import annotations
 
 import hashlib

@@ -1,5 +1,3 @@
-"""HTTP transport with retries, backoff and a hard per-attempt deadline."""
-
 from __future__ import annotations
 
 import asyncio

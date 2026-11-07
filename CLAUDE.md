@@ -298,6 +298,9 @@ optional like `IncomingMessage.sent_at` (a naive time is read as missing), and a
 `tests/test_message_time_rule.py`. CYR-39 synced this file, the README and the guides with the code
 and added `tests/test_docs_in_sync.py`, which checks the Makefile targets, the subcommands, the
 migrations and the service modules against the README, `architecture.md` and this file.
+CYR-42 removed every docstring and comment from `src/`, `tests/` and `migrations/` (only tool pragmas
+stay), moved the two argparse descriptions that read `__doc__` into named constants, and added
+`tests/test_no_comments_or_docstrings.py`, which enforces the rule.
 
 ## Detailed guides
 
@@ -327,8 +330,10 @@ migrations and the service modules against the README, `architecture.md` and thi
 
 ## Hard rules
 
-1. No explanatory comments in source code. Names carry the meaning; explanations go to markdown.
-   One-line package docstrings are fine.
+1. No comments and no docstrings of any kind in source and tests: not on modules, packages
+   (`__init__.py`), classes, functions or methods. Names carry the meaning; explanations go to
+   markdown. Only tool pragmas (`# noqa`, `# type: ignore`, `# pragma`, `# fmt:`, `# ruff:`,
+   `# mypy:`) and a shebang line are allowed. `tests/test_no_comments_or_docstrings.py` enforces it.
 2. Full type hints. mypy strict passes. No `Any`.
 3. Pydantic v2 at every external boundary: config, LLM responses, Telegram payloads that are
    stored, except the healthcheck entry point, which reads `HEARTBEAT_PATH` and nothing else.

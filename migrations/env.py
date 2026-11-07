@@ -1,5 +1,3 @@
-"""Alembic environment: async engine, URL from the application settings."""
-
 from __future__ import annotations
 
 import asyncio

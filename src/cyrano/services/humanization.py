@@ -1,5 +1,3 @@
-"""The send time planner: pure rules over a schedule profile, and the two services that read it."""
-
 from __future__ import annotations
 
 import random

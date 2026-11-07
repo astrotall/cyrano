@@ -1,5 +1,3 @@
-"""Best-effort in-memory notifications about contacts."""
-
 from __future__ import annotations
 
 import asyncio

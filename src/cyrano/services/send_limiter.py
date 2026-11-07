@@ -1,5 +1,3 @@
-"""The central send limits: counted from stored outgoing messages, so they survive a restart."""
-
 from __future__ import annotations
 
 from collections.abc import Iterable, Sequence

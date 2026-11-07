@@ -1,5 +1,3 @@
-"""Assembly of the reply prompt and trimming it to the character budget."""
-
 from __future__ import annotations
 
 from collections.abc import Callable, Sequence

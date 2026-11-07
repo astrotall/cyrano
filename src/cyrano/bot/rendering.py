@@ -1,5 +1,3 @@
-"""Pure functions that turn a card, a hand-over notice and a decision into text and buttons."""
-
 from __future__ import annotations
 
 import re

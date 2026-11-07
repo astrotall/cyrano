@@ -1,5 +1,3 @@
-"""A tiny request that proves the LLM client, the key and the network work together."""
-
 from __future__ import annotations
 
 import time

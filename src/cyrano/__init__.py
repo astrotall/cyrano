@@ -1,1 +1,0 @@
-"""Cyrano: a Telegram assistant."""

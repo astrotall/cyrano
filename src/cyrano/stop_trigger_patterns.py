@@ -1,5 +1,3 @@
-"""Stop-trigger pattern data: words, phrases and the numeric and symbol rules per class."""
-
 from __future__ import annotations
 
 from collections.abc import Mapping

@@ -1,5 +1,3 @@
-"""The interface through which a card reaches the owner."""
-
 from __future__ import annotations
 
 from typing import Protocol

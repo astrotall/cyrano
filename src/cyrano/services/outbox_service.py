@@ -1,5 +1,3 @@
-"""Puts a message into the outbox after validating its text and running the guard."""
-
 from __future__ import annotations
 
 from datetime import datetime

@@ -1,5 +1,3 @@
-"""The status guard: the one rule that decides whether a message may reach a contact."""
-
 from __future__ import annotations
 
 from typing import Protocol

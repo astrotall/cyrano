@@ -1,5 +1,3 @@
-"""Pure decisions about which Telegram events are real private messages from real users."""
-
 from __future__ import annotations
 
 from enum import StrEnum

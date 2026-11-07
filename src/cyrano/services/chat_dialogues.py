@@ -1,5 +1,3 @@
-"""Conversations, turns, dialogue candidates and sampling for the chat export; pure."""
-
 from __future__ import annotations
 
 from collections.abc import Callable, Sequence

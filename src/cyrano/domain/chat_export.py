@@ -1,5 +1,3 @@
-"""Vocabulary, limits and result types of the chat export converter."""
-
 from __future__ import annotations
 
 from dataclasses import dataclass, field

@@ -12,12 +12,14 @@ from sqlalchemy.ext.asyncio import AsyncEngine
 
 from cyrano.bot.app import NoticeBot
 from cyrano.domain.autopilot import JOB_MAX_TRIES, JOB_TIMEOUT_SECONDS, REPLY_JOB_NAME
+from cyrano.domain.proactive import PROACTIVE_JOB_NAME
 from cyrano.domain.summary import SUMMARY_JOB_NAME
 from cyrano.llm.factory import LLMClientFactory
 from cyrano.logging import JsonFormatter
+from cyrano.services.proactive_job import ProactiveJobRunner
 from cyrano.services.reply_job import ReplyJobRunner
 from cyrano.services.summary_updater import SummaryUpdater
-from cyrano.worker.jobs import RUNNER_KEY, SUMMARY_UPDATER_KEY
+from cyrano.worker.jobs import PROACTIVE_RUNNER_KEY, RUNNER_KEY, SUMMARY_UPDATER_KEY
 from tests.conftest import PERSONAL_SETTING_NAMES, PERSONAL_VALUES, SECRET_VALUES
 from tests.privacy import assert_absent
 
@@ -106,13 +108,14 @@ def test_worker_settings_register_the_reply_and_the_summary_job_with_their_limit
     full_env: dict[str, str],
 ) -> None:
     import cyrano.worker.settings as module
-    from cyrano.worker.jobs import reply_to_contact, update_contact_summary
+    from cyrano.worker.jobs import proactive_to_contact, reply_to_contact, update_contact_summary
 
     settings = module.WorkerSettings
 
-    assert settings.functions == (reply_to_contact, update_contact_summary)
+    assert settings.functions == (reply_to_contact, update_contact_summary, proactive_to_contact)
     assert reply_to_contact.__qualname__ == REPLY_JOB_NAME
     assert update_contact_summary.__qualname__ == SUMMARY_JOB_NAME
+    assert proactive_to_contact.__qualname__ == PROACTIVE_JOB_NAME
     assert not hasattr(module, "noop")
     assert settings.max_tries == JOB_MAX_TRIES == 4
     assert settings.keep_result == 0
@@ -146,10 +149,12 @@ async def test_startup_builds_the_runner_and_shutdown_closes_everything(
     await module.startup(ctx)
     runner = ctx[RUNNER_KEY]
     updater = ctx[SUMMARY_UPDATER_KEY]
+    proactive_runner = ctx[PROACTIVE_RUNNER_KEY]
     await module.shutdown(ctx)
 
     assert isinstance(runner, ReplyJobRunner)
     assert isinstance(updater, SummaryUpdater)
+    assert isinstance(proactive_runner, ProactiveJobRunner)
     assert closed == ["bot", "llm", "engine"]
     assert ctx == {}
 

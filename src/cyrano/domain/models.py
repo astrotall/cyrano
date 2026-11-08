@@ -94,6 +94,7 @@ class Contact(_Stored):
     summary_failed_at: UtcDatetime | None = None
     last_message_at: UtcDatetime | None
     reply_after: UtcDatetime | None = None
+    proactive_not_before: UtcDatetime | None = None
     created_at: UtcDatetime
     updated_at: UtcDatetime
 

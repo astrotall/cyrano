@@ -8,6 +8,7 @@ from arq.connections import ArqRedis, RedisSettings
 
 from cyrano.config import Settings
 from cyrano.domain.autopilot import QUEUE_CONNECT_RETRIES, REPLY_JOB_NAME, reply_job_id
+from cyrano.domain.proactive import PROACTIVE_JOB_NAME, proactive_job_id
 from cyrano.domain.summary import SUMMARY_JOB_NAME, summary_job_id
 
 logger = logging.getLogger("cyrano.worker.queue")
@@ -65,4 +66,18 @@ class ArqSummaryJobQueue:
             contact_id,
             up_to_message_id,
             _job_id=summary_job_id(contact_id, up_to_message_id),
+        )
+
+
+class ArqProactiveJobQueue:
+    def __init__(self, connection: ArqReplyJobQueue) -> None:
+        self._connection = connection
+
+    async def enqueue(self, contact_id: int, last_message_id: int) -> None:
+        pool = await self._connection.pool()
+        await pool.enqueue_job(
+            PROACTIVE_JOB_NAME,
+            contact_id,
+            last_message_id,
+            _job_id=proactive_job_id(contact_id, last_message_id),
         )

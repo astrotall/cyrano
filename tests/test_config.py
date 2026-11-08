@@ -222,12 +222,18 @@ def test_every_setting_is_either_logged_or_deliberately_withheld() -> None:
         "reply_prompt_budget_chars",
         "autopilot_enabled",
         "early_read_enabled",
+        "wrapup_enabled",
         "default_contact_gender",
         "autopilot_debounce_seconds",
         "autopilot_debounce_ongoing_seconds",
         "autopilot_max_burst_wait_seconds",
         "summary_enabled",
         "summary_every_messages",
+        "proactive_enabled",
+        "proactive_after_hours",
+        "proactive_max_per_silence",
+        "proactive_min_interval_hours",
+        "proactive_daily_limit",
         "send_limit_minute",
         "send_limit_hour",
         "send_limit_day",
@@ -859,3 +865,102 @@ def test_the_default_contact_gender_is_withheld_from_the_startup_summary(
     assert "default_contact_gender" not in LOGGED_SETTINGS
     assert "default_contact_gender" not in settings.safe_summary()
     assert "female" not in json.dumps(settings.safe_summary())
+
+
+PROACTIVE_VARIABLES = {
+    "PROACTIVE_AFTER_HOURS": (6, 1, 72),
+    "PROACTIVE_MAX_PER_SILENCE": (2, 1, 5),
+    "PROACTIVE_MIN_INTERVAL_HOURS": (24, 1, 168),
+    "PROACTIVE_DAILY_LIMIT": (20, 1, 200),
+}
+
+
+def test_the_proactive_settings_have_their_conservative_defaults_and_stay_unlogged(
+    full_env: dict[str, str],
+) -> None:
+    settings = load_settings(env_file=None)
+
+    assert settings.proactive_enabled is False
+    for name, (default, _, _) in PROACTIVE_VARIABLES.items():
+        assert getattr(settings, name.lower()) == default
+    for name in ["PROACTIVE_ENABLED", *PROACTIVE_VARIABLES]:
+        assert name.lower() not in LOGGED_SETTINGS
+        assert name.lower() not in settings.safe_summary()
+
+
+@pytest.mark.parametrize(("raw", "expected"), [("false", False), ("0", False), ("true", True)])
+def test_the_proactive_switch_reads_a_boolean(
+    full_env: dict[str, str], monkeypatch: pytest.MonkeyPatch, raw: str, expected: bool
+) -> None:
+    monkeypatch.setenv("PROACTIVE_ENABLED", raw)
+
+    assert load_settings(env_file=None).proactive_enabled is expected
+
+
+@pytest.mark.parametrize(
+    ("name", "value"),
+    [
+        (name, bound)
+        for name, (_, low, high) in PROACTIVE_VARIABLES.items()
+        for bound in (low, high)
+    ],
+)
+def test_a_proactive_setting_accepts_its_bounds(
+    full_env: dict[str, str], monkeypatch: pytest.MonkeyPatch, name: str, value: int
+) -> None:
+    monkeypatch.setenv(name, str(value))
+
+    assert getattr(load_settings(env_file=None), name.lower()) == value
+
+
+@pytest.mark.parametrize(
+    ("name", "value"),
+    [
+        *[(name, str(low - 1)) for name, (_, low, _) in PROACTIVE_VARIABLES.items()],
+        *[(name, str(high + 1)) for name, (_, _, high) in PROACTIVE_VARIABLES.items()],
+        ("PROACTIVE_AFTER_HOURS", "6.5"),
+        ("PROACTIVE_DAILY_LIMIT", "daily-marker-zq"),
+        ("PROACTIVE_ENABLED", "switch-marker-zq"),
+    ],
+)
+def test_a_proactive_setting_out_of_range_is_readable_without_the_value(
+    full_env: dict[str, str], monkeypatch: pytest.MonkeyPatch, name: str, value: str
+) -> None:
+    monkeypatch.setenv(name, value)
+
+    with pytest.raises(ConfigError) as raised:
+        load_settings(env_file=None)
+
+    message = str(raised.value)
+    assert name in message
+    assert value not in message
+    assert "Traceback" not in message
+
+
+def test_the_wrapup_is_on_by_default_and_stays_unlogged(full_env: dict[str, str]) -> None:
+    settings = load_settings(env_file=None)
+
+    assert settings.wrapup_enabled is True
+    assert "wrapup_enabled" not in LOGGED_SETTINGS
+    assert "wrapup_enabled" not in settings.safe_summary()
+
+
+@pytest.mark.parametrize(("raw", "expected"), [("false", False), ("0", False), ("true", True)])
+def test_the_wrapup_switch_reads_a_boolean(
+    full_env: dict[str, str], monkeypatch: pytest.MonkeyPatch, raw: str, expected: bool
+) -> None:
+    monkeypatch.setenv("WRAPUP_ENABLED", raw)
+
+    assert load_settings(env_file=None).wrapup_enabled is expected
+
+
+def test_a_nonsense_wrapup_switch_is_readable_without_the_value(
+    full_env: dict[str, str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("WRAPUP_ENABLED", "wrapup-marker-zq")
+
+    with pytest.raises(ConfigError) as raised:
+        load_settings(env_file=None)
+
+    assert "WRAPUP_ENABLED" in str(raised.value)
+    assert "wrapup-marker-zq" not in str(raised.value)

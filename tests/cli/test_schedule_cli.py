@@ -290,6 +290,66 @@ async def test_show_prints_a_stored_early_read_range(
     assert "early read: 0-0 s" in capsys.readouterr().out
 
 
+async def test_show_prints_the_wrapup_minutes_and_the_busy_labels(
+    commands: ScheduleCommands, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    document = {
+        **VALID,
+        "wrapup_soft_minutes": 45,
+        "wrapup_hard_minutes": 15,
+        "busy": [{"days": ["tue"], "from": "13:00", "to": "14:30", "label": "лекция"}],
+    }
+    await commands.run(_import(_file(tmp_path, document)))
+    capsys.readouterr()
+
+    assert await commands.run(ScheduleRequest(action="show")) == 0
+
+    lines = capsys.readouterr().out.splitlines()
+    assert "wrap-up: soft 45 min, hard 15 min" in lines
+    assert "busy windows: tue 13:00-14:30 (лекция)" in lines
+
+
+async def test_show_prints_the_default_wrapup_minutes(
+    commands: ScheduleCommands, capsys: pytest.CaptureFixture[str]
+) -> None:
+    assert await commands.run(ScheduleRequest(action="show")) == 0
+
+    assert "wrap-up: soft 60 min, hard 20 min" in capsys.readouterr().out.splitlines()
+
+
+async def test_show_prints_the_default_proactive_window(
+    commands: ScheduleCommands, capsys: pytest.CaptureFixture[str]
+) -> None:
+    assert await commands.run(ScheduleRequest(action="show")) == 0
+
+    assert "proactive window: 10:00-22:00" in capsys.readouterr().out.splitlines()
+
+
+async def test_show_prints_a_stored_proactive_window(
+    commands: ScheduleCommands, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    await commands.run(_import(_file(tmp_path, {**VALID, "proactive_window": ["11:30", "20:15"]})))
+    capsys.readouterr()
+
+    assert await commands.run(ScheduleRequest(action="show")) == 0
+
+    assert "proactive window: 11:30-20:15" in capsys.readouterr().out.splitlines()
+
+
+async def test_a_broken_proactive_window_is_refused_with_its_path_and_nothing_is_stored(
+    commands: ScheduleCommands, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    path = _file(tmp_path, {**VALID, "proactive_window": ["22:00", "10:00"]})
+
+    assert await commands.run(_import(path)) == 1
+
+    err = capsys.readouterr().err
+    assert "proactive_window" in err
+    assert "22:00" not in err
+    assert await commands.run(ScheduleRequest(action="show")) == 0
+    assert capsys.readouterr().out.splitlines()[0] == DEFAULT_LINE
+
+
 async def test_the_sample_file_imports_and_shows_its_early_read_range(
     commands: ScheduleCommands, capsys: pytest.CaptureFixture[str]
 ) -> None:

@@ -31,6 +31,7 @@ BLOCKED_STATUSES = [s for s in ContactStatus if s is not ContactStatus.ACTIVE]
 @dataclass(frozen=True)
 class _Switch:
     autopilot_enabled: bool
+    proactive_enabled: bool = True
 
 
 def _contact(status: ContactStatus) -> Contact:

@@ -70,6 +70,7 @@ LIMITS = FakeLimits(
 @dataclass(frozen=True)
 class _Switch:
     autopilot_enabled: bool
+    proactive_enabled: bool = True
 
 
 @pytest.fixture
@@ -243,6 +244,23 @@ async def test_list_prints_the_fields_and_never_the_text(
     )
     assert_absent(TEXT, captured.out + captured.err)
     assert_absent(FAKE_TELEGRAM_ID, captured.out + captured.err)
+
+
+async def test_list_shows_the_proactive_source(
+    commands: OutboxCommands,
+    contacts: SqlContactRepository,
+    modes: SqlModeRepository,
+    outbox: SqlOutboxRepository,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    contact = await stored_contact(contacts, modes, ContactStatus.ACTIVE, tg_id=FAKE_TELEGRAM_ID)
+    row = await outbox.enqueue(contact.id, TEXT, FAKE_NOW, OutboxSource.PROACTIVE, 77)
+
+    assert await commands.run(OutboxRequest(action="list")) == 0
+
+    captured = capsys.readouterr()
+    assert f"id={row.id} contact={contact.id} source=proactive state=scheduled " in captured.out
+    assert_absent(TEXT, captured.out + captured.err)
 
 
 async def test_list_shows_the_due_time_next_to_a_moved_send_time(

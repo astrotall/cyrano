@@ -437,6 +437,15 @@ class InMemoryContacts:
         self.stored[contact.tg_id] = touched
         return touched
 
+    async def set_reply_after(self, contact_id: int, when: datetime) -> Contact:
+        contact = await self.get_by_id(contact_id)
+        assert contact is not None
+        if contact.reply_after is not None and contact.reply_after >= when:
+            return contact
+        moved = contact.model_copy(update={"reply_after": when})
+        self.stored[contact.tg_id] = moved
+        return moved
+
     async def list_by_status(self, status: ContactStatus) -> list[Contact]:
         return [c for c in self.stored.values() if c.status is status]
 

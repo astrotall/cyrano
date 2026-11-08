@@ -87,6 +87,7 @@ RESUME_METHOD = "resume"
 RETRY_METHOD = "retry_failed"
 OWNER_COMMAND_MODULE = "outbox_cli.py"
 REPLY_JOB_MODULE = "services/reply_job.py"
+PROACTIVE_JOB_MODULE = "services/proactive_job.py"
 AUTOPILOT_MODULE = "services/autopilot.py"
 AUTOPILOT_COMMAND_MODULE = "autopilot_cli.py"
 AUTOPILOT_PAUSE_HANDLER = "_pause"
@@ -732,12 +733,12 @@ def test_the_sender_cancels_orphans_before_it_claims_and_schedules_followers_aft
     assert send < complete < followers
 
 
-def test_only_the_outbox_service_and_the_reply_job_enqueue_a_sequence() -> None:
+def test_only_the_outbox_service_and_the_two_jobs_enqueue_a_sequence() -> None:
     callers = {
         name for name, tree in _modules() if ENQUEUE_SEQUENCE_METHOD in _called_attributes(tree)
     }
 
-    assert callers == {OUTBOX_SERVICE_MODULE, REPLY_JOB_MODULE}
+    assert callers == {OUTBOX_SERVICE_MODULE, REPLY_JOB_MODULE, PROACTIVE_JOB_MODULE}
 
 
 def test_the_predecessor_reason_is_used_only_by_the_repository() -> None:

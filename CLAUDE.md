@@ -60,12 +60,19 @@ What exists now:
   and the sender's second coroutine marks the chat read soon after the message (the profile's
   `early_read_seconds`, default 0 to 1 s); only the read mark moves earlier.
 - The grammatical gender of a contact (CYR-46): the owner's choice (card buttons, `contact gender`), the summary, a name guess, `DEFAULT_CONTACT_GENDER`, unknown; Reply waits for a known gender; the prompt carries a gender line and two grammar bullets; only grammar, nothing else is inferred.
-- The owner's commands: `login`, `llm-check`, `persona`, `examples`, `reply-preview`, `outbox`,
-  `schedule`, `stop-check`, `autopilot` and `summary` (the list is in the README).
+- The proactive messages (CYR-23), behind `PROACTIVE_ENABLED` (default off) and a running autopilot: when
+  an `active` contact who has written at least once stays silent for `PROACTIVE_AFTER_HOURS` after our
+  last message, the app's sweeper enqueues one Arq job, the worker re-checks the one eligibility rule,
+  generates one short follow-up with the proactive purpose (or the model's `SKIP`) and writes a `proactive`
+  chain inside the profile's `proactive_window`; at most `PROACTIVE_MAX_PER_SILENCE` per silence,
+  `PROACTIVE_MIN_INTERVAL_HOURS` apart and `PROACTIVE_DAILY_LIMIT` a day; any newer message cancels a
+  follow-up that has not started; no automatic pause after the maximum.
+- The owner's commands: `login`, `llm-check`, `persona`, `examples`, `reply-preview` (with
+  `--proactive`), `outbox`, `schedule`, `stop-check`, `autopilot` and `summary` (the list is in the README).
 
 Still planned, each marked with its ticket key where there is one: conversation modes beyond the
-default one (CYR-15), the rest of the control panel (CYR-26), proactive messages with their limits (CYR-23), the other background
-jobs of the worker (CYR-23, CYR-24) and a catalog of contacts (no ticket yet).
+default one (CYR-15), the rest of the control panel (CYR-26), the other background
+jobs of the worker (CYR-24) and a catalog of contacts (no ticket yet).
 Never describe planned behaviour as existing.
 
 ## Locked architectural decisions
@@ -92,7 +99,7 @@ Changing any of these is a large change (see Workflow expectations). Reasons:
 | --- | --- |
 | Python 3.14, uv | in the project |
 | pydantic-settings (Pydantic v2), tzdata | in the project |
-| Arq, Redis 7.4 | in the project (the reply job of the autopilot and the summary job; only `worker/` imports arq) |
+| Arq, Redis 7.4 | in the project (the reply job of the autopilot, the summary job and the proactive job; only `worker/` imports arq) |
 | PostgreSQL 16.15 | in the project (compose, migrations, tests) |
 | SQLAlchemy 2.x async, asyncpg, Alembic | in the project (schema, repositories, used by the intake) |
 | Ruff, mypy strict, pytest, pytest-asyncio | in the project |
@@ -116,7 +123,7 @@ Changing any of these is a large change (see Workflow expectations). Reasons:
 ├── alembic.ini
 ├── migrations/                   async env.py, versions/
 ├── examples/                     invented sample persona, style examples and schedule (real files go to data/)
-├── .claude/docs/                 architecture, contact-lifecycle, safety-rules, decisions, persona-and-examples, reply-generation, outbox-and-sender, humanization, stop-triggers, autopilot, summaries
+├── .claude/docs/                 architecture, contact-lifecycle, safety-rules, decisions, persona-and-examples, reply-generation, outbox-and-sender, humanization, stop-triggers, autopilot, summaries, proactive
 ├── .githooks/                    pre-commit (runs make check and make test; enabled by make setup-hooks)
 ├── .github/                      dependabot.yml, workflows/ci.yml
 ├── src/cyrano/
@@ -169,14 +176,17 @@ Changing any of these is a large change (see Workflow expectations). Reasons:
 │   │                             summary_sanitizer (contact details out of a summary),
 │   │                             summary_updater (one chunk into the stored summary),
 │   │                             summary_sweeper (the summary scan), summary_job_queue (its queue Protocol),
-│   │                             gender (GenderResolver), gender_guess (the name guess), gender_actions (the card button)
+│   │                             gender (GenderResolver), gender_guess (the name guess), gender_actions (the card button),
+│   │                             proactive_eligibility (the one proactive rule), proactive_sweeper (the proactive scan),
+│   │                             proactive_job (one follow-up after a silence), proactive_job_queue (its queue Protocol)
 │   ├── userbot/                  Telethon: protocols, filters, handler, client, adapter, login, runner, errors,
 │   │                             profile_source, leomatch_source, leomatch_match
 │   ├── bot/                      aiogram: app, middleware, handlers, rendering, callbacks, sender, notifier, messages, errors
 │   ├── prompts/                  prompt texts and their pure rendering (imports only domain)
 │   ├── llm/                      DeepSeek client, retrying transport, factory; the only package that imports httpx
-│   └── worker/                   Arq: settings (WorkerSettings), jobs (reply_to_contact, update_contact_summary),
-│                                 composition, queue (ArqReplyJobQueue, ArqSummaryJobQueue, used by the app);
+│   └── worker/                   Arq: settings (WorkerSettings), jobs (reply_to_contact, update_contact_summary,
+│                                 proactive_to_contact), composition, queue (ArqReplyJobQueue, ArqSummaryJobQueue,
+│                                 ArqProactiveJobQueue, used by the app);
 │                                 the only package that imports arq
 └── tests/                        mirrors src/cyrano
 ```
@@ -367,6 +377,28 @@ before it; `_handle_flood_wait` and `_stop_for_account` take an optional row, `S
 `flood_wait_early_read`), the optional `EARLY_READ_ENABLED` setting, the profile field `early_read_seconds`
 (default `[0, 1]`, 0 to 30) with its `schedule show` line and the sample, and the tests, with the new scans in
 `tests/test_one_sender.py` and `tests/test_ongoing_rule.py`.
+CYR-23 added the proactive messages: `domain/proactive.py` (`ProactiveSnapshot`, `DialogueTail`,
+`ProactiveDue`, `ProactiveJobRequest`, `ProactiveJobResult`, every proactive constant), `OutboxSource.PROACTIVE`,
+the `ReplyPurpose`, `ProactiveReason`, `ProactiveJobOutcome` and `ProactiveJobReason` enums,
+`PlanReason.POSTPONED_WINDOW`, migration `0013` (the widened source check, `contacts.proactive_not_before`),
+the `ProactiveRepository` Protocol with `SqlProactiveRepository`, `services/proactive_eligibility.py`
+(`decide_proactive`, the one rule, and `ProactiveEligibility`), `proactive_sweeper.py` (`ProactiveSweeper`, a
+background task of the app, cancelled first), `proactive_job.py` (`ProactiveJobRunner`) and
+`proactive_job_queue.py`, `GenerationPolicy` extracted from the reply job and shared by both jobs, the purpose of
+`ReplyGenerator` and `PromptBuilder` with the proactive paragraph and request, the `SKIP` signal
+(`GeneratedReply.skipped`; invalid output for a reply), `plan_proactive_time` and the window helpers, the
+profile field `proactive_window` with its `schedule show` line and the sample, the guard rule
+(`SendGuardSettings`, `proactive_disabled`) and the sender rules for the source (availability, supersession by
+any newer message, the window net with `outside_window`), `ArqProactiveJobQueue`, the worker function
+`proactive_to_contact`, the five optional `PROACTIVE_*` settings, `reply-preview --proactive` (`PROACTIVE=1`),
+the proactive lines of `autopilot status`, the guide `proactive.md` with S7 rewritten, and the tests, with the
+scans in `tests/test_proactive_structure.py`. Its second pass folded in CYR-52, the wrap-up before a night or
+busy window: the profile fields `wrapup_soft_minutes`, `wrapup_hard_minutes` and the busy `label`, the
+optional `WRAPUP_ENABLED` setting, `unavailable_soon` (`UnavailableSoon`, `WrapUpPhase`) with the hard-phase
+clamp `plan_wrapup_time` in `services/humanization.py`, the wrap-up line and paragraphs of the reply prompt,
+`SKIP` accepted from a reply only inside that context (`ReplyJobReason.MODEL_SKIP`,
+`ContactRepository.set_reply_after`), the proactive reason `unavailable_soon`, `reply-preview --at` with its
+`wrap-up:` line, and the tests, with the scans in `tests/test_wrapup_structure.py`.
 
 ## Detailed guides
 
@@ -385,6 +417,9 @@ before it; `_handle_flood_wait` and `_stop_for_account` take an optional row, `S
   commands, what is not built yet.
 - [humanization.md](.claude/docs/humanization.md): the schedule profile, the planner rules with worked
   examples, the pre-send sequence, the safety net, the commands.
+- [proactive.md](.claude/docs/proactive.md): proactive messages: what they do and do not do, the settings,
+  the eligibility rule with its reasons, the sweeper and the job, SKIP and NEEDS_OWNER, the window, the
+  failure policy and the checklist for turning them on.
 - [autopilot.md](.claude/docs/autopilot.md): the flow from the incoming message to the outbox row, the
   job algorithm, the outcomes and the failure policy, `reply_after`, the sweeper, the constants, the
   commands and the checklist for switching it on.

@@ -7,7 +7,7 @@
     "end_weekend": ["10:00", "11:00"]
   },
   "busy": [
-    {"days": ["tue", "thu"], "from": "09:00", "to": "10:30"}
+    {"days": ["tue", "thu"], "from": "09:00", "to": "10:30", "label": "на паре"}
   ],
   "reaction": {
     "ongoing_seconds": [1, 4],
@@ -22,5 +22,8 @@
   },
   "postponed_spread_minutes": [1, 15],
   "split_pause_seconds": [3, 8],
-  "early_read_seconds": [0, 1]
+  "early_read_seconds": [0, 1],
+  "proactive_window": ["10:00", "21:30"],
+  "wrapup_soft_minutes": 45,
+  "wrapup_hard_minutes": 15
 }

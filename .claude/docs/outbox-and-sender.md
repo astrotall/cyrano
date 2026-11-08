@@ -6,8 +6,10 @@ messages waiting to go out; the sender is the one piece of code that sends them 
 Telethon session lives in the app process, so sending stays there. The Arq worker (CYR-17) only
 generates replies and writes them to the outbox ([autopilot.md](autopilot.md)).
 
-Two things write rows: the owner's explicit test command (`manual_test`) and, since CYR-17, the
-autopilot job (`autopilot`), which runs only with `AUTOPILOT_ENABLED=true`. Rules S1 and S2:
+Three things write rows: the owner's explicit test command (`manual_test`), since CYR-17 the
+autopilot job (`autopilot`), which runs only with `AUTOPILOT_ENABLED=true`, and since CYR-23 the
+proactive job (`proactive`), which runs only with `PROACTIVE_ENABLED=true` as well
+([proactive.md](proactive.md)). Rules S1 and S2:
 [safety-rules.md](safety-rules.md). Reasons: [decisions.md](decisions.md).
 
 ## The table
@@ -19,14 +21,14 @@ autopilot job (`autopilot`), which runs only with `AUTOPILOT_ENABLED=true`. Rule
 | --- | --- |
 | `id` | Internal id; the one shown to the owner and in logs |
 | `contact_id` | Foreign key to `contacts` |
-| `trigger_message_id` | The incoming message this row answers, or `NULL`; plain integer, no foreign key |
+| `trigger_message_id` | The incoming message this row answers, or, for a `proactive` row, our last message the silence started from (CYR-23); `NULL` for a later part and a test row; plain integer, no foreign key |
 | `text` | The text to send. Personal data: never logged, printed or put in a notification |
-| `source` | `autopilot` or `manual_test` |
+| `source` | `autopilot`, `manual_test` or, since migration `0013` (CYR-23), `proactive` |
 | `send_at` | When the sender may claim the row, `timestamptz`. A flood wait, a reached limit or a closed window moves it forward |
 | `due_at` | The originally intended send time, `timestamptz`, not null. Set at enqueue to the `send_at` given there and never changed by a reschedule; only the owner's `retry_failed` resets it. The stale rule counts from it |
 | `state` | See below; starts as `scheduled` |
 | `attempts` | Unused and always 0; it stays in the schema, and the code does not read it |
-| `error_class` | `uncertain`, `interrupted`, `rate_limited`, `outside_hours`, the class name of a certain refusal, of a flood wait or of an account problem, or `NULL` |
+| `error_class` | `uncertain`, `interrupted`, `rate_limited`, `outside_hours`, `outside_window` (a `proactive` row outside the proactive window, CYR-23), the class name of a certain refusal, of a flood wait or of an account problem, or `NULL` |
 | `cancel_reason` | A reason constant, or `NULL` |
 | `claimed_at` | When the sender claimed the row |
 | `sent_tg_message_id` | The Telegram id of the sent message |
@@ -50,7 +52,7 @@ runs twice, a retried job and the sweeper never produce a second row or a second
 | `scheduled` | `sending` | `claim_due` in the sender | The row is due |
 | `scheduled` | `cancelled` | `cancel_scheduled` (the owner's command), `cancel_pending_for_contact` (the sender after a recipient rejection, reason `send_rejected`; the manual-message detector, reason `manual_message`, CYR-21; the hand-over on a stop-trigger, reason `stop_trigger`, CYR-20) `cancel_superseded_autopilot_rows` (the reply job, the contact's older `autopilot` replies whose first part is still `scheduled`, with their waiting parts, reason `superseded`, CYR-41, CYR-36, CYR-43) and `cancel_orphaned_followers` (the sender, a part whose predecessor is `failed` or `cancelled`, reason `predecessor`, CYR-36) | |
 | `sending` | `sent` | `complete_send` in the sender | Telegram accepted the message |
-| `sending` | `scheduled` | `reschedule` in the sender | Flood wait, a reached limit or an autopilot row inside a window, and nothing else |
+| `sending` | `scheduled` | `reschedule` in the sender | Flood wait, a reached limit, an `autopilot` or `proactive` row inside a window, or a `proactive` row outside the proactive window (CYR-23), and nothing else |
 | `sending` | `failed` | `mark_failed` in the sender | Certain refusal, account problem, unknown outcome, or `interrupted` |
 | `sending` | `cancelled` | `mark_cancelled` in the sender | The row is stale, the guard refused it at send time, or a newer message superseded it before its pre-send part (`superseded`, CYR-41, CYR-43) |
 | `failed` | `scheduled` | `retry_failed`, only from the owner's `outbox retry --yes` | The owner checked the chat and decided |
@@ -76,13 +78,20 @@ which stays "the last message from the contact".
 
 `services/send_guard.py`: the pure `check(contact, row_source, settings)` and the thin `SendGuard`.
 
-| Contact | Source | `AUTOPILOT_ENABLED` | Decision |
-| --- | --- | --- | --- |
-| missing | any | any | refused, `unknown_contact` |
-| not `active` | any | any | refused, `contact_not_active` |
-| `active` | `autopilot` | `false` | refused, `autopilot_disabled` |
-| `active` | `autopilot` | `true` | allowed |
-| `active` | `manual_test` | any | allowed |
+| Contact | Source | `AUTOPILOT_ENABLED` | `PROACTIVE_ENABLED` | Decision |
+| --- | --- | --- | --- | --- |
+| missing | any | any | any | refused, `unknown_contact` |
+| not `active` | any | any | any | refused, `contact_not_active` |
+| `active` | `autopilot` | `false` | any | refused, `autopilot_disabled` |
+| `active` | `autopilot` | `true` | any | allowed |
+| `active` | `proactive` | `false` | any | refused, `autopilot_disabled` |
+| `active` | `proactive` | `true` | `false` | refused, `proactive_disabled` (CYR-23) |
+| `active` | `proactive` | `true` | `true` | allowed |
+| `active` | `manual_test` | any | any | allowed |
+
+The settings the guard reads are the `SendGuardSettings` Protocol (`autopilot_enabled`,
+`proactive_enabled`); the autopilot's own scheduler and sweeper read only `GuardSettings`
+(`autopilot_enabled`).
 
 It runs twice: in `OutboxService.enqueue`, which also validates the text (NUL removed, trimmed, not
 empty (refused as `text_empty`), at most `MAX_OUTBOX_TEXT_LENGTH` (refused as `text_too_long`), 4096 UTF-16 code units, which is how Telegram counts, so
@@ -142,8 +151,9 @@ Each poll, in this order:
    summary notice, and sends that notice if it is due.
 4. Re-read the contact and run the guard.
 5. Check the limits. A reached limit puts the row back; see below.
-6. Autopilot rows only, first parts only: the availability check. See below.
-7. Autopilot rows only, first parts only: the supersession check. See below.
+6. `autopilot` and `proactive` rows only, first parts only: the availability check, and for a
+   `proactive` row the proactive window. See below.
+7. `autopilot` and `proactive` rows only, first parts only: the supersession check. See below.
 8. The pre-send part: `mark_read`, a pause, `show_typing`; a later part of a reply only `show_typing`.
    See below.
 9. Re-read the contact and run the guard again. There is no supersession check here (CYR-43).
@@ -170,10 +180,19 @@ The stale rule runs first, so a row held past 6 h from its `due_at` is cancelled
 comes back, as for a limit. Why a planned row does not run into this:
 [humanization.md](humanization.md#the-safety-net).
 
+**`proactive` rows (CYR-23)** go through the same check, and then through one more: a first part due
+outside the profile's `proactive_window` goes back to `scheduled` at the next window start plus
+`uniform(postponed_spread_minutes)`, with `error_class = outside_window` (`ERROR_OUTSIDE_WINDOW`), in the
+same `_hold_outside_hours` step. It is not an attempt, `due_at` stays and the owner gets no notice. The
+job already plans inside the window; this net catches a row moved there by a limit or a flood wait, or a
+profile changed while it waits. `autopilot` and `manual_test` rows ignore the proactive window.
+
 ### The supersession check
 
-CYR-41, narrowed by CYR-43. For rows of source `autopilot` only; a `manual_test` row is never superseded,
-and neither is a first part without a `trigger_message_id`. A first part (or a single row) is superseded
+CYR-41, narrowed by CYR-43. For rows of source `autopilot` and, since CYR-23, `proactive`; a
+`manual_test` row is never superseded, and neither is a first part without a `trigger_message_id`. The
+trigger of a `proactive` row is our own last message, so the contact writing again or anyone writing in
+the chat cancels a follow-up that has not started. A first part (or a single row) is superseded
 when the latest message of its contact, by `(created_at, id)` as everywhere else
 ([Message times](contact-lifecycle.md#message-times)), is newer than its trigger message. Any newer
 message counts, incoming (the contact wrote again) or outgoing (the owner or the sender answered). An
@@ -504,7 +523,7 @@ and shown is the Telethon class name, never the base class of a subclass.
 | Any other exception | Same as `SendUncertain` | `uncertain` | Once |
 | The send deadline passed | Same as `SendUncertain` | `uncertain` | Once |
 | Storing the failure or `complete_send` failed | The row stays `sending`; the stale check fails it | `interrupted` | Once, by the stale check |
-| A newer message than the trigger exists when a first part is claimed, before its read mark (`autopilot` rows with a trigger only; never a later part, never after the read mark, CYR-43) | `cancelled`, reason `superseded`; nothing is sent, nothing counted | none | None |
+| A newer message than the trigger exists when a first part is claimed, before its read mark (`autopilot` and `proactive` rows with a trigger only; never a later part, never after the read mark, CYR-43, CYR-23) | `cancelled`, reason `superseded`; nothing is sent, nothing counted | none | None |
 | The part before this one is `failed` or `cancelled` | `cancelled` before any claim, reason `predecessor`; nothing is sent | none | None |
 | The row is stale when claimed | `cancelled`, reason `stale`; nothing is sent | none (`cancel_reason = stale`) | A summary with the count, first at once, then at most hourly |
 
@@ -577,6 +596,7 @@ with the class name, and the loop goes on: one bad row never stops it. Only canc
 | --- | --- | --- | --- |
 | `manual_test` | The owner's `outbox enqueue` command | No | Yes |
 | `autopilot` | The reply job of the worker (CYR-17), [autopilot.md](autopilot.md) | Yes | Yes |
+| `proactive` | The proactive job of the worker (CYR-23), [proactive.md](proactive.md); also needs `PROACTIVE_ENABLED` | Yes | Yes |
 
 `AUTOPILOT_ENABLED` defaults to `false`. With it off the app enqueues no job, the job writes no row,
 and an `autopilot` row left in the outbox is cancelled by the guard (`autopilot_disabled`). Switch it
@@ -595,7 +615,7 @@ database up. The sending itself is done by the running app.
 | `outbox list [--state S] [--limit N]` | `make outbox-list [STATE=...] [LIMIT=...]` | Newest first (default 50, 1 to 1000): id, contact id, source, state, `send_at`, `due_at`, error class, `cancel_reason`. An empty value prints `-`. The reason is a stored constant such as `cancelled_by_owner`, `stale`, `superseded`, `predecessor`, `send_rejected` or a guard refusal, so a stale cancel is told apart from an owner cancel. Never a text |
 | `outbox cancel ID` | `make outbox-cancel ID=...` | Cancels a `scheduled` row. A row in any other state is refused with a message |
 | `outbox retry ID [--in-seconds N] [--yes]` | `make outbox-retry ID=... [IN=...] [YES=1]` | Only for a `failed` row; any other state is refused with a message. Without `--yes` it prints a reminder to check the chat first and changes nothing. With `--yes` it sets `scheduled`, `send_at` and `due_at` to now + N seconds (default 5, 0 to 86400), clears `error_class` and `cancel_reason`, and prints the row id and the planned time |
-| `outbox status` | `make outbox-status` | The sender state (running, paused with the time and reason, stopped with the reason), the six counters against their limits, and the rows per state (both sources; `autopilot status` counts the `autopilot` rows alone). Never a text, a name or a Telegram id |
+| `outbox status` | `make outbox-status` | The sender state (running, paused with the time and reason, stopped with the reason), the six counters against their limits, and the rows per state (every source; `autopilot status` counts the `autopilot` and the `proactive` rows apart). Never a text, a name or a Telegram id |
 | `outbox resume [--yes]` | `make outbox-resume [YES=1]` | Clears a pause, or with `--yes` also a stop, and says what was cleared. Nothing to clear is a harmless message and exit 0. Without `--yes` a stopped sender stays exactly as it is: it prints a reminder to check the account first and exits 1 |
 
 The per-contact counters in `outbox status` show the contact with the most messages in that window

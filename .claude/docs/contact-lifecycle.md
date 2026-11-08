@@ -22,7 +22,7 @@ marked with its ticket.
 | `new` | Registered by the userbot from an unknown sender | Never | userbot (CYR-10, exists) |
 | `pending` | A card was delivered to the owner, waiting for a decision | No | card announcer (CYR-12, exists) |
 | `active` | The owner pressed Reply and chose a mode | Yes: the autopilot writes the reply (CYR-17, only with `AUTOPILOT_ENABLED=true`) and the sender sends it (CYR-19) | owner (CYR-12 exists, modes CYR-15) |
-| `paused` | Stopped by Telegram refusing to deliver to the contact, by a stop-trigger, by a manual message of the owner, by two unanswered proactive messages, or by the owner. The column `pause_reason` says which | No | sender (CYR-22, exists), manual-message detector (CYR-21, exists), hand-over on a stop-trigger (CYR-20, exists), system (CYR-23) or owner |
+| `paused` | Stopped by Telegram refusing to deliver to the contact, by a stop-trigger, by a manual message of the owner, or by the owner. The column `pause_reason` says which | No | sender (CYR-22, exists), manual-message detector (CYR-21, exists), hand-over on a stop-trigger (CYR-20, exists) or owner |
 | `ignored` | The owner pressed Ignore on the card or on the hand-over notice | Never; silence forever | owner (CYR-12, CYR-20, exist) |
 
 Only `active` is allowed to receive an automatic reply. See [S1](safety-rules.md).
@@ -43,7 +43,6 @@ The triggers marked "exists" are implemented; the others are planned. Changing t
 | `active` | `paused` | Telegram refused a send because of the recipient (blocked, privacy, deactivated, not found, forbidden) | sender | CYR-22 (exists) |
 | `active` | `paused` | A stop-trigger fires on a new incoming message (`pause_reason = stop_trigger`) | `HandOverService` | CYR-20 (exists) |
 | `active` | `paused` | The owner writes a manual message in the chat from the second account | manual-message detector | CYR-21 (exists) |
-| `active` | `paused` | Two proactive messages in a row stay unanswered | system | CYR-23 |
 | `active` | `paused` | The owner pauses the contact (`pause_reason = owner` exists in the enum; nothing sets it yet) | owner | none yet |
 | `active` | `ignored` | The owner ignores the contact | owner | none yet |
 | `paused` | `active` | Owner presses Resume on the manual-pause or the hand-over notice; `reply_after` is set to the resume time (CYR-17) | owner, through `PauseActions` | CYR-21, CYR-20 (exist) |
@@ -94,7 +93,7 @@ otherwise the `default` mode. If `default` itself is missing or disabled they ra
 | 8 | The layered prompt is built: persona, mode fragment with few-shot examples, contact summary, last N messages | CYR-14, CYR-15, CYR-16, CYR-25 |
 | 9 | The LLM is called through the LLM interface; the response is validated | CYR-13 |
 | 10 | The job asks the planner for the send time ([humanization.md](humanization.md)) and writes an `autopilot` row, or a chain of up to three when the reply has several lines, one message per line (CYR-36). The sender sends it: status guard, FloodWait handling, rate limits, the read mark, typing and quiet hours, the parts in order (see [outbox-and-sender.md](outbox-and-sender.md)). In a lively conversation the chat was already marked read soon after the message by the early read ([humanization.md](humanization.md#the-early-read)); the read mark of the pre-send part then repeats it harmlessly | CYR-19, CYR-22, CYR-18, CYR-17, CYR-36, CYR-44 |
-| 11 | Background: contact summaries of `active` and `paused` contacts every `SUMMARY_EVERY_MESSAGES` messages (exists, [summaries.md](summaries.md)); proactive messages and reminders for undecided cards (planned) | CYR-25, CYR-23, CYR-24 |
+| 11 | Background: contact summaries of `active` and `paused` contacts every `SUMMARY_EVERY_MESSAGES` messages (exists, [summaries.md](summaries.md)); proactive messages to an `active` contact after a long silence after our last message (exists behind `PROACTIVE_ENABLED`, [proactive.md](proactive.md)); reminders for undecided cards (planned) | CYR-25, CYR-23, CYR-24 |
 
 Stop-triggers are detected three times: by the pattern detector on the incoming text (step 5), by
 the same detector on the whole burst in the job (step 7), and by the model's `NEEDS_OWNER` signal in
@@ -421,7 +420,8 @@ Fixed in CYR-9. Table `contacts`:
 | `summary` | JSONB object: the contact summary (CYR-25), `{}` when there is none: `version`, `updated_at`, `cursor` (the `created_at` and id of the last message it covers) and `data` (the fields of [summaries.md](summaries.md#the-schema)). Written only by the summary updater and cleared only by `summary clear` |
 | `summary_failed_at` | When the last summary update failed, or `NULL`; the sweeper skips the contact for 10 minutes after it, and a successful update or `summary clear` empties it (migration `0011`, CYR-25) |
 | `last_message_at` | Time of the latest message **from the contact**, in the message time of [Message times](#message-times); only moves forward, a late event or an older replayed message does not take it back. A message we send does not move it (CYR-19) |
-| `reply_after` | When the owner last resumed the contact, or `NULL`; the autopilot never answers a message whose time is at or before it (migration `0009`, CYR-17) |
+| `reply_after` | When the owner last resumed the contact, or `NULL`; the autopilot never answers a message whose time is at or before it (migration `0009`, CYR-17), and the silence of a proactive message counts from it when it is later than the last message (CYR-23). Since the wrap-up part of CYR-23 it also moves forward, never backwards and without a status change, to the time of a message the model chose not to answer with `SKIP` shortly before a night or busy window (`ContactRepository.set_reply_after`, called only by the reply job) |
+| `proactive_not_before` | The moment before which no proactive message is considered, or `NULL` (migration `0013`, CYR-23). Written only by the proactive job: now + `PROACTIVE_MIN_INTERVAL_HOURS` after it wrote a message, now + 12 h after the model answered `SKIP`, now + 1 h after a stop or a final cooldown pause. Nothing clears it; it simply passes |
 | `created_at`, `updated_at` | `updated_at` moves only when a row really changes |
 
 Message history is in table `messages` (the "last N messages" come from here), one row per Telegram
@@ -430,7 +430,9 @@ message: `contact_id`, `direction` (`incoming`, `outgoing`), `text`, `tg_message
 `complete_send`, in one transaction with marking the outbox row sent, with the Telegram message id and
 Telegram's send time (CYR-19), and, for messages the owner wrote by hand, by the manual-message
 detector with the resolved send time (Telegram's, or now by the rule of [Message times](#message-times)) as `created_at` and without moving `last_message_at` (CYR-21, CYR-40).
-The counter of unanswered proactive messages does not exist yet; CYR-23 adds it with a migration.
+There is no counter of unanswered proactive messages: the proactive rule counts the `proactive` rows of
+the outbox after the contact's last message ([proactive.md](proactive.md#the-eligibility-rule)), and a
+proactive message never changes the status (CYR-23).
 
 All timestamps are `timestamptz` stored in UTC. All of it is personal data: it stays in the database
 and the media volume, is never logged at INFO or above and never goes to git

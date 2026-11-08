@@ -30,6 +30,7 @@ EMOJI = "\N{GRINNING FACE}"
 @dataclass(frozen=True)
 class _Switch:
     autopilot_enabled: bool
+    proactive_enabled: bool = True
 
 
 class _CountingGuard(SendGuard):

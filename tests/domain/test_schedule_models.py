@@ -106,7 +106,7 @@ def test_a_valid_full_profile_round_trips_through_its_stored_form() -> None:
     assert profile.busy[0].start == time(9, 0)
     assert ScheduleProfile.model_validate(profile.stored_data()) == profile
     assert profile.stored_data()["busy"] == [
-        {"days": ["mon", "sun"], "from": "09:00", "to": "09:01"}
+        {"days": ["mon", "sun"], "from": "09:00", "to": "09:01", "label": "занят"}
     ]
     assert profile.stored_data()["night"] == document["night"]
 

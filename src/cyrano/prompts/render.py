@@ -4,10 +4,11 @@ import json
 from collections.abc import Sequence
 from datetime import datetime
 
-from cyrano.domain.enums import MessageDirection, TurnRole
+from cyrano.domain.enums import BlockKind, MessageDirection, TurnRole, WrapUpPhase
 from cyrano.domain.gender import UNKNOWN_GENDER_LABEL
 from cyrano.domain.models import Message
 from cyrano.domain.reply import ContactFacts
+from cyrano.domain.schedule import UnavailableSoon
 from cyrano.domain.style import StyleExample, Turn
 from cyrano.domain.summary import ContactSummary
 from cyrano.prompts.texts import (
@@ -38,6 +39,11 @@ from cyrano.prompts.texts import (
     NO_TEXT_PLACEHOLDER,
     OWNER_LABEL,
     PERSONA_HEADER,
+    PROACTIVE_HOUR_UNIT,
+    PROACTIVE_HOURS_UNIT,
+    PROACTIVE_INSTRUCTIONS,
+    PROACTIVE_REQUEST,
+    SKIP_SIGNAL,
     SUMMARY_AGE_LABEL,
     SUMMARY_AGREEMENTS_LABEL,
     SUMMARY_BOUNDARY,
@@ -64,7 +70,19 @@ from cyrano.prompts.texts import (
     TIME_LINE,
     TOLD_ABOUT_OWNER_NOTE,
     WEEKDAYS,
+    WRAPUP_HARD_INSTRUCTIONS,
+    WRAPUP_LINE,
+    WRAPUP_MINUTE_UNIT,
+    WRAPUP_MINUTES_UNIT,
+    WRAPUP_SKIP_RULE,
+    WRAPUP_SLEEP_REASON,
+    WRAPUP_SOFT_INSTRUCTIONS,
 )
+
+WRAPUP_INSTRUCTIONS = {
+    WrapUpPhase.SOFT: WRAPUP_SOFT_INSTRUCTIONS,
+    WrapUpPhase.HARD: WRAPUP_HARD_INSTRUCTIONS,
+}
 
 LINE_BREAK = "\n"
 
@@ -128,6 +146,30 @@ def _example_block(number: int, example: StyleExample) -> str:
     return LINE_BREAK.join([EXAMPLE_TITLE.format(number=number), *lines])
 
 
+def render_proactive_instructions(silence_hours: int) -> str:
+    unit = PROACTIVE_HOUR_UNIT if silence_hours == 1 else PROACTIVE_HOURS_UNIT
+    return PROACTIVE_INSTRUCTIONS.format(hours=silence_hours, unit=unit, signal=SKIP_SIGNAL)
+
+
+def render_wrapup_instructions(phase: WrapUpPhase) -> str:
+    return " ".join([WRAPUP_INSTRUCTIONS[phase], WRAPUP_SKIP_RULE.format(signal=SKIP_SIGNAL)])
+
+
+def wrapup_reason(soon: UnavailableSoon) -> str:
+    if soon.kind is BlockKind.NIGHT or soon.label is None:
+        return WRAPUP_SLEEP_REASON
+    return one_line(strip_layer_headers(soon.label))
+
+
+def render_wrapup_line(soon: UnavailableSoon) -> str:
+    unit = WRAPUP_MINUTE_UNIT if soon.minutes_left == 1 else WRAPUP_MINUTES_UNIT
+    return WRAPUP_LINE.format(minutes=soon.minutes_left, unit=unit, reason=wrapup_reason(soon))
+
+
+def render_proactive_request() -> str:
+    return PROACTIVE_REQUEST.format(signal=SKIP_SIGNAL)
+
+
 def render_system_prompt(
     *,
     persona: str,
@@ -135,8 +177,16 @@ def render_system_prompt(
     facts: ContactFacts,
     summary: str | None,
     examples: Sequence[StyleExample],
+    proactive_hours: int | None = None,
+    wrapup_phase: WrapUpPhase | None = None,
 ) -> str:
-    layers = [_layer(INSTRUCTIONS_HEADER, INSTRUCTIONS), _layer(PERSONA_HEADER, persona)]
+    paragraphs = [INSTRUCTIONS]
+    if proactive_hours is not None:
+        paragraphs.append(render_proactive_instructions(proactive_hours))
+    if wrapup_phase is not None:
+        paragraphs.append(render_wrapup_instructions(wrapup_phase))
+    instructions = LAYER_SEPARATOR.join(paragraphs)
+    layers = [_layer(INSTRUCTIONS_HEADER, instructions), _layer(PERSONA_HEADER, persona)]
     if mode_fragment.strip():
         layers.append(_layer(MODE_HEADER, mode_fragment.strip()))
     layers.append(_layer(FACTS_HEADER, FACTS_NOTE, *_facts_lines(facts)))
@@ -165,10 +215,20 @@ def _dialogue_line(message: Message) -> str:
     return labelled(label, strip_boundary(message.text))
 
 
-def render_user_prompt(*, now: datetime, timezone_name: str, messages: Sequence[Message]) -> str:
+def render_user_prompt(
+    *,
+    now: datetime,
+    timezone_name: str,
+    messages: Sequence[Message],
+    request: str = NEXT_MESSAGE_REQUEST,
+    wrapup: UnavailableSoon | None = None,
+) -> str:
     dialogue = [_dialogue_line(message) for message in messages]
     block = LINE_BREAK.join([DIALOGUE_BEGIN, *dialogue, DIALOGUE_END])
-    return LAYER_SEPARATOR.join([render_time_line(now, timezone_name), block, NEXT_MESSAGE_REQUEST])
+    header = render_time_line(now, timezone_name)
+    if wrapup is not None:
+        header = LINE_BREAK.join([header, render_wrapup_line(wrapup)])
+    return LAYER_SEPARATOR.join([header, block, request])
 
 
 def _summary_lines(summary: ContactSummary) -> list[str]:

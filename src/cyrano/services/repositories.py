@@ -25,6 +25,7 @@ from cyrano.domain.models import (
     StatusChange,
 )
 from cyrano.domain.outbox import OutgoingPeak, ScheduledMessage, SenderState
+from cyrano.domain.proactive import DialogueTail, ProactiveDue
 from cyrano.domain.schedule import ScheduleProfile
 from cyrano.domain.style import ExamplesAddResult, Persona, StyleExample, StyleExampleCreate
 from cyrano.domain.summary import StoredSummary, SummaryCursor, SummaryDue
@@ -58,6 +59,8 @@ class ContactRepository(Protocol):
     ) -> Contact: ...
 
     async def touch_last_message_at(self, contact_id: int, at: datetime) -> Contact: ...
+
+    async def set_reply_after(self, contact_id: int, when: datetime) -> Contact: ...
 
     async def list_by_status(self, status: ContactStatus) -> list[Contact]: ...
 
@@ -228,3 +231,25 @@ class SummaryRepository(Protocol):
     async def contacts_due_for_summary(
         self, *, every: int, cooldown: timedelta, now: datetime, limit: int
     ) -> list[SummaryDue]: ...
+
+
+class ProactiveRepository(Protocol):
+    async def dialogue_tail(self, contact_id: int) -> DialogueTail: ...
+
+    async def count_proactive_after(self, contact_id: int, message_id: int) -> int: ...
+
+    async def newest_proactive_due_at(self, contact_id: int) -> datetime | None: ...
+
+    async def count_proactive_due_since(self, since: datetime) -> int: ...
+
+    async def contacts_due_for_proactive(
+        self,
+        *,
+        silent_since: datetime,
+        now: datetime,
+        max_per_silence: int,
+        interval_since: datetime,
+        limit: int,
+    ) -> list[ProactiveDue]: ...
+
+    async def set_proactive_not_before(self, contact_id: int, when: datetime) -> None: ...

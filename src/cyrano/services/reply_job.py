@@ -25,6 +25,7 @@ from cyrano.domain.enums import (
     OutboxSource,
     ReplyJobOutcome,
     ReplyJobReason,
+    ReplyPurpose,
     TriggerClass,
     TriggerSource,
 )
@@ -44,6 +45,7 @@ from cyrano.domain.errors import (
 from cyrano.domain.models import Message
 from cyrano.domain.outbox import CANCEL_REASON_SUPERSEDED
 from cyrano.domain.reply import GeneratedReply
+from cyrano.domain.schedule import UnavailableSoon
 from cyrano.services.hand_over import HandOverService
 from cyrano.services.humanization import HumanizationPlanner
 from cyrano.services.outbox_sender import OWNER_NOTIFY_DEADLINE
@@ -61,6 +63,8 @@ from cyrano.services.send_guard import GuardSettings
 from cyrano.services.stop_triggers import detect
 
 logger = logging.getLogger("cyrano.services.reply_job")
+
+REPLY_RETRY_MESSAGE = "reply job will be retried"
 
 
 @dataclass(frozen=True, slots=True)
@@ -97,6 +101,153 @@ def _adopted(result: ReplyJobResult) -> ReplyJobResult:
     return result
 
 
+class GenerationPolicy:
+    def __init__(
+        self,
+        *,
+        state: AutopilotStateRepository,
+        generator: ReplyGenerator,
+        hand_over: HandOverService,
+        notifier: OwnerNotifier,
+        notices: AutopilotNotices,
+        max_tokens: int,
+        clock: Callable[[], datetime],
+        notify_deadline: float = OWNER_NOTIFY_DEADLINE,
+    ) -> None:
+        self._state = state
+        self._generator = generator
+        self._hand_over = hand_over
+        self._notifier = notifier
+        self._notices = notices
+        self._retry_max_tokens = min(max_tokens * TRUNCATION_RETRY_FACTOR, TRUNCATION_MAX_TOKENS)
+        self._clock = clock
+        self._notify_deadline = notify_deadline
+
+    async def generate(
+        self,
+        contact_id: int,
+        *,
+        purpose: ReplyPurpose = ReplyPurpose.REPLY,
+        wrapup: UnavailableSoon | None = None,
+    ) -> GeneratedReply | ReplyJobResult:
+        max_tokens: int | None = None
+        invalid_retried = False
+        truncation_retried = False
+        while True:
+            try:
+                reply = await self._generator.generate(
+                    contact_id, max_tokens=max_tokens, purpose=purpose, wrapup=wrapup
+                )
+            except ReplyInvalid:
+                if invalid_retried:
+                    return await self.handed_over_by_model(contact_id, ReplyJobReason.REPLY_INVALID)
+                invalid_retried = True
+                continue
+            except PromptTooLarge:
+                return await self.handed_over_by_model(contact_id, ReplyJobReason.PROMPT_TOO_LARGE)
+            except DefaultModeUnavailable:
+                return await self.handed_over_by_model(contact_id, ReplyJobReason.MODE_UNAVAILABLE)
+            except NoMessagesToReplyTo:
+                return _skip(ReplyJobReason.NO_MESSAGES)
+            except ContactNotFound:
+                return _skip(ReplyJobReason.CONTACT_MISSING)
+            except PersonaMissing as exc:
+                return await self._stop(AutopilotStopReason.PERSONA_MISSING, type(exc).__name__)
+            except LLMAuthError as exc:
+                return await self._stop(AutopilotStopReason.PROVIDER_AUTH, type(exc).__name__)
+            except LLMRequestError as exc:
+                return await self._stop(AutopilotStopReason.PROVIDER_REQUEST, type(exc).__name__)
+            if reply.needs_owner:
+                return await self.handed_over_by_model(contact_id, ReplyJobReason.NEEDS_OWNER)
+            if reply.skipped:
+                return reply
+            if reply.truncated:
+                if truncation_retried:
+                    return await self.handed_over_by_model(contact_id, ReplyJobReason.TRUNCATED)
+                truncation_retried = True
+                max_tokens = self._retry_max_tokens
+                continue
+            return reply
+
+    async def handed_over_by_model(self, contact_id: int, reason: ReplyJobReason) -> ReplyJobResult:
+        return await self.handed_over(contact_id, reason, (), TriggerSource.MODEL)
+
+    async def handed_over(
+        self,
+        contact_id: int,
+        reason: ReplyJobReason,
+        classes: Sequence[TriggerClass],
+        source: TriggerSource,
+    ) -> ReplyJobResult:
+        outcome = await self._hand_over.hand_over(contact_id, classes, source)
+        return ReplyJobResult(
+            outcome=ReplyJobOutcome.HANDED_OVER, reason=reason, detail=outcome.value
+        )
+
+    async def transient(
+        self,
+        error: Exception,
+        attempt: int,
+        contact_id: int,
+        job: Mapping[str, int],
+        *,
+        retry_message: str = REPLY_RETRY_MESSAGE,
+    ) -> ReplyJobResult:
+        error_class = type(error).__name__
+        delay = retry_delay(attempt)
+        if delay is not None:
+            logger.info(
+                retry_message,
+                extra={
+                    "contact_id": contact_id,
+                    **job,
+                    "attempt": attempt,
+                    "error": error_class,
+                    "defer_seconds": delay,
+                },
+            )
+            raise RetryJob(delay, error_class) from None
+        try:
+            return await self._pause(AutopilotPauseReason.PROVIDER_UNAVAILABLE, error_class)
+        except Exception as exc:
+            logger.error(
+                "autopilot pause failed",
+                extra={"contact_id": contact_id, "error": type(exc).__name__},
+            )
+            return _skip(ReplyJobReason.PROVIDER_UNAVAILABLE, error_class)
+
+    async def _stop(self, reason: AutopilotStopReason, error: str) -> ReplyJobResult:
+        if await self._state.stop(reason):
+            await self._notify(
+                self._notices.stopped.format(reason=self._notices.stop_reasons[reason], error=error)
+            )
+        return ReplyJobResult(
+            outcome=ReplyJobOutcome.STOPPED, reason=ReplyJobReason(reason.value), detail=error
+        )
+
+    async def _pause(self, reason: AutopilotPauseReason, error: str) -> ReplyJobResult:
+        now = self._clock()
+        until = now + timedelta(seconds=PROVIDER_COOLDOWN_SECONDS)
+        if await self._state.pause_until(until, reason, now=now):
+            await self._notify(
+                self._notices.paused.format(
+                    minutes=PROVIDER_COOLDOWN_SECONDS // SECONDS_PER_MINUTE,
+                    reason=self._notices.pause_reasons[reason],
+                    error=error,
+                )
+            )
+        return ReplyJobResult(
+            outcome=ReplyJobOutcome.PAUSED, reason=ReplyJobReason(reason.value), detail=error
+        )
+
+    async def _notify(self, text: str) -> None:
+        try:
+            async with asyncio.timeout(self._notify_deadline):
+                await self._notifier.notify(text)
+        except Exception as exc:
+            logger.warning("autopilot notice was not sent", extra={"error": type(exc).__name__})
+
+
 class ReplyJobRunner:
     def __init__(
         self,
@@ -116,22 +267,28 @@ class ReplyJobRunner:
         max_burst_wait_seconds: int,
         clock: Callable[[], datetime],
         notify_deadline: float = OWNER_NOTIFY_DEADLINE,
+        wrapup_enabled: bool = False,
     ) -> None:
         self._contacts = contacts
+        self._wrapup_enabled = wrapup_enabled
         self._messages = messages
         self._outbox = outbox
         self._state = state
-        self._generator = generator
-        self._hand_over = hand_over
         self._planner = planner
         self._enqueuer = enqueuer
-        self._notifier = notifier
-        self._notices = notices
         self._switch = switch
-        self._retry_max_tokens = min(max_tokens * TRUNCATION_RETRY_FACTOR, TRUNCATION_MAX_TOKENS)
         self._max_burst_wait = timedelta(seconds=max_burst_wait_seconds)
         self._clock = clock
-        self._notify_deadline = notify_deadline
+        self._policy = GenerationPolicy(
+            state=state,
+            generator=generator,
+            hand_over=hand_over,
+            notifier=notifier,
+            notices=notices,
+            max_tokens=max_tokens,
+            clock=clock,
+            notify_deadline=notify_deadline,
+        )
 
     async def run(
         self, contact_id: int, trigger_message_id: int, *, attempt: int = 1
@@ -139,7 +296,9 @@ class ReplyJobRunner:
         try:
             result = await self._steps(contact_id, trigger_message_id)
         except Exception as exc:
-            result = await self._transient(exc, attempt, contact_id, trigger_message_id)
+            result = await self._policy.transient(
+                exc, attempt, contact_id, {"trigger_message_id": trigger_message_id}
+            )
         logger.info(
             "reply job finished",
             extra={
@@ -208,51 +367,24 @@ class ReplyJobRunner:
             return _skip(ReplyJobReason.ROW_EXISTS)
         decision = detect(burst_texts(history, reply_after))
         if decision.triggered:
-            return await self._handed_over(
+            return await self._policy.handed_over(
                 contact_id, ReplyJobReason.TEXT_TRIGGER, decision.ordered(), TriggerSource.TEXT
             )
-        generated = await self._generate(contact_id)
+        wrapup = await self._wrapup(now)
+        generated = await self._policy.generate(contact_id, wrapup=wrapup)
         if isinstance(generated, ReplyJobResult):
             return generated
-        return await self._enqueue(contact_id, trigger.id, generated, now, adopted=adopted)
+        if generated.skipped:
+            await self._contacts.set_reply_after(contact_id, trigger.created_at)
+            return _skip(ReplyJobReason.MODEL_SKIP)
+        return await self._enqueue(
+            contact_id, trigger.id, generated, now, adopted=adopted, wrapup=wrapup
+        )
 
-    async def _generate(self, contact_id: int) -> GeneratedReply | ReplyJobResult:
-        max_tokens: int | None = None
-        invalid_retried = False
-        truncation_retried = False
-        while True:
-            try:
-                reply = await self._generator.generate(contact_id, max_tokens=max_tokens)
-            except ReplyInvalid:
-                if invalid_retried:
-                    return await self._handed_over_by_model(
-                        contact_id, ReplyJobReason.REPLY_INVALID
-                    )
-                invalid_retried = True
-                continue
-            except PromptTooLarge:
-                return await self._handed_over_by_model(contact_id, ReplyJobReason.PROMPT_TOO_LARGE)
-            except DefaultModeUnavailable:
-                return await self._handed_over_by_model(contact_id, ReplyJobReason.MODE_UNAVAILABLE)
-            except NoMessagesToReplyTo:
-                return _skip(ReplyJobReason.NO_MESSAGES)
-            except ContactNotFound:
-                return _skip(ReplyJobReason.CONTACT_MISSING)
-            except PersonaMissing as exc:
-                return await self._stop(AutopilotStopReason.PERSONA_MISSING, type(exc).__name__)
-            except LLMAuthError as exc:
-                return await self._stop(AutopilotStopReason.PROVIDER_AUTH, type(exc).__name__)
-            except LLMRequestError as exc:
-                return await self._stop(AutopilotStopReason.PROVIDER_REQUEST, type(exc).__name__)
-            if reply.needs_owner:
-                return await self._handed_over_by_model(contact_id, ReplyJobReason.NEEDS_OWNER)
-            if reply.truncated:
-                if truncation_retried:
-                    return await self._handed_over_by_model(contact_id, ReplyJobReason.TRUNCATED)
-                truncation_retried = True
-                max_tokens = self._retry_max_tokens
-                continue
-            return reply
+    async def _wrapup(self, now: datetime) -> UnavailableSoon | None:
+        if not self._wrapup_enabled:
+            return None
+        return await self._planner.unavailable_soon(now)
 
     async def _enqueue(
         self,
@@ -262,10 +394,17 @@ class ReplyJobRunner:
         now: datetime,
         *,
         adopted: bool,
+        wrapup: UnavailableSoon | None,
     ) -> ReplyJobResult:
+        parts = split_reply(reply.text)
         try:
             plan = await self._planner.plan(
-                contact_id, trigger_id, now, ongoing=True if adopted else None
+                contact_id,
+                trigger_id,
+                now,
+                ongoing=True if adopted else None,
+                wrapup=wrapup,
+                first_part=parts[0] if parts else "",
             )
         except PlanNotPossible:
             return _skip(ReplyJobReason.PLAN_NOT_POSSIBLE)
@@ -275,7 +414,7 @@ class ReplyJobRunner:
         try:
             rows = await self._enqueuer.enqueue_sequence(
                 contact_id,
-                split_reply(reply.text),
+                parts,
                 plan.send_at,
                 OutboxSource.AUTOPILOT,
                 trigger_id,
@@ -289,77 +428,3 @@ class ReplyJobRunner:
             row_id=rows[0].id,
             parts=len(rows),
         )
-
-    async def _handed_over_by_model(
-        self, contact_id: int, reason: ReplyJobReason
-    ) -> ReplyJobResult:
-        return await self._handed_over(contact_id, reason, (), TriggerSource.MODEL)
-
-    async def _handed_over(
-        self,
-        contact_id: int,
-        reason: ReplyJobReason,
-        classes: Sequence[TriggerClass],
-        source: TriggerSource,
-    ) -> ReplyJobResult:
-        outcome = await self._hand_over.hand_over(contact_id, classes, source)
-        return ReplyJobResult(
-            outcome=ReplyJobOutcome.HANDED_OVER, reason=reason, detail=outcome.value
-        )
-
-    async def _stop(self, reason: AutopilotStopReason, error: str) -> ReplyJobResult:
-        if await self._state.stop(reason):
-            await self._notify(
-                self._notices.stopped.format(reason=self._notices.stop_reasons[reason], error=error)
-            )
-        return ReplyJobResult(
-            outcome=ReplyJobOutcome.STOPPED, reason=ReplyJobReason(reason.value), detail=error
-        )
-
-    async def _transient(
-        self, error: Exception, attempt: int, contact_id: int, trigger_message_id: int
-    ) -> ReplyJobResult:
-        error_class = type(error).__name__
-        delay = retry_delay(attempt)
-        if delay is not None:
-            logger.info(
-                "reply job will be retried",
-                extra={
-                    "contact_id": contact_id,
-                    "trigger_message_id": trigger_message_id,
-                    "attempt": attempt,
-                    "error": error_class,
-                    "defer_seconds": delay,
-                },
-            )
-            raise RetryJob(delay, error_class) from None
-        try:
-            return await self._pause(AutopilotPauseReason.PROVIDER_UNAVAILABLE, error_class)
-        except Exception as exc:
-            logger.error(
-                "autopilot pause failed",
-                extra={"contact_id": contact_id, "error": type(exc).__name__},
-            )
-            return _skip(ReplyJobReason.PROVIDER_UNAVAILABLE, error_class)
-
-    async def _pause(self, reason: AutopilotPauseReason, error: str) -> ReplyJobResult:
-        now = self._clock()
-        until = now + timedelta(seconds=PROVIDER_COOLDOWN_SECONDS)
-        if await self._state.pause_until(until, reason, now=now):
-            await self._notify(
-                self._notices.paused.format(
-                    minutes=PROVIDER_COOLDOWN_SECONDS // SECONDS_PER_MINUTE,
-                    reason=self._notices.pause_reasons[reason],
-                    error=error,
-                )
-            )
-        return ReplyJobResult(
-            outcome=ReplyJobOutcome.PAUSED, reason=ReplyJobReason(reason.value), detail=error
-        )
-
-    async def _notify(self, text: str) -> None:
-        try:
-            async with asyncio.timeout(self._notify_deadline):
-                await self._notifier.notify(text)
-        except Exception as exc:
-            logger.warning("autopilot notice was not sent", extra={"error": type(exc).__name__})

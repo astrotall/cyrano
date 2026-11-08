@@ -156,6 +156,7 @@ NOTICE_PATHS = [
 @dataclass(frozen=True)
 class _Switch:
     autopilot_enabled: bool = False
+    proactive_enabled: bool = False
 
 
 class _Raw:

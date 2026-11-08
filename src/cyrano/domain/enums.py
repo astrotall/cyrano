@@ -104,6 +104,7 @@ class OutboxState(StrEnum):
 class OutboxSource(StrEnum):
     AUTOPILOT = "autopilot"
     MANUAL_TEST = "manual_test"
+    PROACTIVE = "proactive"
 
 
 class RejectionReason(StrEnum):
@@ -137,11 +138,18 @@ class BlockKind(StrEnum):
     BUSY = "busy"
 
 
+class WrapUpPhase(StrEnum):
+    SOFT = "soft"
+    HARD = "hard"
+
+
 class PlanReason(StrEnum):
     ONGOING = "ongoing"
     DELAYED = "delayed"
     POSTPONED_NIGHT = "postponed_night"
     POSTPONED_BUSY = "postponed_busy"
+    POSTPONED_WINDOW = "postponed_window"
+    WRAPUP = "wrapup"
     EXHAUSTED = "exhausted"
 
 
@@ -212,6 +220,7 @@ class ReplyJobReason(StrEnum):
     PROVIDER_UNAVAILABLE = "provider_unavailable"
     PLAN_NOT_POSSIBLE = "plan_not_possible"
     ENQUEUE_REFUSED = "enqueue_refused"
+    MODEL_SKIP = "model_skip"
 
 
 class SummaryOutcome(StrEnum):
@@ -254,3 +263,70 @@ class EarlyReadOutcome(StrEnum):
     FAILED = "failed"
     SKIPPED = "skipped"
     DROPPED = "dropped"
+
+
+class ReplyPurpose(StrEnum):
+    REPLY = "reply"
+    PROACTIVE = "proactive"
+
+
+class ProactiveReason(StrEnum):
+    ELIGIBLE = "eligible"
+    PROACTIVE_DISABLED = "proactive_disabled"
+    AUTOPILOT_DISABLED = "autopilot_disabled"
+    AUTOPILOT_STOPPED = "autopilot_stopped"
+    AUTOPILOT_PAUSED = "autopilot_paused"
+    SENDER_STOPPED = "sender_stopped"
+    SENDER_PAUSED = "sender_paused"
+    UNAVAILABLE_SOON = "unavailable_soon"
+    CONTACT_MISSING = "contact_missing"
+    CONTACT_NOT_ACTIVE = "contact_not_active"
+    POSTPONED = "postponed"
+    NO_INCOMING = "no_incoming"
+    LAST_MESSAGE_INCOMING = "last_message_incoming"
+    SILENCE_TOO_SHORT = "silence_too_short"
+    SILENCE_LIMIT_REACHED = "silence_limit_reached"
+    MIN_INTERVAL = "min_interval"
+    DAILY_LIMIT = "daily_limit"
+
+
+class ProactiveJobOutcome(StrEnum):
+    QUEUED = "queued"
+    SKIPPED = "skipped"
+    HANDED_OVER = "handed_over"
+    STOPPED = "stopped"
+    PAUSED = "paused"
+
+
+class ProactiveJobReason(StrEnum):
+    QUEUED = "queued"
+    PROACTIVE_DISABLED = "proactive_disabled"
+    AUTOPILOT_DISABLED = "autopilot_disabled"
+    AUTOPILOT_STOPPED = "autopilot_stopped"
+    AUTOPILOT_PAUSED = "autopilot_paused"
+    SENDER_STOPPED = "sender_stopped"
+    SENDER_PAUSED = "sender_paused"
+    UNAVAILABLE_SOON = "unavailable_soon"
+    CONTACT_MISSING = "contact_missing"
+    CONTACT_NOT_ACTIVE = "contact_not_active"
+    POSTPONED = "postponed"
+    NO_INCOMING = "no_incoming"
+    LAST_MESSAGE_INCOMING = "last_message_incoming"
+    SILENCE_TOO_SHORT = "silence_too_short"
+    SILENCE_LIMIT_REACHED = "silence_limit_reached"
+    MIN_INTERVAL = "min_interval"
+    DAILY_LIMIT = "daily_limit"
+    SUPERSEDED = "superseded"
+    ROW_EXISTS = "row_exists"
+    MODEL_SKIP = "model_skip"
+    NEEDS_OWNER = "needs_owner"
+    TRUNCATED = "truncated"
+    REPLY_INVALID = "reply_invalid"
+    PROMPT_TOO_LARGE = "prompt_too_large"
+    MODE_UNAVAILABLE = "mode_unavailable"
+    NO_MESSAGES = "no_messages"
+    PERSONA_MISSING = "persona_missing"
+    PROVIDER_AUTH = "provider_auth"
+    PROVIDER_REQUEST = "provider_request"
+    PROVIDER_UNAVAILABLE = "provider_unavailable"
+    ENQUEUE_REFUSED = "enqueue_refused"

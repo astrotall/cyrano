@@ -30,3 +30,16 @@ class PauseAction(StrEnum):
 class PauseCallback(CallbackData, prefix=PAUSE_CALLBACK_PREFIX):
     action: PauseAction
     contact_id: int
+
+
+GENDER_CALLBACK_PREFIX = "gender"
+
+
+class GenderAction(StrEnum):
+    FEMALE = "female"
+    MALE = "male"
+
+
+class GenderCallback(CallbackData, prefix=GENDER_CALLBACK_PREFIX):
+    action: GenderAction
+    contact_id: int

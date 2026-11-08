@@ -177,7 +177,21 @@ minutes at most, so a failing collection never keeps the owner waiting):
   bio and the matching-bot card (a short line when the card was not found), plus a line when the
   profile could not be collected. Names, bio
   and message texts come from strangers and are shown as plain text, never as markup;
-- under that message the buttons: one **Отвечать: <mode>** per enabled mode and **Игнорировать**.
+- a line with the contact's grammatical gender and where it came from (**Пол: девушка (по имени)**; the
+  source is *выбран вами*, *из переписки*, *по имени* or *по умолчанию*, or the line says *не определён*);
+- under that message the buttons: first a row **Девушка | Парень** (a check mark stands on the one in
+  force), then one **Отвечать: <mode>** per enabled mode and **Игнорировать**. While the gender is not
+  known the Reply buttons are not shown, only the gender row and Ignore: press the right gender button
+  and the Reply buttons appear on the same card. A Reply button of an older card refuses with a short
+  alert while the gender is still unknown.
+
+The gender is only grammar: the reply prompt tells the model which forms (ты была / ты был) to use
+when the contact is addressed. It is decided in this order: your choice (the buttons or
+`make contact-gender`), what the contact said about herself or himself in the conversation (the
+summary), the name (a built-in list of common Russian first names, no outside service), the
+`DEFAULT_CONTACT_GENDER` setting, unknown. With an unknown gender the replies avoid gendered
+past-tense forms. A gender button on a card of a contact that is already `active`, `paused` or
+`ignored` still saves the choice; that card then keeps only the gender row.
 
 Reply moves the contact from `pending` to `active` with that mode, Ignore from `pending` to
 `ignored`; the card is then edited to show the decision and the buttons disappear. A button on an
@@ -419,6 +433,10 @@ make summary-show CONTACT=12          # print the stored summary (personal data:
 make summary-clear CONTACT=12 YES=1   # remove it
 ```
 
+The summary also holds the contact's gender when the contact has shown it in her or his own words
+(past-tense verbs, adjectives); it is one of the sources of the grammatical gender in the reply prompt
+(see [The control bot and the card](#the-control-bot-and-the-card)).
+
 Details: [.claude/docs/summaries.md](.claude/docs/summaries.md).
 
 ### Code layers
@@ -477,7 +495,7 @@ What exists now:
 ├── pyproject.toml                # dependencies, Ruff, mypy, pytest config
 ├── uv.lock
 ├── .python-version               # 3.14
-├── Makefile                      # install, check, test, fmt, up, down, logs, migrate, revision, db-up, login, login-docker, llm-check, persona-import, examples-import, examples-stats, examples-convert, reply-preview, outbox-enqueue, outbox-list, outbox-cancel, outbox-retry, outbox-status, outbox-resume, schedule-import, schedule-show, schedule-check, schedule-plan, stop-check, autopilot-status, autopilot-resume, summary-update, summary-show, summary-clear, setup-hooks
+├── Makefile                      # install, check, test, fmt, up, down, logs, migrate, revision, db-up, login, login-docker, llm-check, persona-import, examples-import, examples-stats, examples-convert, reply-preview, outbox-enqueue, outbox-list, outbox-cancel, outbox-retry, outbox-status, outbox-resume, schedule-import, schedule-show, schedule-check, schedule-plan, stop-check, autopilot-status, autopilot-resume, summary-update, summary-show, summary-clear, contact-gender, setup-hooks
 ├── Dockerfile                    # multi-stage, non-root runtime
 ├── docker-compose.yml            # app, worker, one-shot migrate, postgres, redis
 ├── docker-compose.override.yml   # dev: Postgres and Redis on 127.0.0.1, media in ./data/media
@@ -485,7 +503,7 @@ What exists now:
 ├── alembic.ini                   # points at migrations/; no URL, it comes from Settings
 ├── migrations/
 │   ├── env.py                    # async environment, URL from Settings
-│   └── versions/                 # 0001 creates the contacts, messages and modes tables and seeds the default mode; 0002 creates persona and style_examples; 0003 creates scheduled_messages (the outbox); 0004 creates sender_state and the index of the send limits; 0005 adds due_at to scheduled_messages; 0006 creates schedule_profile; 0007 adds contacts.pause_reason; 0008 allows stop_trigger as a pause reason; 0009 adds contacts.reply_after and creates autopilot_state; 0010 adds scheduled_messages.follows_id (the parts of a reply); 0011 adds contacts.summary_failed_at
+│   └── versions/                 # 0001 creates the contacts, messages and modes tables and seeds the default mode; 0002 creates persona and style_examples; 0003 creates scheduled_messages (the outbox); 0004 creates sender_state and the index of the send limits; 0005 adds due_at to scheduled_messages; 0006 creates schedule_profile; 0007 adds contacts.pause_reason; 0008 allows stop_trigger as a pause reason; 0009 adds contacts.reply_after and creates autopilot_state; 0010 adds scheduled_messages.follows_id (the parts of a reply); 0011 adds contacts.summary_failed_at; 0012 adds contacts.gender (the owner's choice of the grammatical gender)
 ├── examples/                     # invented sample persona, style examples and schedule (the real files go to data/, never to git)
 ├── .dockerignore
 ├── .gitignore
@@ -506,8 +524,8 @@ What exists now:
 │   ├── dependabot.yml            # weekly: Actions, Docker, Compose, uv
 │   └── workflows/ci.yml
 ├── src/cyrano/
-│   ├── __main__.py               # python -m cyrano [login | llm-check | persona ... | examples ... | reply-preview ... | outbox ... | schedule ... | stop-check ... | autopilot ... | summary ...]
-│   ├── main.py                   # app entrypoint, signals, heartbeat, subcommands login, llm-check, persona (import, show), examples (import, stats, convert), reply-preview, outbox (enqueue, list, cancel, retry, status, resume), schedule (import, show, check, plan), stop-check, autopilot (status, resume), summary (update, show, clear)
+│   ├── __main__.py               # python -m cyrano [login | llm-check | persona ... | examples ... | reply-preview ... | outbox ... | schedule ... | stop-check ... | autopilot ... | summary ... | contact ...]
+│   ├── main.py                   # app entrypoint, signals, heartbeat, subcommands login, llm-check, persona (import, show), examples (import, stats, convert), reply-preview, outbox (enqueue, list, cancel, retry, status, resume), schedule (import, show, check, plan), stop-check, autopilot (status, resume), summary (update, show, clear), contact (gender)
 │   ├── style_cli.py              # the persona and examples commands
 │   ├── convert_cli.py            # examples convert: Telegram Desktop export to a draft examples file
 │   ├── reply_cli.py              # reply-preview: generate one reply for a stored conversation
@@ -516,6 +534,8 @@ What exists now:
 │   ├── stop_check_cli.py         # stop-check: the stop-trigger classes of a phrase or a contact, a dry run
 │   ├── autopilot_cli.py          # autopilot status, resume: the owner's commands
 │   ├── summary_cli.py            # summary update, show, clear: the owner's commands
+│   ├── contact_cli.py            # contact gender: the owner's command for the grammatical gender
+│   ├── gender_name_data.py       # the first-name lists and ending rules behind the name guess
 │   ├── stop_trigger_patterns.py  # the stop-trigger pattern data
 │   ├── config.py                 # Settings, load_settings, ConfigError
 │   ├── logging.py                # JSON-lines logging
@@ -552,7 +572,10 @@ What exists now:
 │   │   ├── card_builder.py       # the owner's card from the stored contact
 │   │   ├── card_sender.py        # CardSender Protocol
 │   │   ├── card_announcer.py     # CardAnnouncer: card to the owner, new -> pending
-│   │   ├── card_actions.py       # CardActions: Reply (pending -> active) and Ignore
+│   │   ├── card_actions.py       # CardActions: Reply (pending -> active, needs a known gender) and Ignore
+│   │   ├── gender.py             # GenderResolver: owner choice, summary, name, default setting, unknown
+│   │   ├── gender_guess.py       # guess_gender: the pure name guess
+│   │   ├── gender_actions.py     # GenderActions: the owner's choice from a card button
 │   │   ├── send_guard.py         # the status and source check, at enqueue and before sending
 │   │   ├── outbox_service.py     # OutboxService: text validation, guard, row
 │   │   ├── send_limiter.py       # the six send limits, counted from stored messages
@@ -763,6 +786,7 @@ to Redis, Postgres, the LLM provider and the Bot API for the owner notices; the 
 | `make stop-check TEXT="..."` or `make stop-check CONTACT=...` | Print the stop-trigger classes of a phrase (no `.env` needed) or of the contact's last 3 incoming messages; changes nothing, prints no text (see [When a contact touches a sensitive topic](#when-a-contact-touches-a-sensitive-topic)) |
 | `make autopilot-status`, `make autopilot-resume [YES=1]` | The state of the autopilot, and clearing its pause or, with `YES=1`, its stop (see [The autopilot](#the-autopilot)) |
 | `make summary-update CONTACT=...`, `make summary-show CONTACT=...`, `make summary-clear CONTACT=... YES=1` | Update one contact's summary now, print it, or remove it (see [Contact summaries](#contact-summaries)) |
+| `make contact-gender CONTACT=... GENDER=female\|male\|unknown` | Set the contact's grammatical gender, or clear your choice with `unknown`; prints the gender in force and its source (see [The control bot and the card](#the-control-bot-and-the-card)) |
 | `make llm-check` | Send one tiny request to DeepSeek with the `reply` settings and print the result (see [Checking the LLM key](#checking-the-llm-key)) |
 
 ### Checking the LLM key
@@ -897,6 +921,7 @@ the default applies.
 | `AUTOPILOT_MAX_BURST_WAIT_SECONDS` | no | `30` | How long a burst of messages may go unanswered before a reply job answers its newest message instead of waiting for the contact to stop, from 1 to 300 and not below `AUTOPILOT_DEBOUNCE_SECONDS` |
 | `SUMMARY_ENABLED` | no | `true` | `false` stops the app's sweep from putting summary jobs on the queue; `summary update` still works. Restart the app after a change |
 | `SUMMARY_EVERY_MESSAGES` | no | `12` | How many new messages (both directions) after the last summary make a contact due for the next one, from 4 to 200 |
+| `DEFAULT_CONTACT_GENDER` | no | `unknown` | The grammatical gender used for a contact when neither you, the conversation nor the name decided it: `female`, `male` or `unknown` (case does not matter). Any other value stops the app with a readable error. With `unknown` the Reply buttons wait for the gender. Not printed in the startup line |
 | `SEND_LIMIT_MINUTE` | no | `4` | Most outgoing messages per minute, all contacts together; at least 1, not above `SEND_LIMIT_HOUR` |
 | `SEND_LIMIT_HOUR` | no | `40` | Most outgoing messages per hour, all contacts together; at least 1, not above `SEND_LIMIT_DAY` |
 | `SEND_LIMIT_DAY` | no | `200` | Most outgoing messages per day, all contacts together; at least 1 |

@@ -7,14 +7,23 @@ from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 
 from cyrano.bot import messages
-from cyrano.bot.callbacks import CardAction, CardCallback, PauseAction, PauseCallback
+from cyrano.bot.callbacks import (
+    CardAction,
+    CardCallback,
+    GenderAction,
+    GenderCallback,
+    PauseAction,
+    PauseCallback,
+)
 from cyrano.domain.enums import (
     CardOutcome,
+    ContactGender,
     ContactStatus,
     LeomatchNameSource,
     MessageDirection,
     TriggerSource,
 )
+from cyrano.domain.gender import ResolvedGender
 from cyrano.domain.models import CardActionResult, CardLeomatch, ContactCard
 from cyrano.domain.outbox import UTF16_BYTES_PER_UNIT, UTF16_CODEC, UTF16_ERROR_POLICY
 from cyrano.domain.stop_triggers import DialogueLine, HandOverNotice
@@ -27,6 +36,11 @@ MESSAGE_BULLET = "• "
 FIELD_SEPARATOR = ", "
 WHITESPACE_RUN = re.compile(r"\s+")
 WORD_SEPARATOR = " "
+DECIDABLE_STATUSES = frozenset({ContactStatus.NEW, ContactStatus.PENDING})
+GENDER_BUTTONS = (
+    (GenderAction.FEMALE, ContactGender.FEMALE, messages.GENDER_FEMALE_BUTTON),
+    (GenderAction.MALE, ContactGender.MALE, messages.GENDER_MALE_BUTTON),
+)
 HAND_OVER_SPEAKERS = {
     MessageDirection.INCOMING: messages.HAND_OVER_SPEAKER_CONTACT,
     MessageDirection.OUTGOING: messages.HAND_OVER_SPEAKER_OWNER,
@@ -45,12 +59,29 @@ def _titled(title: str, lines: list[str]) -> str:
     return LINE_SEPARATOR.join([f"<b>{title}</b>", *lines])
 
 
+def gender_line(gender: ResolvedGender) -> str:
+    if gender.value is None:
+        return messages.GENDER_UNKNOWN_LINE
+    return messages.GENDER_LINE.format(
+        label=messages.LABEL_GENDER,
+        value=messages.GENDER_VALUE_NAMES[gender.value],
+        source=messages.GENDER_SOURCE_NAMES[gender.source],
+    )
+
+
 def _identity_section(card: ContactCard) -> str:
     lines: list[str] = []
     if card.display_name:
         lines.append(f"{messages.LABEL_NAME}: {_escaped(card.display_name)}")
     if card.username:
         lines.append(f"{messages.LABEL_USERNAME}: @{_escaped(card.username)}")
+    lines.append(gender_line(card.gender))
+    if card.status not in DECIDABLE_STATUSES:
+        lines.append(
+            messages.STATUS_LINE.format(
+                label=messages.LABEL_STATUS, status=messages.STATUS_NAMES[card.status]
+            )
+        )
     return _titled(messages.CARD_TITLE, lines)
 
 
@@ -111,9 +142,22 @@ def render_card(card: ContactCard) -> str:
     return text
 
 
+def _gender_buttons(card: ContactCard) -> list[InlineKeyboardButton]:
+    buttons: list[InlineKeyboardButton] = []
+    for action, gender, label in GENDER_BUTTONS:
+        text = f"{messages.GENDER_CHECK_MARK}{label}" if card.gender.value is gender else label
+        callback = GenderCallback(action=action, contact_id=card.contact_id)
+        buttons.append(InlineKeyboardButton(text=text, callback_data=callback.pack()))
+    return buttons
+
+
 def card_keyboard(card: ContactCard) -> InlineKeyboardMarkup:
     builder = InlineKeyboardBuilder()
-    for mode in card.modes:
+    builder.row(*_gender_buttons(card))
+    if card.status not in DECIDABLE_STATUSES:
+        return builder.as_markup()
+    reply_modes = card.modes if card.gender.is_known else []
+    for mode in reply_modes:
         callback = CardCallback(
             action=CardAction.REPLY, contact_id=card.contact_id, mode_id=mode.id
         )
@@ -154,6 +198,8 @@ def alert_text(outcome: CardOutcome) -> str | None:
             return messages.ALERT_NOT_FOUND
         case CardOutcome.MODE_UNAVAILABLE:
             return messages.ALERT_MODE_UNAVAILABLE
+        case CardOutcome.GENDER_REQUIRED:
+            return messages.ALERT_GENDER_REQUIRED
         case CardOutcome.APPLIED | CardOutcome.ALREADY_APPLIED:
             return None
 

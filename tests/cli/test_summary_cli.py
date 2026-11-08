@@ -14,7 +14,7 @@ from cyrano.db.repositories import (
     SqlSummaryRepository,
 )
 from cyrano.db.session import SessionFactory
-from cyrano.domain.enums import ContactStatus, MessageDirection
+from cyrano.domain.enums import ContactGender, ContactStatus, MessageDirection
 from cyrano.domain.errors import LLMUnavailableError
 from cyrano.domain.models import DEFAULT_MODE_NAME, ContactCreate, ContactUpdate, MessageCreate
 from cyrano.domain.summary import (
@@ -318,3 +318,20 @@ def test_a_missing_configuration_exits_with_the_usual_code(
     monkeypatch.chdir(tmp_path)
 
     assert main(["summary", "show", "3"]) == 2
+
+
+async def test_show_prints_the_gender_line_when_the_summary_has_one(
+    session_factory: SessionFactory, capsys: pytest.CaptureFixture[str]
+) -> None:
+    contact_id = await _contact(session_factory)
+    commands = _commands(
+        session_factory, ContactSummary(name=VALUE_MARKER, gender=ContactGender.FEMALE)
+    )
+    await commands.run(SummaryRequest("update", contact_id))
+    capsys.readouterr()
+
+    code = await commands.run(SummaryRequest("show", contact_id))
+
+    captured = capsys.readouterr()
+    assert code == 0
+    assert "gender: female" in captured.out.splitlines()

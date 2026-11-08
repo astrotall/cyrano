@@ -8,7 +8,9 @@ from pathlib import Path
 
 from pydantic import BaseModel
 
+from cyrano.domain.enums import ContactGender, GenderSource
 from cyrano.domain.errors import LLMError
+from cyrano.domain.gender import ResolvedGender
 from cyrano.domain.llm import LLMMessage, LLMResult, LLMUsage
 from cyrano.domain.models import (
     ContactCard,
@@ -212,6 +214,7 @@ def fake_card(**overrides: object) -> ContactCard:
         "username": "fake_user",
         "modes": [ModeChoice(id=1, name="default"), ModeChoice(id=2, name="flirt")],
         "profile_collected": True,
+        "gender": ResolvedGender(value=ContactGender.FEMALE, source=GenderSource.NAME),
     }
     return ContactCard.model_validate({**fields, **overrides})
 

@@ -5,6 +5,8 @@ from dataclasses import dataclass
 from typing import Final
 
 from cyrano.domain.summary import (
+    AGE_FIELD,
+    GENDER_FIELD,
     SUMMARY_LINK_PREFIXES,
     SUMMARY_LIST_CAPS,
     SUMMARY_PHONE_MIN_DIGITS,
@@ -43,7 +45,7 @@ def contains_contact_detail(text: str) -> bool:
 
 def sanitize_summary(summary: ContactSummary) -> SanitizedSummary:
     removed = 0
-    data: dict[str, object] = {"age": summary.age}
+    data: dict[str, object] = {AGE_FIELD: summary.age, GENDER_FIELD: summary.gender}
     for name in SUMMARY_TEXT_FIELDS:
         value: str | None = getattr(summary, name)
         if value is not None and contains_contact_detail(value):

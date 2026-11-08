@@ -8,6 +8,7 @@ from cyrano.domain.autopilot import AutopilotState
 from cyrano.domain.enums import (
     AutopilotPauseReason,
     AutopilotStopReason,
+    ContactGender,
     ContactStatus,
     OutboxSource,
     OutboxState,
@@ -47,6 +48,8 @@ class ContactRepository(Protocol):
     ) -> StatusChange: ...
 
     async def set_mode(self, contact_id: int, mode_id: int) -> Contact: ...
+
+    async def set_gender(self, contact_id: int, gender: ContactGender | None) -> Contact: ...
 
     async def update(self, contact_id: int, data: ContactUpdate) -> Contact: ...
 

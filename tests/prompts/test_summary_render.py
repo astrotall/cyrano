@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 
+from cyrano.domain.enums import ContactGender
 from cyrano.domain.summary import ContactSummary
 from cyrano.prompts.render import (
     render_previous_memory,
@@ -145,3 +146,23 @@ def test_the_extraction_instructions_carry_every_rule() -> None:
 
 def test_the_two_boundaries_differ() -> None:
     assert SUMMARY_BOUNDARY != DIALOGUE_BOUNDARY
+
+
+def test_the_extraction_instructions_carry_the_gender_rule() -> None:
+    [bullet] = [line for line in SUMMARY_INSTRUCTIONS.splitlines() if line.startswith("- gender:")]
+
+    assert "ONLY when the contact refers to herself or himself with gendered forms" in bullet
+    assert "past-tense verbs, adjectives" in bullet
+    assert "states it explicitly" in bullet
+    assert "otherwise null" in bullet
+    assert "previous value unless the new messages contradict it" in bullet
+
+
+def test_the_previous_memory_carries_the_gender_and_the_reply_layer_does_not_show_it() -> None:
+    summary = ContactSummary(gender=ContactGender.FEMALE, name="Оля")
+
+    assert '"gender":"female"' in render_previous_memory(summary)
+    layer = render_summary_layer(summary)
+    assert layer is not None
+    assert "female" not in layer
+    assert render_summary_layer(ContactSummary(gender=ContactGender.FEMALE)) is None

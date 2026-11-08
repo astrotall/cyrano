@@ -22,6 +22,7 @@ from cyrano.bot.notifier import (
 from cyrano.bot.sender import TelegramCardSender
 from cyrano.config import Settings
 from cyrano.services.card_actions import CardActions
+from cyrano.services.gender_actions import GenderActions
 from cyrano.services.pause_actions import PauseActions
 
 logger = logging.getLogger("cyrano.bot")
@@ -30,11 +31,14 @@ STOP_POLLING_TIMEOUT_SECONDS = 5.0
 
 
 def build_dispatcher(
-    owner_id: int, actions: CardActions, pause_actions: PauseActions
+    owner_id: int,
+    actions: CardActions,
+    pause_actions: PauseActions,
+    gender_actions: GenderActions,
 ) -> Dispatcher:
     dispatcher = Dispatcher()
     dispatcher.update.outer_middleware(OwnerOnlyMiddleware(owner_id))
-    dispatcher.include_router(build_router(actions, pause_actions))
+    dispatcher.include_router(build_router(actions, pause_actions, gender_actions))
     return dispatcher
 
 
@@ -73,11 +77,14 @@ class ControlBot:
         settings: Settings,
         actions: CardActions,
         pause_actions: PauseActions,
+        gender_actions: GenderActions,
         *,
         session: BaseSession | None = None,
     ) -> None:
         self._bot = build_bot(settings, session)
-        self._dispatcher = build_dispatcher(settings.owner_telegram_id, actions, pause_actions)
+        self._dispatcher = build_dispatcher(
+            settings.owner_telegram_id, actions, pause_actions, gender_actions
+        )
         self._sender = TelegramCardSender(self._bot, settings.owner_telegram_id, settings.media_dir)
         self._notifier = TelegramOwnerNotifier(self._bot, settings.owner_telegram_id)
         self._manual_pause_notifier = TelegramManualPauseNotifier(

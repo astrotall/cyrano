@@ -5,6 +5,7 @@ from datetime import UTC, datetime
 import pytest
 from pydantic import ValidationError
 
+from cyrano.domain.enums import ContactGender
 from cyrano.domain.summary import (
     SUMMARY_AGREEMENTS_MAX,
     SUMMARY_INTERESTS_MAX,
@@ -191,3 +192,86 @@ def test_the_cursor_refuses_a_naive_time_and_a_non_positive_id() -> None:
 
 def test_the_job_id_is_deterministic() -> None:
     assert summary_job_id(7, 41) == "summary-7-41"
+
+
+@pytest.mark.parametrize(
+    ("raw", "expected"),
+    [
+        ("female", ContactGender.FEMALE),
+        ("male", ContactGender.MALE),
+        (" Female ", ContactGender.FEMALE),
+        ("MALE", ContactGender.MALE),
+        (None, None),
+        ("", None),
+        ("other", None),
+        ("unknown", None),
+        ("девушка", None),
+        (1, None),
+        (True, None),
+        (["female"], None),
+        ({"value": "male"}, None),
+    ],
+)
+def test_the_gender_field_accepts_female_and_male_and_turns_anything_else_into_none(
+    raw: object, expected: ContactGender | None
+) -> None:
+    assert ContactSummary.model_validate({"gender": raw}).gender is expected
+
+
+def test_the_gender_defaults_to_none() -> None:
+    assert ContactSummary().gender is None
+    assert ContactSummary.model_validate({"name": "Оля"}).gender is None
+
+
+def test_a_summary_with_only_a_gender_is_not_empty() -> None:
+    assert not ContactSummary.model_validate({"gender": "female"}).is_empty()
+    assert ContactSummary.model_validate({"gender": "nonsense"}).is_empty()
+
+
+def test_the_gender_is_part_of_the_schema_sent_to_the_model() -> None:
+    properties = ContactSummary.model_json_schema()["properties"]
+
+    assert "gender" in properties
+
+
+def test_the_stored_summary_round_trips_the_gender() -> None:
+    stored = StoredSummary(
+        version=SUMMARY_VERSION,
+        updated_at=NOW,
+        cursor=SummaryCursor(created_at=NOW, message_id=5),
+        data=ContactSummary(gender=ContactGender.MALE),
+    )
+
+    read = read_stored_summary(stored.model_dump(mode="json"))
+
+    assert read is not None
+    assert read.data.gender is ContactGender.MALE
+
+
+def test_a_stored_summary_without_the_gender_field_is_read_with_none() -> None:
+    raw: dict[str, object] = {
+        "version": SUMMARY_VERSION,
+        "updated_at": NOW.isoformat(),
+        "cursor": {"created_at": NOW.isoformat(), "message_id": 5},
+        "data": {"name": "Оля", "interests": ["кино"]},
+    }
+
+    read = read_stored_summary(raw)
+
+    assert read is not None
+    assert read.data.gender is None
+    assert read.data.name == "Оля"
+
+
+def test_a_stored_summary_with_a_broken_gender_is_still_read() -> None:
+    raw: dict[str, object] = {
+        "version": SUMMARY_VERSION,
+        "updated_at": NOW.isoformat(),
+        "cursor": {"created_at": NOW.isoformat(), "message_id": 5},
+        "data": {"name": "Оля", "gender": "robot"},
+    }
+
+    read = read_stored_summary(raw)
+
+    assert read is not None
+    assert read.data.gender is None

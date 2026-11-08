@@ -10,6 +10,7 @@ from cyrano.domain.models import CARD_MESSAGES_LIMIT, Contact, ContactReadyEvent
 from cyrano.services.card_builder import build_card, profile_of
 from cyrano.services.card_sender import CardSender
 from cyrano.services.contact_events import ContactEventSubscriber
+from cyrano.services.gender import GenderResolver
 from cyrano.services.repositories import ContactRepository, MessageRepository, ModeRepository
 
 logger = logging.getLogger("cyrano.services.card_announcer")
@@ -30,6 +31,7 @@ class CardAnnouncer:
         modes: ModeRepository,
         sender: CardSender,
         ready: ContactEventSubscriber[ContactReadyEvent],
+        gender: GenderResolver,
         *,
         clock: Callable[[], datetime] = _utc_now,
         sweep_interval: float = CARD_SWEEP_INTERVAL,
@@ -40,6 +42,7 @@ class CardAnnouncer:
         self._modes = modes
         self._sender = sender
         self._ready = ready
+        self._gender = gender
         self._clock = clock
         self._sweep_interval = sweep_interval
         self._without_profile_delay = timedelta(seconds=without_profile_delay)
@@ -130,7 +133,8 @@ class CardAnnouncer:
             return
         messages = await self._messages.list_last(contact.id, CARD_MESSAGES_LIMIT)
         modes = await self._modes.list_enabled()
-        delivered = await self._sender.send_card(build_card(contact, messages, modes))
+        card = build_card(contact, messages, modes, self._gender.resolve(contact))
+        delivered = await self._sender.send_card(card)
         if not delivered:
             self._deferred += 1
             self._warn("card was not delivered, the next sweep retries it")

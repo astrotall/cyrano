@@ -25,6 +25,7 @@ from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
 from cyrano.domain.enums import (
+    ContactGender,
     ContactStatus,
     MessageDirection,
     OutboxSource,
@@ -34,6 +35,7 @@ from cyrano.domain.enums import (
 
 OUTBOX_VOCABULARY_LENGTH = 32
 PAUSE_REASON_LENGTH = 32
+GENDER_LENGTH = 16
 
 NAMING_CONVENTION = {
     "ix": "ix_%(table_name)s_%(column_0_N_name)s",
@@ -81,6 +83,7 @@ class ContactRow(Base):
     __tablename__ = "contacts"
     __table_args__ = (
         CheckConstraint(_allowed_values("pause_reason", PauseReason), name="pause_reason_allowed"),
+        CheckConstraint(_allowed_values("gender", ContactGender), name="gender_allowed"),
     )
 
     id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
@@ -101,6 +104,14 @@ class ContactRow(Base):
         )
     )
     mode_id: Mapped[int | None] = mapped_column(BigInteger, ForeignKey(ModeRow.id))
+    gender: Mapped[ContactGender | None] = mapped_column(
+        Enum(
+            ContactGender,
+            native_enum=False,
+            length=GENDER_LENGTH,
+            values_callable=_enum_values,
+        )
+    )
     profile: Mapped[dict[str, object]] = mapped_column(JSONB, server_default=EMPTY_JSON_OBJECT)
     summary: Mapped[dict[str, object]] = mapped_column(JSONB, server_default=EMPTY_JSON_OBJECT)
     summary_failed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))

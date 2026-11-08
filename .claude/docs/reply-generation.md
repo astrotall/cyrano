@@ -81,7 +81,17 @@ Only these fields, only when non-empty, each cut to a named limit:
 | About | the Leomatch card description | 300 |
 | Bio | the Telegram bio | 300 |
 
-Each value becomes one line (whitespace runs collapse), so a bio cannot open a new layer.
+| Grammatical gender | `GenderResolver` (CYR-46): the owner's choice, otherwise the gender the contact showed in the summary, otherwise a guess from the name, otherwise `DEFAULT_CONTACT_GENDER`, otherwise `unknown` | the values `female`, `male`, `unknown` |
+
+Each value becomes one line (whitespace runs collapse), so a bio cannot open a new layer. The gender
+line is always there, so the facts layer exists even when the contact has no other fact. It is
+grammar only: it says which forms to use when the contact is addressed, and nothing else is inferred.
+Two instruction bullets follow it: use the grammatical gender given (feminine forms for `female`,
+masculine for `male`, and for `unknown` avoid gendered past-tense forms about the contact, preferring
+questions and the present tense), and keep Russian grammar correct, mirroring the structure of a
+question when it is returned («в каком классе?» is answered by «а ты в каком?», and «а у тебя?» only
+for a question about how things are). `reply-preview` prints one extra line, `gender: <value>
+(<source>)`, with the source `owner`, `summary`, `name`, `default` or `unknown`; it never prints a name.
 
 **Never in the prompt:** the username, the Telegram id, the internal ids, the photo paths and the
 raw Leomatch texts (the card text and the match message).

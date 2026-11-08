@@ -24,6 +24,7 @@ from cyrano.db.repositories import (
 from cyrano.db.session import build_engine, build_session_factory
 from cyrano.domain.enums import LLMStep
 from cyrano.llm.factory import LLMClientFactory
+from cyrano.services.gender import GenderResolver
 from cyrano.services.hand_over import HandOverService
 from cyrano.services.humanization import HumanizationPlanner, ScheduleService
 from cyrano.services.outbox_service import OutboxService
@@ -76,6 +77,7 @@ def build_worker_resources(
         examples=ExampleSelector(
             SqlStyleExampleRepository(session_factory), settings.style_examples_max
         ),
+        gender=GenderResolver(settings.default_gender),
         builder=PromptBuilder(
             budget_chars=settings.reply_prompt_budget_chars,
             timezone=settings.tzinfo,

@@ -40,7 +40,7 @@ SHOW_LIST_ITEM = "  - {item}"
 CLEAR_NEEDS_YES_LINE = "add --yes to clear the summary of this contact; nothing was changed"
 CLEARED_LINE = "summary cleared"
 NOTHING_TO_CLEAR_LINE = "nothing to clear"
-SHOWN_TEXT_FIELDS = ("name", "age", "city", "occupation", "mood_and_tone")
+SHOWN_TEXT_FIELDS = ("name", "age", "gender", "city", "occupation", "mood_and_tone")
 SHOWN_LIST_FIELDS = (
     "interests",
     "agreements_and_plans",

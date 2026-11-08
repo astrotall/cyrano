@@ -393,6 +393,17 @@ keeps its first reason and gets no second notice. A failing notice never undoes 
 gate never raises into the intake. Nothing is ever sent to the contact. Details:
 [stop-triggers.md](stop-triggers.md).
 
+## The grammatical gender (CYR-46)
+
+The gender changes no status. It decides one thing: whether the Reply buttons of a card are shown and
+accepted. `contacts.gender` (migration `0012`, nullable, `female` or `male`) holds only the owner's
+choice. The gender in force is resolved when needed: owner, then the summary, then the name guess,
+then `DEFAULT_CONTACT_GENDER`, then unknown. `CardActions.reply` answers `gender_required` while it
+is unknown, before any status change, so `pending -> active` still happens only by Reply with a known
+gender. Ignore never needs it. A gender button works in every status; on a contact that is no longer
+`new` or `pending` it only stores the choice and the card keeps just the gender row. Writers of the
+column: `GenderActions` (the card) and the `contact gender` command, nothing else.
+
 ## What is stored per contact
 
 Fixed in CYR-9. Table `contacts`:
@@ -402,6 +413,7 @@ Fixed in CYR-9. Table `contacts`:
 | `id` | Internal id; the one to use in logs |
 | `tg_id` | Telegram user id, unique |
 | `username`, `display_name` | Nick and name; both may be missing |
+| `gender` | The owner's choice of the grammatical gender, `female`, `male` or empty (CYR-46) |
 | `status` | One of the statuses above, starts as `new` |
 | `mode_id` | Chosen mode, nullable, foreign key to `modes` |
 | `pause_reason` | Why the contact is `paused`: `manual_message`, `send_rejected`, `owner` or `stop_trigger`; `NULL` for every other status and for contacts paused before CYR-21. A check constraint allows only these values (migration `0007`, widened by `0008`, no backfill) |

@@ -2,16 +2,19 @@ from __future__ import annotations
 
 import re
 from pathlib import Path
-from typing import Literal
+from typing import Final, Literal
 from urllib.parse import urlsplit
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from pydantic import Field, SecretStr, ValidationError, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
+from cyrano.domain.enums import ContactGender
 from cyrano.health import default_heartbeat_path
 
 LogLevel = Literal["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"]
+DefaultContactGender = Literal["unknown", "female", "male"]
+UNKNOWN_DEFAULT_GENDER: Final = "unknown"
 
 DEFAULT_ENV_FILE = ".env"
 DEFAULT_LEOMATCH_BOT_USERNAME = "leomatchbot"
@@ -155,6 +158,7 @@ class Settings(BaseSettings):
         ge=MIN_AUTOPILOT_MAX_BURST_WAIT_SECONDS,
         le=MAX_AUTOPILOT_MAX_BURST_WAIT_SECONDS,
     )
+    default_contact_gender: DefaultContactGender = UNKNOWN_DEFAULT_GENDER
     summary_enabled: bool = True
     summary_every_messages: int = Field(
         default=DEFAULT_SUMMARY_EVERY_MESSAGES,
@@ -180,6 +184,11 @@ class Settings(BaseSettings):
     @classmethod
     def _normalize_log_level(cls, value: object) -> object:
         return value.upper() if isinstance(value, str) else value
+
+    @field_validator("default_contact_gender", mode="before")
+    @classmethod
+    def _normalize_default_contact_gender(cls, value: object) -> object:
+        return value.strip().lower() if isinstance(value, str) else value
 
     @field_validator("leomatch_bot_username")
     @classmethod
@@ -247,6 +256,12 @@ class Settings(BaseSettings):
         if broken:
             raise ValueError("; ".join(broken))
         return self
+
+    @property
+    def default_gender(self) -> ContactGender | None:
+        if self.default_contact_gender == UNKNOWN_DEFAULT_GENDER:
+            return None
+        return ContactGender(self.default_contact_gender)
 
     @property
     def reply_model(self) -> str:

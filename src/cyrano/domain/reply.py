@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from pydantic import BaseModel, ConfigDict, Field
 
+from cyrano.domain.enums import ContactGender
 from cyrano.domain.llm import LLMMessage, LLMUsage
 
 MIN_HISTORY_MESSAGES = 4
@@ -27,6 +28,7 @@ class ContactFacts(_Frozen):
     city: str | None = None
     about: str | None = None
     bio: str | None = None
+    gender: ContactGender | None = None
 
 
 class BuiltPrompt(_Frozen):

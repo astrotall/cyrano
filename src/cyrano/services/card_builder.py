@@ -5,6 +5,7 @@ from collections.abc import Sequence
 from pydantic import ValidationError
 
 from cyrano.domain.enums import MessageDirection
+from cyrano.domain.gender import ResolvedGender
 from cyrano.domain.models import (
     CARD_BIO_LENGTH,
     CARD_LEOMATCH_ABOUT_LENGTH,
@@ -66,11 +67,15 @@ def _mode_choices(modes: Sequence[Mode]) -> list[ModeChoice]:
     return choices
 
 
-def build_card(contact: Contact, messages: Sequence[Message], modes: Sequence[Mode]) -> ContactCard:
+def build_card(
+    contact: Contact, messages: Sequence[Message], modes: Sequence[Mode], gender: ResolvedGender
+) -> ContactCard:
     profile = profile_of(contact)
     leomatch = profile.leomatch
     return ContactCard(
         contact_id=contact.id,
+        status=contact.status,
+        gender=gender,
         display_name=clean_text(contact.display_name or profile.display_name, CARD_NAME_LENGTH),
         username=clean_text(contact.username or profile.username, MAX_USERNAME_LENGTH),
         bio=clean_text(profile.bio, CARD_BIO_LENGTH),

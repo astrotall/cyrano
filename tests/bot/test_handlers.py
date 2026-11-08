@@ -16,9 +16,11 @@ from aiogram.methods import (
 from cyrano.bot import messages
 from cyrano.bot.app import build_dispatcher
 from cyrano.bot.callbacks import CardAction, CardCallback, PauseAction, PauseCallback
-from cyrano.domain.enums import ContactStatus, PauseReason
+from cyrano.domain.enums import ContactGender, ContactStatus, PauseReason
 from cyrano.domain.models import Contact, ModeCreate
 from cyrano.services.card_actions import CardActions
+from cyrano.services.gender import GenderResolver
+from cyrano.services.gender_actions import GenderActions
 from cyrano.services.pause_actions import PauseActions
 from tests.bot.fakes import (
     OWNER_ID,
@@ -30,7 +32,7 @@ from tests.bot.fakes import (
 )
 from tests.privacy import assert_absent
 from tests.services.fakes import InMemoryModes
-from tests.userbot.fakes import InMemoryContacts
+from tests.userbot.fakes import InMemoryContacts, InMemoryMessages
 
 CARD_TEXT = "Новый контакт\n\nИмя: Fakefirst"
 STRANGER_TEXT = "stranger-text-that-must-not-leak"
@@ -75,7 +77,13 @@ async def _rig(
         CONTACT_TG_ID, status=status, mode_id=mode_id, pause_reason=pause_reason
     )
     bot, session = recording_bot(session)
-    dispatcher = build_dispatcher(OWNER_ID, CardActions(contacts, modes), PauseActions(contacts))
+    gender = GenderResolver(ContactGender.FEMALE)
+    dispatcher = build_dispatcher(
+        OWNER_ID,
+        CardActions(contacts, modes, gender),
+        PauseActions(contacts),
+        GenderActions(contacts, InMemoryMessages(), modes, gender),
+    )
     return Rig(dispatcher, bot, session, contacts, modes, contact)
 
 

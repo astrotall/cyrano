@@ -59,6 +59,7 @@ What exists now:
   conversation of an `active` contact, outside the night and busy windows, the intake registers a request
   and the sender's second coroutine marks the chat read soon after the message (the profile's
   `early_read_seconds`, default 0 to 1 s); only the read mark moves earlier.
+- The grammatical gender of a contact (CYR-46): the owner's choice (card buttons, `contact gender`), the summary, a name guess, `DEFAULT_CONTACT_GENDER`, unknown; Reply waits for a known gender; the prompt carries a gender line and two grammar bullets; only grammar, nothing else is inferred.
 - The owner's commands: `login`, `llm-check`, `persona`, `examples`, `reply-preview`, `outbox`,
   `schedule`, `stop-check`, `autopilot` and `summary` (the list is in the README).
 
@@ -109,7 +110,7 @@ Changing any of these is a large change (see Workflow expectations). Reasons:
 .
 ├── CLAUDE.md, CONTRIBUTING.md, README.md
 ├── pyproject.toml, uv.lock, .python-version
-├── Makefile                      includes login, login-docker, llm-check, persona-import, examples-import, examples-stats, examples-convert, reply-preview, outbox-enqueue, outbox-list, outbox-cancel, outbox-retry, outbox-status, outbox-resume, schedule-import, schedule-show, schedule-check, schedule-plan, stop-check, autopilot-status, autopilot-resume, summary-update, summary-show, summary-clear and setup-hooks
+├── Makefile                      includes login, login-docker, llm-check, persona-import, examples-import, examples-stats, examples-convert, reply-preview, outbox-enqueue, outbox-list, outbox-cancel, outbox-retry, outbox-status, outbox-resume, schedule-import, schedule-show, schedule-check, schedule-plan, stop-check, autopilot-status, autopilot-resume, summary-update, summary-show, summary-clear, contact-gender and setup-hooks
 ├── Dockerfile, docker-compose.yml, docker-compose.override.yml
 ├── .env.example, .dockerignore, .gitignore
 ├── alembic.ini
@@ -128,6 +129,8 @@ Changing any of these is a large change (see Workflow expectations). Reasons:
 │   ├── stop_check_cli.py         the stop-check command (a dry run of the detector)
 │   ├── autopilot_cli.py          the autopilot status and resume commands
 │   ├── summary_cli.py            the summary update, show and clear commands
+│   ├── contact_cli.py            the contact gender command
+│   ├── gender_name_data.py       the first-name data behind the name guess
 │   ├── stop_trigger_patterns.py  the stop-trigger pattern data (imports only domain)
 │   ├── config.py                 Settings, load_settings, ConfigError
 │   ├── logging.py                JSON-lines logging
@@ -165,7 +168,8 @@ Changing any of these is a large change (see Workflow expectations). Reasons:
 │   │                             reply_job_queue (the job queue Protocol),
 │   │                             summary_sanitizer (contact details out of a summary),
 │   │                             summary_updater (one chunk into the stored summary),
-│   │                             summary_sweeper (the summary scan), summary_job_queue (its queue Protocol)
+│   │                             summary_sweeper (the summary scan), summary_job_queue (its queue Protocol),
+│   │                             gender (GenderResolver), gender_guess (the name guess), gender_actions (the card button)
 │   ├── userbot/                  Telethon: protocols, filters, handler, client, adapter, login, runner, errors,
 │   │                             profile_source, leomatch_source, leomatch_match
 │   ├── bot/                      aiogram: app, middleware, handlers, rendering, callbacks, sender, notifier, messages, errors

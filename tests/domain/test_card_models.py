@@ -67,13 +67,14 @@ def test_the_card_models_are_frozen() -> None:
         choice.name = "other"  # type: ignore[misc]
 
 
-def test_the_outcomes_are_the_five_agreed_values() -> None:
+def test_the_outcomes_are_the_six_agreed_values() -> None:
     assert {outcome.value for outcome in CardOutcome} == {
         "applied",
         "already_applied",
         "refused",
         "not_found",
         "mode_unavailable",
+        "gender_required",
     }
 
 

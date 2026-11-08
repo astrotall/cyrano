@@ -16,8 +16,10 @@ from cyrano.domain.errors import (
     ReplyInvalid,
 )
 from cyrano.domain.reply import BuiltPrompt
+from cyrano.services.gender import GenderResolver
 from cyrano.services.reply_generator import ReplyGenerator
 from cyrano.services.reply_split import split_reply
+from cyrano.services.repositories import ContactRepository
 
 REPLY_PREVIEW_COMMAND = "reply-preview"
 EXIT_OK = 0
@@ -28,6 +30,7 @@ FAILURE_HINT_LINE = "reply-preview failed: {error} ({hint})"
 PROMPT_MESSAGE_LABEL = "[{role}]"
 NEEDS_OWNER_LINE = "needs owner (model signal)"
 PART_LINE = "[{number}/{total}] {text}"
+GENDER_LINE = "gender: {gender} ({source})"
 STATS_LINE = (
     "model={model} input_tokens={input_tokens} output_tokens={output_tokens} "
     "examples={examples_kept}/{examples_offered} messages={messages_kept}/{messages_offered} "
@@ -100,9 +103,17 @@ def _reply_lines(text: str, *, needs_owner: bool) -> list[str]:
 
 
 class ReplyPreviewCommand:
-    def __init__(self, generator: ReplyGenerator, model: str) -> None:
+    def __init__(
+        self,
+        generator: ReplyGenerator,
+        model: str,
+        contacts: ContactRepository,
+        gender: GenderResolver,
+    ) -> None:
         self._generator = generator
         self._model = model
+        self._contacts = contacts
+        self._gender = gender
 
     async def run(self, request: ReplyPreviewRequest) -> int:
         try:
@@ -110,11 +121,13 @@ class ReplyPreviewCommand:
             if request.show_prompt:
                 _print_prompt(prompt)
             reply = await self._generator.complete(prompt)
+            gender_line = await self._gender_line(request.contact_id)
         except DomainError as exc:
             print(_failure_line(exc), file=sys.stderr)
             return EXIT_ERROR
         for line in _reply_lines(reply.text, needs_owner=reply.needs_owner):
             print(line)
+        print(gender_line)
         print(
             STATS_LINE.format(
                 model=self._model,
@@ -128,3 +141,10 @@ class ReplyPreviewCommand:
             )
         )
         return EXIT_OK
+
+    async def _gender_line(self, contact_id: int) -> str:
+        contact = await self._contacts.get_by_id(contact_id)
+        if contact is None:
+            raise ContactNotFound(contact_id)
+        resolved = self._gender.resolve(contact)
+        return GENDER_LINE.format(gender=resolved.label, source=resolved.source.value)

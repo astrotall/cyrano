@@ -29,6 +29,7 @@ from cyrano.domain.summary import SummaryDue
 from cyrano.logging import configure_logging
 from cyrano.main import main, run
 from cyrano.services.card_actions import CardActions
+from cyrano.services.gender_actions import GenderActions
 from cyrano.services.pause_actions import PauseActions
 from cyrano.userbot.client import UserbotAccess
 from cyrano.userbot.errors import Disconnected, SessionMissing, SessionNotAuthorized
@@ -893,9 +894,12 @@ async def test_a_row_left_in_sending_is_failed_at_start_with_one_notice_through_
     build_bot = fake_control_bot_class()
 
     def remember(
-        settings: Settings, actions: CardActions, pause_actions: PauseActions
+        settings: Settings,
+        actions: CardActions,
+        pause_actions: PauseActions,
+        gender_actions: GenderActions,
     ) -> FakeControlBot:
-        bot = build_bot(settings, actions, pause_actions)
+        bot = build_bot(settings, actions, pause_actions, gender_actions)
         built.append(bot)
         return bot
 
@@ -1209,9 +1213,12 @@ async def _run_with_manual_message(
     build_bot = fake_control_bot_class()
 
     def remember(
-        settings: Settings, actions: CardActions, pause_actions: PauseActions
+        settings: Settings,
+        actions: CardActions,
+        pause_actions: PauseActions,
+        gender_actions: GenderActions,
     ) -> FakeControlBot:
-        bot = build_bot(settings, actions, pause_actions)
+        bot = build_bot(settings, actions, pause_actions, gender_actions)
         built.append(bot)
         return bot
 

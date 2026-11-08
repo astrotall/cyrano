@@ -255,6 +255,9 @@ only.
   reply generator logs counters only, the errors of the reply pipeline carry ids and counts, and
   `reply-preview --show-prompt` prints the prompt to the terminal only, with a warning. Its log lines carry the step, the model, token counts, the duration and
   retry counters. It never logs the API key.
+  The grammatical gender (CYR-46) is personal data about a person: it is never logged, neither alone nor
+  next to a name or id; the handler, the actions and the command log ids and outcomes only, and the
+  setting `DEFAULT_CONTACT_GENDER` is withheld from the startup line.
   The persona text and the style examples are personal data too (CYR-14): they are never logged
   at any level and never go to git. The import commands and the services print and log counts,
   paths and JSON-path style locations of problems, never a persona or example text; `persona show`

@@ -23,6 +23,13 @@ from cyrano.bot.app import ControlBot
 from cyrano.bot.errors import ControlBotError, PollingFailed
 from cyrano.bot.notifier import OUTBOX_NOTICES
 from cyrano.config import ConfigError, Settings, load_settings
+from cyrano.contact_cli import (
+    ContactCommands,
+    ContactRequest,
+    ContactUsageError,
+    add_contact_parser,
+    contact_request,
+)
 from cyrano.convert_cli import add_convert_parser, convert_request, run_convert
 from cyrano.db.repositories import (
     SqlAutopilotStateRepository,
@@ -69,6 +76,8 @@ from cyrano.services.card_actions import CardActions
 from cyrano.services.card_announcer import CardAnnouncer
 from cyrano.services.contact_events import InMemoryContactEvents
 from cyrano.services.early_read import EarlyReadGate, EarlyReadQueue, EarlyReadScheduler
+from cyrano.services.gender import GenderResolver
+from cyrano.services.gender_actions import GenderActions
 from cyrano.services.hand_over import HandOverService
 from cyrano.services.humanization import HumanizationPlanner, ScheduleService
 from cyrano.services.intake import IntakeService
@@ -127,6 +136,7 @@ EXIT_SCHEDULE_ERROR = 1
 EXIT_STOP_CHECK_ERROR = 1
 EXIT_AUTOPILOT_ERROR = 1
 EXIT_SUMMARY_ERROR = 1
+EXIT_CONTACT_ERROR = 1
 LOGIN_CANCELLED_MESSAGE = "Login cancelled. Nothing was saved."
 POLLING_ENDED_REASON = "polling ended unexpectedly"
 STORAGE_FAILED_MESSAGE = "storage failed: {error}"
@@ -220,7 +230,13 @@ async def run(
     new_contacts = InMemoryContactEvents[NewContactEvent]()
     ready_contacts = InMemoryContactEvents[ContactReadyEvent]()
     outbox = SqlOutboxRepository(session_factory)
-    control_bot = ControlBot(settings, CardActions(contacts, modes), PauseActions(contacts))
+    gender = GenderResolver(settings.default_gender)
+    control_bot = ControlBot(
+        settings,
+        CardActions(contacts, modes, gender),
+        PauseActions(contacts),
+        GenderActions(contacts, messages, modes, gender),
+    )
     hand_over = HandOverService(contacts, messages, outbox, control_bot.hand_over_notifier)
     autopilot_state = SqlAutopilotStateRepository(session_factory)
     reply_jobs = ArqReplyJobQueue(settings)
@@ -267,7 +283,7 @@ async def run(
         ready_contacts,
         settings.media_dir,
     )
-    announcer = CardAnnouncer(contacts, messages, modes, control_bot.sender, ready_contacts)
+    announcer = CardAnnouncer(contacts, messages, modes, control_bot.sender, ready_contacts, gender)
     sender = OutboxSender(
         outbox,
         contacts,
@@ -417,16 +433,19 @@ async def _run_reply_preview_command(settings: Settings, request: ReplyPreviewRe
     session_factory = build_session_factory(engine)
     personas = SqlPersonaRepository(session_factory)
     factory = LLMClientFactory(settings)
+    gender = GenderResolver(settings.default_gender)
+    contacts = SqlContactRepository(session_factory)
     try:
         client = factory.get(LLMStep.REPLY)
         generator = ReplyGenerator(
-            contacts=SqlContactRepository(session_factory),
+            contacts=contacts,
             messages=SqlMessageRepository(session_factory),
             modes=SqlModeRepository(session_factory),
             persona=PersonaService(personas),
             examples=ExampleSelector(
                 SqlStyleExampleRepository(session_factory), settings.style_examples_max
             ),
+            gender=gender,
             builder=PromptBuilder(
                 budget_chars=settings.reply_prompt_budget_chars,
                 timezone=settings.tzinfo,
@@ -435,7 +454,7 @@ async def _run_reply_preview_command(settings: Settings, request: ReplyPreviewRe
             client=client,
             history_limit=settings.reply_history_messages,
         )
-        return await ReplyPreviewCommand(generator, client.model).run(request)
+        return await ReplyPreviewCommand(generator, client.model, contacts, gender).run(request)
     except (SQLAlchemyError, OSError) as exc:
         print(STORAGE_FAILED_MESSAGE.format(error=type(exc).__name__), file=sys.stderr)
         return EXIT_REPLY_PREVIEW_ERROR
@@ -542,6 +561,21 @@ async def _run_summary_command(settings: Settings, request: SummaryRequest) -> i
         await engine.dispose()
 
 
+async def _run_contact_command(settings: Settings, request: ContactRequest) -> int:
+    engine = build_engine(settings)
+    session_factory = build_session_factory(engine)
+    commands = ContactCommands(
+        SqlContactRepository(session_factory), GenderResolver(settings.default_gender)
+    )
+    try:
+        return await commands.run(request)
+    except (SQLAlchemyError, OSError) as exc:
+        print(STORAGE_FAILED_MESSAGE.format(error=type(exc).__name__), file=sys.stderr)
+        return EXIT_CONTACT_ERROR
+    finally:
+        await engine.dispose()
+
+
 def _parse_args(argv: Sequence[str] | None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(prog="python -m cyrano", description=APP_DESCRIPTION)
     commands = parser.add_subparsers(dest="command")
@@ -554,6 +588,7 @@ def _parse_args(argv: Sequence[str] | None) -> argparse.Namespace:
     add_stop_check_parser(commands)
     add_autopilot_parser(commands)
     add_summary_parser(commands)
+    add_contact_parser(commands)
     return parser.parse_args(argv)
 
 
@@ -587,6 +622,11 @@ def main(argv: Sequence[str] | None = None) -> int:
     except SummaryUsageError as exc:
         print(exc, file=sys.stderr)
         return EXIT_SUMMARY_ERROR
+    try:
+        contact = contact_request(args)
+    except ContactUsageError as exc:
+        print(exc, file=sys.stderr)
+        return EXIT_CONTACT_ERROR
     if stop_check is not None and stop_check.text is not None:
         return run_text_check(stop_check.text)
     try:
@@ -605,6 +645,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         return asyncio.run(_run_autopilot_command(settings, autopilot))
     if summary is not None:
         return asyncio.run(_run_summary_command(settings, summary))
+    if contact is not None:
+        return asyncio.run(_run_contact_command(settings, contact))
     if stop_check is not None and stop_check.contact_id is not None:
         return asyncio.run(_run_stop_check_command(settings, stop_check.contact_id))
     preview = reply_preview_request(args)

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from cyrano.domain.gender import ResolvedGender
 from cyrano.domain.models import Contact
 from cyrano.domain.reply import (
     FACT_ABOUT_LIMIT,
@@ -12,7 +13,7 @@ from cyrano.services.card_builder import profile_of
 from cyrano.services.sanitize import clean_text
 
 
-def build_contact_facts(contact: Contact) -> ContactFacts:
+def build_contact_facts(contact: Contact, gender: ResolvedGender) -> ContactFacts:
     profile = profile_of(contact)
     leomatch = profile.leomatch
     card_name = None if leomatch is None else leomatch.name
@@ -27,4 +28,5 @@ def build_contact_facts(contact: Contact) -> ContactFacts:
         city=None if leomatch is None else clean_text(leomatch.city, FACT_CITY_LIMIT),
         about=None if leomatch is None else clean_text(leomatch.about, FACT_ABOUT_LIMIT),
         bio=clean_text(profile.bio, FACT_BIO_LIMIT),
+        gender=gender.value,
     )

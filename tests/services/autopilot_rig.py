@@ -32,6 +32,7 @@ from cyrano.domain.models import (
     MessageCreate,
 )
 from cyrano.logging import JsonFormatter
+from cyrano.services.gender import GenderResolver
 from cyrano.services.hand_over import HandOverService
 from cyrano.services.humanization import HumanizationPlanner
 from cyrano.services.llm_client import LLMClient
@@ -138,6 +139,7 @@ class AutopilotRig:
             modes=self.modes,
             persona=PersonaService(self.personas),
             examples=ExampleSelector(self.examples, 8),
+            gender=GenderResolver(),
             builder=make_builder(budget),
             client=client,
             history_limit=20,

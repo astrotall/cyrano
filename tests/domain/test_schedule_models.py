@@ -11,6 +11,7 @@ from cyrano.domain.enums import Weekday
 from cyrano.domain.errors import ContentValidationError, ImportFileError, ScheduleTimezoneUnresolved
 from cyrano.domain.schedule import (
     MAX_BUSY_WINDOWS,
+    MAX_EARLY_READ_SECONDS,
     MAX_SPLIT_PAUSE_SECONDS,
     MAX_TYPING_SECONDS,
     ScheduleProfile,
@@ -50,6 +51,7 @@ def test_every_field_but_the_version_has_its_default() -> None:
     assert profile.typing.max_seconds == 25
     assert profile.postponed_spread_minutes == (1, 15)
     assert profile.split_pause_seconds == (3, 8)
+    assert profile.early_read_seconds == (0, 1)
 
 
 def test_the_version_is_required() -> None:
@@ -225,6 +227,11 @@ RULE_CASES: list[tuple[dict[str, object], str, str]] = [
     ({"split_pause_seconds": [3, 61]}, "split_pause_seconds[1]", "must be at most 60"),
     ({"split_pause_seconds": [-1, 3]}, "split_pause_seconds[0]", "must be at least 0"),
     ({"split_pause_seconds": [1.5, 3]}, "split_pause_seconds[0]", "must be an integer"),
+    ({"early_read_seconds": [5, 2]}, "early_read_seconds", "must be [lo, hi] with lo <= hi"),
+    ({"early_read_seconds": [0, 31]}, "early_read_seconds[1]", "must be at most 30"),
+    ({"early_read_seconds": [-1, 1]}, "early_read_seconds[0]", "must be at least 0"),
+    ({"early_read_seconds": [0.5, 1]}, "early_read_seconds[0]", "must be an integer"),
+    ({"early_read_seconds": [0]}, "early_read_seconds[1]", "missing"),
 ]
 
 
@@ -262,6 +269,7 @@ def test_an_unknown_key_is_refused_at_its_parent_without_being_named(
         {"busy": [{"days": ["mon"], "from": SECRET_VALUE, "to": "10:00"}]},
         {"read_pause_seconds": [SECRET_VALUE, 3]},
         {"split_pause_seconds": [SECRET_VALUE, 3]},
+        {"early_read_seconds": [SECRET_VALUE, 3]},
     ],
 )
 def test_a_validation_error_never_carries_the_input(document: dict[str, object]) -> None:
@@ -340,6 +348,32 @@ def test_the_sample_file_validates_and_holds_invented_generic_values() -> None:
         ((Weekday.TUE, Weekday.THU), time(9, 0), time(10, 30))
     ]
     assert profile.split_pause_seconds == (3, 8)
+
+
+def test_the_early_read_limit_is_thirty_seconds() -> None:
+    assert MAX_EARLY_READ_SECONDS == 30
+
+
+@pytest.mark.parametrize("pair", [[0, 0], [0, 1], [3, 3], [0, 30], [30, 30]])
+def test_an_early_read_range_inside_the_bounds_is_accepted(pair: list[int]) -> None:
+    profile = parse_schedule(json.dumps({"version": 1, "early_read_seconds": pair}))
+
+    assert profile.early_read_seconds == tuple(pair)
+
+
+def test_a_stored_profile_without_the_early_read_reads_with_the_default() -> None:
+    stored = default_schedule_profile("UTC").stored_data()
+    stored.pop("early_read_seconds")
+
+    profile = ScheduleProfile.model_validate(stored)
+
+    assert profile.early_read_seconds == (0, 1)
+
+
+def test_the_early_read_range_survives_the_stored_form() -> None:
+    profile = parse_schedule(json.dumps({"version": 1, "early_read_seconds": [2, 7]}))
+
+    assert ScheduleProfile.model_validate(profile.stored_data()).early_read_seconds == (2, 7)
 
 
 def test_the_split_pause_limit_is_one_minute() -> None:

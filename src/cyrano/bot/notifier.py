@@ -22,6 +22,7 @@ OUTBOX_NOTICES = SenderNotices(
     failed=messages.OUTBOX_FAILED,
     uncertain=messages.OUTBOX_UNCERTAIN,
     flood_wait=messages.OUTBOX_FLOOD_WAIT,
+    flood_wait_early_read=messages.OUTBOX_FLOOD_WAIT_EARLY_READ,
     account_stopped=messages.OUTBOX_ACCOUNT_STOPPED,
     contact_paused=messages.OUTBOX_CONTACT_PAUSED,
     stale_summary=messages.OUTBOX_STALE_SUMMARY,

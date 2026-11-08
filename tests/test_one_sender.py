@@ -32,6 +32,14 @@ HAND_OVER_PROTOCOL_MODULE = "services/hand_over_notifier.py"
 HAND_OVER_NOTIFIER_MODULE = "bot/notifier.py"
 HAND_OVER_MODULE = "services/hand_over.py"
 INTAKE_MODULE = "services/intake.py"
+EARLY_READ_MODULE = "services/early_read.py"
+EARLY_READ_DOMAIN_MODULE = "domain/early_read.py"
+EARLY_READ_EXECUTION = "_execute_early_read"
+EARLY_READ_FUNCTIONS = frozenset({"run_early_reads", "execute_early_reads", EARLY_READ_EXECUTION})
+EARLY_READ_FORBIDDEN_RECEIVERS = frozenset({"_outbox", "_limiter"})
+INTAKE_HANDLE = "handle"
+INTAKE_STOP_CHECK = "_check_stop_triggers"
+ON_INCOMING = "on_incoming"
 STOP_TRIGGER_DETECTOR_MODULE = "services/stop_triggers.py"
 STOP_CHECK_MODULE = "stop_check_cli.py"
 SUPERSEDE_METHOD = "cancel_superseded_autopilot_rows"
@@ -799,3 +807,111 @@ def test_the_follower_scans_catch_what_they_look_for() -> None:
         ENQUEUE_SEQUENCE_METHOD,
     } <= _called_attributes(bad)
     assert PREDECESSOR_REASON in _imported_names(bad)
+
+
+def _functions_named(tree: ast.AST, names: frozenset[str]) -> list[ast.AsyncFunctionDef]:
+    return [
+        node
+        for node in ast.walk(tree)
+        if isinstance(node, ast.AsyncFunctionDef) and node.name in names
+    ]
+
+
+def test_the_registry_and_the_scheduler_never_reference_the_transport() -> None:
+    for name in (EARLY_READ_MODULE, EARLY_READ_DOMAIN_MODULE):
+        tree = ast.parse((SOURCE_ROOT / name).read_text())
+        referenced = (_attributes_used(tree) - CALL_ONLY_WRITE_METHODS) | _called_attributes(tree)
+        assert referenced.isdisjoint(TRANSPORT_METHODS | TELETHON_WRITE_METHODS), name
+        assert _names_passed_to_getattr(tree).isdisjoint(TRANSPORT_METHODS), name
+        assert "MessageTransport" not in _names_used(tree), name
+        assert "_transport" not in _attributes_used(tree), name
+        assert not any(module.startswith("cyrano.userbot") for module, _ in _imported(tree)), name
+
+
+def test_only_the_sender_calls_mark_read_and_only_from_the_pre_send_part_and_the_early_read() -> (
+    None
+):
+    tree = ast.parse((SOURCE_ROOT / SENDER_MODULE).read_text())
+    callers = {
+        name
+        for name, module in _modules()
+        if READ_METHOD in _called_attributes(module)
+        or READ_METHOD in _names_passed_to_getattr(module)
+    }
+
+    assert callers == {SENDER_MODULE}
+    assert _callers_in_module(tree, READ_METHOD) == {BEFORE_SEND_METHOD, EARLY_READ_EXECUTION}
+
+
+def test_the_early_read_reaches_the_transport_only_through_the_senders_own_attribute() -> None:
+    tree = ast.parse((SOURCE_ROOT / SENDER_MODULE).read_text())
+    [execution] = _functions_named(tree, frozenset({EARLY_READ_EXECUTION}))
+
+    called = _called_attributes(execution)
+
+    assert called & TRANSPORT_METHODS == {READ_METHOD}
+    receivers = {
+        node.func.value.attr
+        for node in ast.walk(execution)
+        if isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Attribute)
+        and node.func.attr == READ_METHOD
+        and isinstance(node.func.value, ast.Attribute)
+    }
+    assert receivers == {"_transport"}
+
+
+def test_the_early_read_is_not_a_message_and_never_touches_the_outbox_or_the_limiter() -> None:
+    tree = ast.parse((SOURCE_ROOT / SENDER_MODULE).read_text())
+    functions = _functions_named(tree, EARLY_READ_FUNCTIONS)
+
+    assert {function.name for function in functions} == EARLY_READ_FUNCTIONS
+    for function in functions:
+        assert _attributes_used(function).isdisjoint(EARLY_READ_FORBIDDEN_RECEIVERS), function.name
+        assert {TRANSPORT_METHOD, TYPING_METHOD}.isdisjoint(_called_attributes(function))
+
+
+def test_the_early_read_shares_the_flood_and_account_paths_of_the_row_loop() -> None:
+    tree = ast.parse((SOURCE_ROOT / SENDER_MODULE).read_text())
+
+    assert _callers_in_module(tree, PAUSE_METHOD) == {FLOOD_WAIT_HANDLER}
+    assert _callers_in_module(tree, STOP_METHOD) == {"_stop_for_account"}
+    assert FLOOD_WAIT_HANDLER in {
+        node.func.attr
+        for function in _functions_named(tree, frozenset({"_react_to_early_read_failure"}))
+        for node in ast.walk(function)
+        if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
+    }
+
+
+def test_the_sender_holds_no_lock_between_its_two_coroutines() -> None:
+    tree = ast.parse((SOURCE_ROOT / SENDER_MODULE).read_text())
+    names = _attributes_used(tree) | {
+        node.id for node in ast.walk(tree) if isinstance(node, ast.Name)
+    }
+
+    assert {"Lock", "Semaphore", "Condition"}.isdisjoint(names)
+
+
+def test_the_intake_asks_the_early_read_scheduler_last() -> None:
+    tree = ast.parse((SOURCE_ROOT / INTAKE_MODULE).read_text())
+
+    [stop_check] = _call_lines(tree, INTAKE_HANDLE, INTAKE_STOP_CHECK)
+    asks = _call_lines(tree, INTAKE_HANDLE, ON_INCOMING)
+    publish = _call_lines(tree, INTAKE_HANDLE, "publish")
+    assert len(asks) == 2
+    assert stop_check < asks[0] < asks[1] < publish[0]
+    handle = next(
+        node
+        for node in ast.walk(tree)
+        if isinstance(node, ast.AsyncFunctionDef) and node.name == INTAKE_HANDLE
+    )
+    receivers = [
+        node.func.value.attr
+        for node in sorted(ast.walk(handle), key=lambda n: getattr(n, "lineno", 0))
+        if isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Attribute)
+        and node.func.attr == ON_INCOMING
+        and isinstance(node.func.value, ast.Attribute)
+    ]
+    assert receivers == ["_scheduler", "_early_read"]

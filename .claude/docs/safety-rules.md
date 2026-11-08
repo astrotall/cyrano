@@ -49,7 +49,10 @@ only.
   imported only inside `userbot/`. A send with an unknown outcome is never retried automatically,
   because the contact could receive the message twice: the transport is called once for the row, and
   the owner checks the chat and decides. The limits in the sender exist since CYR-22 (see S5), and its
-  humanized pacing since CYR-18 (see S6).
+  humanized pacing since CYR-18 (see S6). Since CYR-44 the rule covers the sender's second coroutine,
+  `run_early_reads`: the early read mark is a request registered by the intake side
+  (`services/early_read.py`, which cannot reach the transport) and executed by the sender, so the
+  module of the sender is still the only caller of `mark_read`.
 - **How it is tested:** exists, as structural tests that fail on a new way out.
   `tests/test_one_sender.py` scans the syntax tree of all of `src`: only the sender module calls
   `send_text`, `show_typing` and `mark_read`, also through `getattr`, and only on its transport; only
@@ -59,7 +62,11 @@ only.
   one allowed use of such a name elsewhere; inside `bot/` only the two owner-chat modules send; Telethon
   request classes are imported only by the adapter and only from the allowlist (`GetFullUserRequest`);
   nothing outside `userbot/` imports Telethon and nothing outside `bot/` imports aiogram; `UserbotClient`
-  has no write member; `MessageTransport` has exactly `send_text`, `show_typing` and `mark_read`. A last
+  has no write member; `MessageTransport` has exactly `send_text`, `show_typing` and `mark_read`. Since
+  CYR-44 more scans: the early read registry, its scheduler and its domain module never reference a
+  transport method, the `MessageTransport` Protocol or `_transport`; `mark_read` is called inside the
+  sender only from `_before_send` and `_execute_early_read`; that function calls no other transport
+  method, never touches the outbox or the limiter, and the sender module holds no lock. A last
   test proves the scans catch a planted violation.
   `tests/userbot/test_never_sends.py` still compares the members of `UserbotClient`, `IncomingEvent` and
   `SenderLike` with an allowlist, scans every userbot module for write-looking names, with the adapter's
@@ -188,7 +195,11 @@ only.
   claims a part only after the one before it was sent, waits `split_pause_seconds` after each send, runs
   only typing for a later part (no read mark, no read pause, no availability check, because the reply
   has started) and cancels the rest of a reply whose part failed or was cancelled. Every part passes the
-  guard, the limits and the stale rule. Details: [humanization.md](humanization.md) and
+  guard, the limits and the stale rule. Since CYR-44 the read mark of an incoming message may come
+  earlier than the reply, through the sender's second coroutine, only while the autopilot and the sender
+  run, the contact is `active`, the conversation is ongoing and the moment is outside the night and busy
+  windows; it is not a message and is not counted by the send limits. Details:
+  [humanization.md](humanization.md#the-early-read) and
   [outbox-and-sender.md](outbox-and-sender.md#multi-part-replies).
 - **How it is tested:** exists. With an injected clock and a seeded random generator:
   `tests/services/test_humanization.py` (windows, reasons, delays, typing),

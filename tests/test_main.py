@@ -9,7 +9,7 @@ import sys
 import time
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import pytest
@@ -24,7 +24,7 @@ from cyrano.domain.enums import (
     OutboxState,
     PauseReason,
 )
-from cyrano.domain.models import ContactProfile, Message
+from cyrano.domain.models import ContactProfile, Message, MessageCreate
 from cyrano.domain.summary import SummaryDue
 from cyrano.logging import configure_logging
 from cyrano.main import main, run
@@ -47,6 +47,7 @@ from tests.services.autopilot_fakes import (
     InMemoryReplyBacklog,
     RecordingQueue,
 )
+from tests.services.early_read_rig import free_profile_with
 from tests.services.fakes import FakeCardSender, InMemoryModes
 from tests.services.outbox_fakes import (
     ALWAYS_FREE_PROFILE,
@@ -58,6 +59,7 @@ from tests.services.outbox_fakes import (
 from tests.services.summary_fakes import InMemorySummaries, RecordingSummaryQueue
 from tests.userbot.fakes import (
     FAKE_SENDER_ID,
+    FAKE_SENT_AT,
     FakeClient,
     FakeEvent,
     FakeSender,
@@ -654,6 +656,14 @@ class _SenderSpy:
             self.calls.append("sender cancelled")
             raise
 
+    async def run_early_reads(self) -> None:
+        self.calls.append("early read.run")
+        try:
+            await asyncio.sleep(3600)
+        except asyncio.CancelledError:
+            self.calls.append("early read cancelled")
+            raise
+
 
 def _recording_sender(monkeypatch: pytest.MonkeyPatch, calls: list[str]) -> None:
     monkeypatch.setattr("cyrano.main.OutboxSender", lambda *args, **kwargs: _SenderSpy(calls))
@@ -733,6 +743,9 @@ async def test_a_crashing_sender_is_logged_once_and_does_not_stop_the_intake(
 
         async def run(self) -> None:
             raise RuntimeError("fake sender crash")
+
+        async def run_early_reads(self) -> None:
+            await asyncio.sleep(3600)
 
     monkeypatch.setattr("cyrano.main.OutboxSender", _CrashingSender)
     configure_logging("INFO")
@@ -1468,3 +1481,206 @@ async def test_with_the_switch_off_nothing_is_put_on_the_queue(
     await asyncio.wait_for(task, timeout=2)
 
     assert repositories.queue.jobs == []
+
+
+async def test_the_early_read_task_starts_after_the_sender_loop_and_is_cancelled_before_it(
+    session_env: dict[str, str],
+    heartbeat_file: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    bot_calls: list[str],
+) -> None:
+    _recording_sender(monkeypatch, bot_calls)
+    monkeypatch.setattr(
+        "cyrano.main.AutopilotSweeper", lambda *args, **kwargs: _SweeperSpy(bot_calls)
+    )
+    monkeypatch.setattr("cyrano.main.ArqReplyJobQueue", lambda _: _QueueSpy(bot_calls))
+    client = FakeClient(calls=bot_calls)
+    stop = asyncio.Event()
+    task = asyncio.create_task(
+        run(load_settings(env_file=None), stop, client_factory=_factory(client))
+    )
+
+    await _wait_until(lambda: _contains(bot_calls, "early read.run"))
+    stop.set()
+    await asyncio.wait_for(task, timeout=2)
+
+    assert bot_calls.index("sender.run") < bot_calls.index("early read.run")
+    order = [
+        "sweeper cancelled",
+        "early read cancelled",
+        "sender cancelled",
+        "bot.stop",
+        "disconnect",
+        "queue.close",
+    ]
+    assert [bot_calls.index(name) for name in order] == sorted(bot_calls.index(n) for n in order)
+
+
+async def test_the_early_read_task_does_not_start_when_the_start_is_interrupted(
+    session_env: dict[str, str],
+    heartbeat_file: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    bot_calls: list[str],
+) -> None:
+    _recording_sender(monkeypatch, bot_calls)
+    client = FakeClient(hang_on_connect=True, calls=bot_calls)
+    stop = asyncio.Event()
+    asyncio.get_running_loop().call_later(0.05, stop.set)
+
+    await asyncio.wait_for(
+        run(load_settings(env_file=None), stop, client_factory=_factory(client)), timeout=2
+    )
+
+    assert "early read.run" not in bot_calls
+
+
+async def test_a_crashing_early_read_task_is_logged_once_and_does_not_stop_the_intake(
+    session_env: dict[str, str],
+    heartbeat_file: Path,
+    repositories: Repositories,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    class _CrashingExecutor:
+        def __init__(self, *args: object, **kwargs: object) -> None:
+            pass
+
+        async def run(self) -> None:
+            await asyncio.sleep(3600)
+
+        async def run_early_reads(self) -> None:
+            raise RuntimeError("fake executor crash")
+
+    monkeypatch.setattr("cyrano.main.OutboxSender", _CrashingExecutor)
+    configure_logging("INFO")
+    client = _readable_client()
+    stop = asyncio.Event()
+    task = asyncio.create_task(
+        run(load_settings(env_file=None), stop, client_factory=_factory(client))
+    )
+    await asyncio.sleep(0.05)
+
+    await client.deliver(FakeEvent())
+    await asyncio.sleep(0.05)
+
+    assert not task.done()
+    assert len(repositories.messages.stored) == 1
+    stop.set()
+    await asyncio.wait_for(task, timeout=2)
+    records = [json.loads(line) for line in capsys.readouterr().out.splitlines() if line]
+    crashes = [r for r in records if r["msg"] == "early read executor stopped"]
+    assert [r["error"] for r in crashes] == ["RuntimeError"]
+    assert "fake executor crash" not in json.dumps(records)
+
+
+EARLY_READ_WAIT_SECONDS = 0.8
+
+
+async def _lively_contact(repositories: Repositories) -> None:
+    contact = await repositories.contacts.seed(
+        FAKE_SENDER_ID, status=ContactStatus.ACTIVE, mode_id=1
+    )
+    await repositories.messages.append(
+        MessageCreate(
+            contact_id=contact.id,
+            direction=MessageDirection.OUTGOING,
+            text="an invented earlier line",
+            tg_message_id=1,
+            created_at=FAKE_SENT_AT - timedelta(minutes=1),
+        )
+    )
+
+
+def _immediate_profile(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(
+        "cyrano.main.SqlScheduleProfileRepository",
+        lambda _: InMemoryScheduleProfiles(free_profile_with(early_read_seconds=[0, 0])),
+    )
+
+
+async def _read_ids(transport: ScriptedTransport) -> bool:
+    return bool(transport.read_ids)
+
+
+async def test_a_lively_message_of_an_active_contact_is_marked_read_by_the_running_app(
+    session_env: dict[str, str],
+    heartbeat_file: Path,
+    repositories: Repositories,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("AUTOPILOT_ENABLED", "true")
+    _immediate_profile(monkeypatch)
+    await _lively_contact(repositories)
+    client = FakeClient()
+    transport = ScriptedTransport()
+    stop = asyncio.Event()
+    task = asyncio.create_task(
+        run(load_settings(env_file=None), stop, client_factory=_factory(client, transport))
+    )
+    await asyncio.sleep(0.05)
+
+    await client.deliver(FakeEvent(raw_text="an invented follow-up"))
+    await _wait_until(lambda: _read_ids(transport))
+    stop.set()
+    await asyncio.wait_for(task, timeout=2)
+
+    assert transport.read_ids == [FAKE_SENDER_ID]
+    assert transport.calls == []
+    assert repositories.outbox.rows == {}
+
+
+@pytest.mark.parametrize(
+    ("variable", "value"), [("EARLY_READ_ENABLED", "false"), ("AUTOPILOT_ENABLED", "false")]
+)
+async def test_the_running_app_marks_nothing_read_when_a_switch_is_off(
+    session_env: dict[str, str],
+    heartbeat_file: Path,
+    repositories: Repositories,
+    monkeypatch: pytest.MonkeyPatch,
+    variable: str,
+    value: str,
+) -> None:
+    monkeypatch.setenv("AUTOPILOT_ENABLED", "true")
+    monkeypatch.setenv(variable, value)
+    _immediate_profile(monkeypatch)
+    await _lively_contact(repositories)
+    client = FakeClient()
+    transport = ScriptedTransport()
+    stop = asyncio.Event()
+    task = asyncio.create_task(
+        run(load_settings(env_file=None), stop, client_factory=_factory(client, transport))
+    )
+    await asyncio.sleep(0.05)
+
+    await client.deliver(FakeEvent(raw_text="an invented follow-up"))
+    await asyncio.sleep(EARLY_READ_WAIT_SECONDS)
+    stop.set()
+    await asyncio.wait_for(task, timeout=2)
+
+    assert transport.read_ids == []
+    assert len(repositories.messages.stored) == 2
+
+
+async def test_the_running_app_marks_a_contact_that_is_not_active_nothing(
+    session_env: dict[str, str],
+    heartbeat_file: Path,
+    repositories: Repositories,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("AUTOPILOT_ENABLED", "true")
+    _immediate_profile(monkeypatch)
+    await repositories.contacts.seed(FAKE_SENDER_ID, status=ContactStatus.PENDING)
+    client = FakeClient()
+    transport = ScriptedTransport()
+    stop = asyncio.Event()
+    task = asyncio.create_task(
+        run(load_settings(env_file=None), stop, client_factory=_factory(client, transport))
+    )
+    await asyncio.sleep(0.05)
+
+    await client.deliver(FakeEvent(raw_text="an invented follow-up"))
+    await asyncio.sleep(EARLY_READ_WAIT_SECONDS)
+    stop.set()
+    await asyncio.wait_for(task, timeout=2)
+
+    assert transport.read_ids == []

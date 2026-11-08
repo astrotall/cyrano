@@ -79,6 +79,12 @@ among the last 20), the job is deferred by the normal debounce and one WARNING
 `the conversation pace was not decided` with the class name is logged; the job is enqueued anyway.
 `tests/test_ongoing_rule.py` fails if a second copy of the rule appears.
 
+The same rule decides the early read mark (CYR-44): the intake's last step asks the planner through the
+same `conversation_ongoing`, and in an ongoing conversation of an `active` contact the sender's second
+coroutine marks the chat read within about a second of the message instead of at the start of the reply.
+The early read is not an autopilot job and writes nothing; its conditions are in
+[humanization.md](humanization.md#the-early-read).
+
 Why: in a conversation where both sides are writing, a contact who sends a message every 10 to 20 s
 never left a 12 s gap, so every job found a newer message and skipped, and nothing was sent (seen live).
 The short debounce is shorter than such a gap. A contact who comes back after a pause still gets the

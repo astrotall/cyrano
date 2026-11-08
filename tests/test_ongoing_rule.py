@@ -101,3 +101,20 @@ def test_the_scan_sees_a_second_copy_of_the_rule() -> None:
 
     assert _reads_window(copy)
     assert [function.name for function in _functions(copy)] == ["debounce"]
+
+
+EARLY_READ_MODULE = "services/early_read.py"
+
+
+def test_both_schedulers_ask_the_planner_and_neither_keeps_its_own_copy_of_the_rule() -> None:
+    trees = _trees()
+    askers = {module for module, tree in trees.items() if PACE_METHOD in _called(tree)}
+
+    assert askers == {SCHEDULER_MODULE, EARLY_READ_MODULE}
+    early_read = trees[EARLY_READ_MODULE]
+    assert {RULE_NAME, BURST_RULE_NAME}.isdisjoint(_called(early_read))
+    assert not _reads_window(early_read)
+    assert not any(
+        function.name in {RULE_NAME, BURST_RULE_NAME, PACE_METHOD}
+        for function in _functions(early_read)
+    )

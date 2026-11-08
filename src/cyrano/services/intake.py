@@ -16,6 +16,7 @@ from cyrano.domain.models import (
 )
 from cyrano.services.autopilot import AutopilotScheduler
 from cyrano.services.contact_events import ContactEventPublisher
+from cyrano.services.early_read import EarlyReadScheduler
 from cyrano.services.hand_over import HandOverService
 from cyrano.services.message_time import message_time
 from cyrano.services.repositories import ContactRepository, MessageRepository
@@ -45,6 +46,7 @@ class IntakeService:
         *,
         hand_over: HandOverService | None = None,
         scheduler: AutopilotScheduler | None = None,
+        early_read: EarlyReadScheduler | None = None,
         clock: Callable[[], datetime] = _utc_now,
     ) -> None:
         self._contacts = contacts
@@ -52,6 +54,7 @@ class IntakeService:
         self._events = events
         self._hand_over = hand_over
         self._scheduler = scheduler
+        self._early_read = early_read
         self._clock = clock
 
     async def handle(self, incoming: IncomingMessage) -> IntakeResult:
@@ -72,6 +75,8 @@ class IntakeService:
             await self._check_stop_triggers(contact.id, incoming.text)
             if self._scheduler is not None:
                 await self._scheduler.on_incoming(contact.id, message.id)
+            if self._early_read is not None:
+                await self._early_read.on_incoming(contact.id, message.id)
         if created:
             logger.info("contact registered", extra={"contact_id": contact.id})
             await self._events.publish(

@@ -68,6 +68,7 @@ from cyrano.services.autopilot import AutopilotScheduler, AutopilotSweeper
 from cyrano.services.card_actions import CardActions
 from cyrano.services.card_announcer import CardAnnouncer
 from cyrano.services.contact_events import InMemoryContactEvents
+from cyrano.services.early_read import EarlyReadGate, EarlyReadQueue, EarlyReadScheduler
 from cyrano.services.hand_over import HandOverService
 from cyrano.services.humanization import HumanizationPlanner, ScheduleService
 from cyrano.services.intake import IntakeService
@@ -155,6 +156,14 @@ def _report_sender_exit(task: asyncio.Task[None]) -> None:
         logger.error("outbox sender stopped", extra={"error": type(error).__name__})
 
 
+def _report_early_read_exit(task: asyncio.Task[None]) -> None:
+    if task.cancelled():
+        return
+    error = task.exception()
+    if error is not None:
+        logger.error("early read executor stopped", extra={"error": type(error).__name__})
+
+
 def _report_sweeper_exit(task: asyncio.Task[None]) -> None:
     if task.cancelled():
         return
@@ -216,12 +225,21 @@ async def run(
     autopilot_state = SqlAutopilotStateRepository(session_factory)
     reply_jobs = ArqReplyJobQueue(settings)
     schedule = ScheduleService(SqlScheduleProfileRepository(session_factory), settings.timezone)
+    planner = HumanizationPlanner(messages, schedule, random.SystemRandom())
+    sender_state = SqlSenderStateRepository(session_factory)
+    early_gate = EarlyReadGate(
+        contacts, autopilot_state, sender_state, schedule, settings, clock=_utc_now
+    )
+    early_queue = EarlyReadQueue()
+    early_read = EarlyReadScheduler(
+        early_gate, planner, schedule, early_queue, rng=random.SystemRandom(), clock=_utc_now
+    )
     scheduler = AutopilotScheduler(
         contacts,
         autopilot_state,
         reply_jobs,
         settings,
-        HumanizationPlanner(messages, schedule, random.SystemRandom()),
+        planner,
         debounce_seconds=settings.autopilot_debounce_seconds,
         ongoing_debounce_seconds=settings.autopilot_debounce_ongoing_seconds,
         clock=_utc_now,
@@ -232,6 +250,7 @@ async def run(
         new_contacts,
         hand_over=hand_over,
         scheduler=scheduler,
+        early_read=early_read,
         clock=_utc_now,
     )
     detector = ManualMessageDetector(
@@ -253,13 +272,15 @@ async def run(
         outbox,
         contacts,
         messages,
-        SqlSenderStateRepository(session_factory),
+        sender_state,
         SendLimiter(messages, settings),
         schedule,
         access.transport,
         control_bot.notifier,
         SendGuard(settings),
         OUTBOX_NOTICES,
+        early_reads=early_queue,
+        early_gate=early_gate,
     )
     sweeper = AutopilotSweeper(
         SqlReplyBacklogRepository(session_factory),
@@ -281,6 +302,7 @@ async def run(
     announcer_task: asyncio.Task[None] | None = None
     polling_task: asyncio.Task[None] | None = None
     sender_task: asyncio.Task[None] | None = None
+    early_read_task: asyncio.Task[None] | None = None
     sweeper_task: asyncio.Task[None] | None = None
     summary_sweeper_task: asyncio.Task[None] | None = None
     polling_failures: list[ControlBotError] = []
@@ -298,6 +320,8 @@ async def run(
             )
             sender_task = asyncio.create_task(sender.run())
             sender_task.add_done_callback(_report_sender_exit)
+            early_read_task = asyncio.create_task(sender.run_early_reads())
+            early_read_task.add_done_callback(_report_early_read_exit)
             sweeper_task = asyncio.create_task(sweeper.run())
             sweeper_task.add_done_callback(_report_sweeper_exit)
             summary_sweeper_task = asyncio.create_task(summary_sweeper.run())
@@ -313,6 +337,9 @@ async def run(
         if sweeper_task is not None:
             sweeper_task.cancel()
             await asyncio.gather(sweeper_task, return_exceptions=True)
+        if early_read_task is not None:
+            early_read_task.cancel()
+            await asyncio.gather(early_read_task, return_exceptions=True)
         if sender_task is not None:
             sender_task.cancel()
             await asyncio.gather(sender_task, return_exceptions=True)

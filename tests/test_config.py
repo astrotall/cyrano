@@ -220,6 +220,7 @@ def test_every_setting_is_either_logged_or_deliberately_withheld() -> None:
         "reply_history_messages",
         "reply_prompt_budget_chars",
         "autopilot_enabled",
+        "early_read_enabled",
         "autopilot_debounce_seconds",
         "autopilot_debounce_ongoing_seconds",
         "autopilot_max_burst_wait_seconds",
@@ -752,3 +753,42 @@ def test_a_summary_setting_out_of_range_is_readable_without_the_value(
 
     assert name in str(raised.value)
     assert value not in str(raised.value)
+
+
+EARLY_READ_VARIABLE = "EARLY_READ_ENABLED"
+
+
+def test_the_early_read_is_on_by_default_and_stays_unlogged(full_env: dict[str, str]) -> None:
+    settings = load_settings(env_file=None)
+
+    assert settings.early_read_enabled is True
+    assert "early_read_enabled" not in settings.safe_summary()
+
+
+@pytest.mark.parametrize(("raw", "expected"), [("false", False), ("0", False), ("true", True)])
+def test_the_early_read_can_be_switched(
+    full_env: dict[str, str], monkeypatch: pytest.MonkeyPatch, raw: str, expected: bool
+) -> None:
+    monkeypatch.setenv(EARLY_READ_VARIABLE, raw)
+
+    assert load_settings(env_file=None).early_read_enabled is expected
+
+
+def test_an_empty_early_read_value_means_the_default(
+    full_env: dict[str, str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv(EARLY_READ_VARIABLE, "")
+
+    assert load_settings(env_file=None).early_read_enabled is True
+
+
+def test_a_nonsense_early_read_value_is_a_readable_error_without_the_value(
+    full_env: dict[str, str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv(EARLY_READ_VARIABLE, "sometimes-marker-zq")
+
+    with pytest.raises(ConfigError) as raised:
+        load_settings(env_file=None)
+
+    assert EARLY_READ_VARIABLE in str(raised.value)
+    assert "sometimes-marker-zq" not in str(raised.value)

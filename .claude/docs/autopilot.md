@@ -220,7 +220,8 @@ reason, an optional detail, the row id of the first part and the number of parts
 6. The stop-trigger detector runs on the burst: the run of consecutive incoming messages that ends
    with the effective trigger, only messages after `reply_after`. A hit calls
    `HandOverService.hand_over` with the classes and the source `text`.
-7. `ReplyGenerator.generate` with the contact's mode and no summary:
+7. `ReplyGenerator.generate` with the contact's mode; the generator adds the stored summary itself
+   (CYR-25, [summaries.md](summaries.md)):
    - `needs_owner`: hand-over with the source `model` and no classes;
    - `truncated`: one more generation with `max_tokens` = `LLM_REPLY_MAX_TOKENS` x 2, capped at
      `TRUNCATION_MAX_TOKENS`; truncated again: hand-over (model);
@@ -350,6 +351,13 @@ without any outbox row for it (in any state), and enqueues the job through the s
 delay. The job id is the same as the scheduler's, so a job that is still waiting is not doubled. A
 failing sweep or queue is logged with the class name and never stops the loop.
 
+**The summary scan (CYR-25).** A sibling task, `SummarySweeper` (`services/summary_sweeper.py`), is
+started at the same place with the same cadence and is cancelled first on shutdown. While
+`SUMMARY_ENABLED` is on, it enqueues one `update_contact_summary` job for every `active` or `paused`
+contact with at least `SUMMARY_EVERY_MESSAGES` messages after its summary cursor and no recent
+failure. It is independent of `AUTOPILOT_ENABLED` and of the autopilot stop and pause. Details:
+[summaries.md](summaries.md#the-sweeper-and-the-worker-job).
+
 ## Constants and settings
 
 | Name | Value | Meaning |
@@ -423,6 +431,5 @@ outbox and are cancelled by the sender's guard (`autopilot_disabled`).
 - Other languages than Russian and a little English in the stop-trigger detector.
 - Voice, video, stickers and other media: they are stored as an empty text (`[no text]` in the
   prompt) and the reply is written without knowing them.
-- Contact summaries: the prompt has no summary until CYR-25.
 - Proactive messages (CYR-23).
 - A switch per contact (an open question).

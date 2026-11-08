@@ -50,12 +50,17 @@ What exists now:
   into at most three parts and stores them as one chain of outbox rows (`follows_id`), and the sender
   sends the parts in order, a short pause apart; the limit notice names the limit, its setting and its
   numbers.
+- The contact summaries (CYR-25): the app's sweeper enqueues a summary job every
+  `SUMMARY_EVERY_MESSAGES` messages of an `active` or `paused` contact (independent of the autopilot,
+  behind `SUMMARY_ENABLED`, default on), the worker distils the next chunk of the dialogue into a
+  structured, sanitised summary on the contact with a compare-and-set on its cursor, and the reply
+  generator shows it as the summary layer, `told_about_owner` included.
 - The owner's commands: `login`, `llm-check`, `persona`, `examples`, `reply-preview`, `outbox`,
-  `schedule`, `stop-check` and `autopilot` (the list is in the README).
+  `schedule`, `stop-check`, `autopilot` and `summary` (the list is in the README).
 
 Still planned, each marked with its ticket key where there is one: conversation modes beyond the
-default one (CYR-15), the rest of the control panel (CYR-26), proactive messages with their limits (CYR-23), contact summaries (CYR-25), the background
-jobs of the worker (CYR-23, CYR-24, CYR-25) and a catalog of contacts (no ticket yet).
+default one (CYR-15), the rest of the control panel (CYR-26), proactive messages with their limits (CYR-23), the other background
+jobs of the worker (CYR-23, CYR-24) and a catalog of contacts (no ticket yet).
 Never describe planned behaviour as existing.
 
 ## Locked architectural decisions
@@ -82,7 +87,7 @@ Changing any of these is a large change (see Workflow expectations). Reasons:
 | --- | --- |
 | Python 3.14, uv | in the project |
 | pydantic-settings (Pydantic v2), tzdata | in the project |
-| Arq, Redis 7.4 | in the project (the reply job of the autopilot; only `worker/` imports arq) |
+| Arq, Redis 7.4 | in the project (the reply job of the autopilot and the summary job; only `worker/` imports arq) |
 | PostgreSQL 16.15 | in the project (compose, migrations, tests) |
 | SQLAlchemy 2.x async, asyncpg, Alembic | in the project (schema, repositories, used by the intake) |
 | Ruff, mypy strict, pytest, pytest-asyncio | in the project |
@@ -100,17 +105,17 @@ Changing any of these is a large change (see Workflow expectations). Reasons:
 .
 ├── CLAUDE.md, CONTRIBUTING.md, README.md
 ├── pyproject.toml, uv.lock, .python-version
-├── Makefile                      includes login, login-docker, llm-check, persona-import, examples-import, examples-stats, examples-convert, reply-preview, outbox-enqueue, outbox-list, outbox-cancel, outbox-retry, outbox-status, outbox-resume, schedule-import, schedule-show, schedule-check, schedule-plan, stop-check, autopilot-status, autopilot-resume and setup-hooks
+├── Makefile                      includes login, login-docker, llm-check, persona-import, examples-import, examples-stats, examples-convert, reply-preview, outbox-enqueue, outbox-list, outbox-cancel, outbox-retry, outbox-status, outbox-resume, schedule-import, schedule-show, schedule-check, schedule-plan, stop-check, autopilot-status, autopilot-resume, summary-update, summary-show, summary-clear and setup-hooks
 ├── Dockerfile, docker-compose.yml, docker-compose.override.yml
 ├── .env.example, .dockerignore, .gitignore
 ├── alembic.ini
 ├── migrations/                   async env.py, versions/
 ├── examples/                     invented sample persona, style examples and schedule (real files go to data/)
-├── .claude/docs/                 architecture, contact-lifecycle, safety-rules, decisions, persona-and-examples, reply-generation, outbox-and-sender, humanization, stop-triggers, autopilot
+├── .claude/docs/                 architecture, contact-lifecycle, safety-rules, decisions, persona-and-examples, reply-generation, outbox-and-sender, humanization, stop-triggers, autopilot, summaries
 ├── .githooks/                    pre-commit (runs make check and make test; enabled by make setup-hooks)
 ├── .github/                      dependabot.yml, workflows/ci.yml
 ├── src/cyrano/
-│   ├── __main__.py, main.py      entrypoint (composition root), signals, heartbeat, subcommands login, llm-check, persona (import, show), examples (import, stats, convert), reply-preview, outbox (enqueue, list, cancel, retry, status, resume), schedule (import, show, check, plan), stop-check, autopilot (status, resume)
+│   ├── __main__.py, main.py      entrypoint (composition root), signals, heartbeat, subcommands login, llm-check, persona (import, show), examples (import, stats, convert), reply-preview, outbox (enqueue, list, cancel, retry, status, resume), schedule (import, show, check, plan), stop-check, autopilot (status, resume), summary (update, show, clear)
 │   ├── style_cli.py              the persona and examples commands
 │   ├── convert_cli.py            the examples convert command (chat export to a draft)
 │   ├── reply_cli.py              the reply-preview command
@@ -118,6 +123,7 @@ Changing any of these is a large change (see Workflow expectations). Reasons:
 │   ├── schedule_cli.py           the schedule import, show, check and plan commands
 │   ├── stop_check_cli.py         the stop-check command (a dry run of the detector)
 │   ├── autopilot_cli.py          the autopilot status and resume commands
+│   ├── summary_cli.py            the summary update, show and clear commands
 │   ├── stop_trigger_patterns.py  the stop-trigger pattern data (imports only domain)
 │   ├── config.py                 Settings, load_settings, ConfigError
 │   ├── logging.py                JSON-lines logging
@@ -151,14 +157,18 @@ Changing any of these is a large change (see Workflow expectations). Reasons:
 │   │                             stop_triggers (the pure detector), hand_over (pause, cancel and one notice),
 │   │                             hand_over_notifier (the hand-over notice Protocol),
 │   │                             reply_job (one generated reply per burst), autopilot (the scheduler and the sweeper),
-│   │                             reply_job_queue (the job queue Protocol)
+│   │                             reply_job_queue (the job queue Protocol),
+│   │                             summary_sanitizer (contact details out of a summary),
+│   │                             summary_updater (one chunk into the stored summary),
+│   │                             summary_sweeper (the summary scan), summary_job_queue (its queue Protocol)
 │   ├── userbot/                  Telethon: protocols, filters, handler, client, adapter, login, runner, errors,
 │   │                             profile_source, leomatch_source, leomatch_match
 │   ├── bot/                      aiogram: app, middleware, handlers, rendering, callbacks, sender, notifier, messages, errors
 │   ├── prompts/                  prompt texts and their pure rendering (imports only domain)
 │   ├── llm/                      DeepSeek client, retrying transport, factory; the only package that imports httpx
-│   └── worker/                   Arq: settings (WorkerSettings), jobs (reply_to_contact), composition, queue
-│                                 (ArqReplyJobQueue, used by the app); the only package that imports arq
+│   └── worker/                   Arq: settings (WorkerSettings), jobs (reply_to_contact, update_contact_summary),
+│                                 composition, queue (ArqReplyJobQueue, ArqSummaryJobQueue, used by the app);
+│                                 the only package that imports arq
 └── tests/                        mirrors src/cyrano
 ```
 
@@ -326,6 +336,19 @@ and `AUTOPILOT_MAX_BURST_WAIT_SECONDS` with their ordering rules, the adaptive d
 `ongoing` override), the sender's single supersession check before the read mark (none before the send,
 none for later parts), the job-time cancellation limited to replies that have not started, and the tests,
 with `tests/test_ongoing_rule.py` and the lively scenario in `tests/services/test_autopilot_lively.py`.
+CYR-25 added the contact summaries: `domain/summary.py` (`ContactSummary` with its caps and tolerant
+validator, `SummaryCursor`, `StoredSummary`, `read_stored_summary`, `SummaryPrompt`, `SummaryDue`,
+`SummaryJobRequest`, `SummaryUpdateResult`, every summary constant), the `SummaryOutcome` and
+`SummaryReason` enums, `SummaryPromptTooLarge`, migration `0011` (`contacts.summary_failed_at`),
+`Contact.summary_failed_at`, the `SummaryRepository` Protocol with `SqlSummaryRepository` (messages and
+count after a cursor, the compare-and-set store, the failure marker, clear, the due contacts), the
+extraction texts and the summary layer in `prompts/`, `services/summary_sanitizer.py`,
+`summary_updater.py` (`SummaryUpdater`, `build_summary_prompt`), `summary_sweeper.py` (`SummarySweeper`,
+a background task of the app) and `summary_job_queue.py` (the one-method `SummaryJobQueue` Protocol), the
+stored summary in `ReplyGenerator`, `ArqSummaryJobQueue` and `ArqReplyJobQueue.pool`, the job function
+`update_contact_summary` and the updater in the worker composition, the optional `SUMMARY_ENABLED` and
+`SUMMARY_EVERY_MESSAGES` settings, `summary_cli.py` with the `summary` commands and their Makefile
+targets, the guide `summaries.md`, and the tests, with the new scans in `tests/test_summary_writers.py`.
 
 ## Detailed guides
 

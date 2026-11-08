@@ -263,6 +263,15 @@ only.
   owner must see what to decide on. It goes only to the owner chat through the owner-only control
   bot and is never logged; the hand-over logs the contact id, the class values and the source, and
   the `stop-check` command prints class names only.
+  The contact summary (CYR-25) is personal data: it is stored in the database (`contacts.summary`)
+  and sent to the provider inside the extraction prompt and the reply prompt, and it is never
+  logged at any level: the updater, the sweeper and the job log the contact id, outcomes, reasons,
+  counters and class names only. It never contains sensitive attributes (health, politics,
+  religion, sexuality, exact addresses, document numbers) by instruction, and never contact details
+  (phone-like digit runs, e-mail addresses, links, @handles) by instruction and by code: the
+  sanitiser removes them before anything is stored ([summaries.md](summaries.md#sanitising)). Only
+  `summary show` prints its content, to the terminal, after a warning; the owner can remove it
+  with `summary clear --yes`.
 - **Why:** the data belongs to real people.
 - **Enforced where:** exists today: `.gitignore` and `.dockerignore` exclude `.env`, `*.session`,
   `media/` and `data/` (profile photos live under `MEDIA_DIR`, `.env.example` and compose put it
@@ -293,7 +302,10 @@ only.
   carry no username, id, path or raw Leomatch text; the preview command's errors are asserted to
   contain none of those texts. Exists for the converter (CYR-34): the captured output, errors and logs of a full
   run and of the failures contain none of the invented names, ids, texts or numbers, and the
-  written draft contains none of the redacted strings. Numeric markers in these tests (fake
+  written draft contains none of the redacted strings. Exists for the summaries (CYR-25): the
+  updater, the sweeper, the job and the commands run with all loggers at DEBUG and the
+  JSON-formatted logs must hold none of the invented message texts, names, summary values or
+  markers; `summary update` prints counts only. Numeric markers in these tests (fake
   Telegram ids, API ids, phone numbers, login codes, internal ids) must be distinctive and at least
   12 digits long, taken from `tests/privacy.py`, because the captured log records carry timestamps
   and thread and process ids that a short number can match by chance; `assert_absent` there refuses

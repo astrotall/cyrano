@@ -87,6 +87,7 @@ class Contact(_Stored):
     mode_id: int | None
     profile: dict[str, object]
     summary: dict[str, object]
+    summary_failed_at: UtcDatetime | None = None
     last_message_at: UtcDatetime | None
     reply_after: UtcDatetime | None = None
     created_at: UtcDatetime

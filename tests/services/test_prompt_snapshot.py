@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 from cyrano.domain.reply import ContactFacts
+from cyrano.domain.summary import ContactSummary
+from cyrano.prompts.render import render_summary_layer
 from tests.reply_data import (
     INCOMING,
     OUTGOING,
@@ -40,7 +42,16 @@ Taken from the contact's profile; may be inaccurate.
 - Bio: nothing to see here
 
 === CONTACT SUMMARY ===
-They talked about weekend plans and a bike ride.
+Memory from earlier messages of this chat; it may be incomplete or outdated, and the dialogue \
+below wins on any conflict.
+- Имя: Саша
+- Город: Инвентград
+- Интересы: велосипед; чай
+- Договорённости и планы: прогулка в выходные
+- Открытые вопросы: какой парк
+What the owner has already told this contact about himself or promised; the reply must stay \
+consistent with every line of it:
+- владелец ездит на работу на велосипеде
 
 === STYLE EXAMPLES ===
 Real conversations of the owner. Each one ends with the owner's reply.
@@ -82,7 +93,16 @@ def test_a_full_prompt_renders_exactly_like_the_snapshot() -> None:
             about="loves tea and long walks",
             bio="nothing to see here",
         ),
-        summary="They talked about weekend plans and a bike ride.",
+        summary=render_summary_layer(
+            ContactSummary(
+                name="Саша",
+                city="Инвентград",
+                interests=["велосипед", "чай"],
+                agreements_and_plans=["прогулка в выходные"],
+                open_questions=["какой парк"],
+                told_about_owner=["владелец ездит на работу на велосипеде"],
+            )
+        ),
         messages=make_history(
             (INCOMING, "hi! are you free this weekend?"),
             (OUTGOING, "maybe, what do you have in mind"),

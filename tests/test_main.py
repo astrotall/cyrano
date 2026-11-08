@@ -25,6 +25,7 @@ from cyrano.domain.enums import (
     PauseReason,
 )
 from cyrano.domain.models import ContactProfile, Message
+from cyrano.domain.summary import SummaryDue
 from cyrano.logging import configure_logging
 from cyrano.main import main, run
 from cyrano.services.card_actions import CardActions
@@ -54,6 +55,7 @@ from tests.services.outbox_fakes import (
     InMemorySenderState,
     ScriptedTransport,
 )
+from tests.services.summary_fakes import InMemorySummaries, RecordingSummaryQueue
 from tests.userbot.fakes import (
     FAKE_SENDER_ID,
     FakeClient,
@@ -89,6 +91,8 @@ class Repositories:
     autopilot_state: InMemoryAutopilotState
     backlog: InMemoryReplyBacklog
     queue: RecordingQueue
+    summaries: InMemorySummaries
+    summary_queue: RecordingSummaryQueue
 
 
 @pytest.fixture(autouse=True)
@@ -102,6 +106,8 @@ def repositories(monkeypatch: pytest.MonkeyPatch) -> Repositories:
         InMemoryAutopilotState(),
         InMemoryReplyBacklog(),
         RecordingQueue(),
+        InMemorySummaries(),
+        RecordingSummaryQueue(),
     )
     monkeypatch.setattr("cyrano.main.SqlContactRepository", lambda _: stored.contacts)
     monkeypatch.setattr("cyrano.main.SqlMessageRepository", lambda _: stored.messages)
@@ -111,6 +117,8 @@ def repositories(monkeypatch: pytest.MonkeyPatch) -> Repositories:
     monkeypatch.setattr("cyrano.main.SqlAutopilotStateRepository", lambda _: stored.autopilot_state)
     monkeypatch.setattr("cyrano.main.SqlReplyBacklogRepository", lambda _: stored.backlog)
     monkeypatch.setattr("cyrano.main.ArqReplyJobQueue", lambda _: stored.queue)
+    monkeypatch.setattr("cyrano.main.SqlSummaryRepository", lambda _: stored.summaries)
+    monkeypatch.setattr("cyrano.main.ArqSummaryJobQueue", lambda _: stored.summary_queue)
     monkeypatch.setattr(
         "cyrano.main.SqlScheduleProfileRepository",
         lambda _: InMemoryScheduleProfiles(ALWAYS_FREE_PROFILE),
@@ -1326,6 +1334,72 @@ async def test_the_sweeper_starts_after_the_sender_and_is_cancelled_first_and_th
     assert bot_calls.index("sender.run") < bot_calls.index("sweeper.run")
     order = ["sweeper cancelled", "sender cancelled", "bot.stop", "disconnect", "queue.close"]
     assert [bot_calls.index(name) for name in order] == sorted(bot_calls.index(n) for n in order)
+
+
+class _SummarySweeperSpy:
+    def __init__(self, calls: list[str], kwargs: dict[str, object]) -> None:
+        self.calls = calls
+        self.kwargs = kwargs
+
+    async def run(self) -> None:
+        self.calls.append("summary sweeper.run")
+        try:
+            await asyncio.sleep(3600)
+        except asyncio.CancelledError:
+            self.calls.append("summary sweeper cancelled")
+            raise
+
+
+async def test_the_summary_sweeper_starts_with_the_others_and_is_cancelled_first(
+    session_env: dict[str, str],
+    heartbeat_file: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    bot_calls: list[str],
+) -> None:
+    built: list[_SummarySweeperSpy] = []
+
+    def spy(*args: object, **kwargs: object) -> _SummarySweeperSpy:
+        built.append(_SummarySweeperSpy(bot_calls, kwargs))
+        return built[-1]
+
+    monkeypatch.setenv("SUMMARY_ENABLED", "false")
+    monkeypatch.setenv("SUMMARY_EVERY_MESSAGES", "30")
+    monkeypatch.setattr("cyrano.main.SummarySweeper", spy)
+    monkeypatch.setattr(
+        "cyrano.main.AutopilotSweeper", lambda *args, **kwargs: _SweeperSpy(bot_calls)
+    )
+    stop = asyncio.Event()
+    task = asyncio.create_task(
+        run(load_settings(env_file=None), stop, client_factory=_factory(FakeClient()))
+    )
+
+    await _wait_until(lambda: _contains(bot_calls, "summary sweeper.run"))
+    stop.set()
+    await asyncio.wait_for(task, timeout=2)
+
+    assert built[0].kwargs["enabled"] is False
+    assert built[0].kwargs["every_messages"] == 30
+    assert bot_calls.index("summary sweeper cancelled") < bot_calls.index("sweeper cancelled")
+
+
+async def test_the_summary_scan_enqueues_with_the_autopilot_switched_off(
+    session_env: dict[str, str], heartbeat_file: Path, repositories: Repositories
+) -> None:
+    repositories.summaries.due = [SummaryDue(contact_id=3, waiting=12, up_to_message_id=90)]
+    settings = load_settings(env_file=None)
+    stop = asyncio.Event()
+    task = asyncio.create_task(run(settings, stop, client_factory=_factory(FakeClient())))
+
+    async def enqueued() -> bool:
+        return bool(repositories.summary_queue.jobs)
+
+    await _wait_until(enqueued)
+    stop.set()
+    await asyncio.wait_for(task, timeout=2)
+
+    assert settings.autopilot_enabled is False
+    assert repositories.summary_queue.jobs[0] == (3, 90)
+    assert repositories.queue.jobs == []
 
 
 async def test_neither_the_sweeper_starts_nor_the_queue_stays_open_when_the_start_is_interrupted(

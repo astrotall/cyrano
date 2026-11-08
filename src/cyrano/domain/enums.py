@@ -192,3 +192,25 @@ class ReplyJobReason(StrEnum):
     PROVIDER_UNAVAILABLE = "provider_unavailable"
     PLAN_NOT_POSSIBLE = "plan_not_possible"
     ENQUEUE_REFUSED = "enqueue_refused"
+
+
+class SummaryOutcome(StrEnum):
+    UPDATED = "updated"
+    NOTHING_TO_DO = "nothing_to_do"
+    CONTACT_MISSING = "contact_missing"
+    NOT_ELIGIBLE = "not_eligible"
+    FAILED = "failed"
+
+
+class SummaryReason(StrEnum):
+    UPDATED = "updated"
+    KEPT_PREVIOUS = "kept_previous"
+    NO_NEW_MESSAGES = "no_new_messages"
+    CONCURRENT_UPDATE = "concurrent_update"
+    EMPTY_RESULT = "empty_result"
+    CONTACT_MISSING = "contact_missing"
+    STATUS_NOT_ELIGIBLE = "status_not_eligible"
+    LLM_ERROR = "llm_error"
+    INVALID_OUTPUT = "invalid_output"
+    PROMPT_TOO_LARGE = "prompt_too_large"
+    UNEXPECTED_ERROR = "unexpected_error"

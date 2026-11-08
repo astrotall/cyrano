@@ -23,6 +23,7 @@ from tests.services.outbox_fakes import (
     InMemorySenderState,
     ScriptedTransport,
 )
+from tests.services.summary_fakes import InMemorySummaries, RecordingSummaryQueue
 from tests.userbot.fakes import FakeClient, InMemoryContacts, InMemoryMessages
 
 HANGING_CONNECT_SCENARIO = "hanging-connect"
@@ -82,6 +83,14 @@ def _recording_queue(_: object) -> RecordingQueue:
     return RecordingQueue()
 
 
+def _in_memory_summaries(_: object) -> InMemorySummaries:
+    return InMemorySummaries()
+
+
+def _recording_summary_queue(_: object) -> RecordingSummaryQueue:
+    return RecordingSummaryQueue()
+
+
 def main(argv: list[str]) -> int:
     settings = load_settings(env_file=None)
     configure_logging(settings.log_level, settings.library_log_levels)
@@ -96,6 +105,8 @@ def main(argv: list[str]) -> int:
         patch.object(main_module, "SqlAutopilotStateRepository", _in_memory_autopilot_state),
         patch.object(main_module, "SqlReplyBacklogRepository", _in_memory_backlog),
         patch.object(main_module, "ArqReplyJobQueue", _recording_queue),
+        patch.object(main_module, "SqlSummaryRepository", _in_memory_summaries),
+        patch.object(main_module, "ArqSummaryJobQueue", _recording_summary_queue),
         patch.object(main_module, "ControlBot", fake_control_bot_class()),
     ):
         asyncio.run(run(settings, client_factory=factory))

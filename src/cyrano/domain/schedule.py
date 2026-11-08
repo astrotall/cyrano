@@ -13,11 +13,13 @@ from pydantic import (
     Field,
     PlainSerializer,
     StrictInt,
+    StringConstraints,
+    ValidationInfo,
     field_validator,
     model_validator,
 )
 
-from cyrano.domain.enums import BlockKind, PlanReason, Weekday
+from cyrano.domain.enums import BlockKind, PlanReason, Weekday, WrapUpPhase
 from cyrano.domain.errors import ScheduleTimezoneUnresolved
 from cyrano.domain.models import UtcDatetime
 
@@ -47,6 +49,14 @@ DEFAULT_TYPING_MAX_SECONDS = 25
 DEFAULT_SPREAD_MINUTES = (1, 15)
 DEFAULT_SPLIT_PAUSE_SECONDS = (3, 8)
 DEFAULT_EARLY_READ_SECONDS = (0, 1)
+DEFAULT_PROACTIVE_WINDOW = (time(10, 0), time(22, 0))
+DEFAULT_WRAPUP_SOFT_MINUTES = 60
+MIN_WRAPUP_SOFT_MINUTES = 5
+MAX_WRAPUP_SOFT_MINUTES = 240
+DEFAULT_WRAPUP_HARD_MINUTES = 20
+MIN_WRAPUP_HARD_MINUTES = 1
+MAX_BUSY_LABEL_LENGTH = 40
+DEFAULT_BUSY_LABEL = "занят"
 WEEKDAYS = tuple(Weekday)
 TIME_PATTERN = re.compile(r"(?:[01]\d|2[0-3]):[0-5]\d")
 TIME_SEPARATOR = ":"
@@ -60,6 +70,8 @@ NIGHT_END_RULE = "every end must be after the latest start"
 NO_DAYS_RULE = "must name at least one day"
 BUSY_ORDER_RULE = "from must be before to"
 TYPING_ORDER_RULE = "min_seconds must not be above max_seconds"
+PROACTIVE_WINDOW_RULE = "must be [start, end] with start before end on the same day"
+WRAPUP_ORDER_RULE = "must not be above wrapup_soft_minutes"
 
 
 def _parse_time(value: object) -> time:
@@ -110,6 +122,13 @@ EarlyReadRange = Annotated[tuple[EarlyReadSeconds, EarlyReadSeconds], AfterValid
 TypingSeconds = Annotated[StrictInt, Field(ge=0, le=MAX_TYPING_SECONDS)]
 TimezoneName = Annotated[str, AfterValidator(_known_timezone)]
 Days = Annotated[tuple[Weekday, ...], AfterValidator(_unique_in_week_order)]
+BusyLabel = Annotated[
+    str, StringConstraints(strip_whitespace=True, min_length=1, max_length=MAX_BUSY_LABEL_LENGTH)
+]
+WrapUpSoftMinutes = Annotated[
+    StrictInt, Field(ge=MIN_WRAPUP_SOFT_MINUTES, le=MAX_WRAPUP_SOFT_MINUTES)
+]
+WrapUpHardMinutes = Annotated[StrictInt, Field(ge=MIN_WRAPUP_HARD_MINUTES)]
 
 
 class _ProfilePart(BaseModel):
@@ -135,6 +154,7 @@ class BusyWindow(_ProfilePart):
     days: Days
     start: LocalTime = Field(alias="from")
     end: LocalTime = Field(alias="to")
+    label: BusyLabel = DEFAULT_BUSY_LABEL
 
     @model_validator(mode="after")
     def _starts_before_it_ends(self) -> BusyWindow:
@@ -176,12 +196,30 @@ class ScheduleProfile(_ProfilePart):
     postponed_spread_minutes: SpreadRange = DEFAULT_SPREAD_MINUTES
     split_pause_seconds: SplitPauseRange = DEFAULT_SPLIT_PAUSE_SECONDS
     early_read_seconds: EarlyReadRange = DEFAULT_EARLY_READ_SECONDS
+    proactive_window: tuple[LocalTime, LocalTime] = DEFAULT_PROACTIVE_WINDOW
+    wrapup_soft_minutes: WrapUpSoftMinutes = DEFAULT_WRAPUP_SOFT_MINUTES
+    wrapup_hard_minutes: WrapUpHardMinutes = DEFAULT_WRAPUP_HARD_MINUTES
 
     @field_validator("version")
     @classmethod
     def _check_version(cls, value: int) -> int:
         if value != SCHEDULE_PROFILE_VERSION:
             raise ValueError(VERSION_RULE)
+        return value
+
+    @field_validator("proactive_window")
+    @classmethod
+    def _check_proactive_window(cls, value: tuple[time, time]) -> tuple[time, time]:
+        if value[0] >= value[1]:
+            raise ValueError(PROACTIVE_WINDOW_RULE)
+        return value
+
+    @field_validator("wrapup_hard_minutes")
+    @classmethod
+    def _hard_not_above_soft(cls, value: int, info: ValidationInfo) -> int:
+        soft = info.data.get("wrapup_soft_minutes")
+        if isinstance(soft, int) and value > soft:
+            raise ValueError(WRAPUP_ORDER_RULE)
         return value
 
     @property
@@ -206,6 +244,16 @@ def default_schedule_profile(timezone: str) -> ScheduleProfile:
 class Block(NamedTuple):
     end: datetime
     kind: BlockKind
+
+
+class UnavailableSoon(BaseModel):
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    kind: BlockKind
+    starts_at: UtcDatetime
+    minutes_left: int = Field(ge=1)
+    phase: WrapUpPhase
+    label: str | None = None
 
 
 class SendPlan(BaseModel):

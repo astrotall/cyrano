@@ -6,7 +6,9 @@ command exist since CYR-16. The generator itself sends nothing and writes nothin
 ([autopilot.md](autopilot.md)), which writes the reply to the outbox; `main.run` (the app) does not
 build it. Since CYR-20 the instructions carry the hand-over rule and the generator recognises the
 `NEEDS_OWNER` signal ([stop-triggers.md](stop-triggers.md)). Since CYR-25 the generator loads the
-contact's stored summary into the summary layer ([summaries.md](summaries.md)).
+contact's stored summary into the summary layer ([summaries.md](summaries.md)). Since CYR-23 it has a
+second purpose, a proactive message after a long silence ([the proactive purpose](#the-proactive-purpose),
+[proactive.md](proactive.md)).
 
 Code map and import rules: [architecture.md](architecture.md). Reasons: [decisions.md](decisions.md).
 The persona and the examples: [persona-and-examples.md](persona-and-examples.md). The LLM client:
@@ -125,6 +127,63 @@ counts as one separator), each part stripped, empty parts dropped, the order kep
 visible character gives no part. The sending of the parts is in
 [outbox-and-sender.md](outbox-and-sender.md#multi-part-replies).
 
+### The proactive purpose
+
+CYR-23. `ReplyGenerator.generate`, `prepare` and `PromptBuilder.build` take
+`purpose: ReplyPurpose = ReplyPurpose.REPLY`; every existing caller is unchanged and the reply prompt is
+byte for byte what it was (`tests/services/test_prompt_snapshot.py`). With `purpose=proactive` the
+builder changes two things and nothing else:
+
+- one English paragraph is appended to the instructions layer, after the bullets and a blank line
+  (`PROACTIVE_INSTRUCTIONS` in `prompts/texts.py`; N is the whole hours between the clock and the last
+  message of the history, never negative, `hour` for 1):
+
+  > The contact has not written for N hours since the last message of the dialogue. Write ONE short
+  > natural message that continues the conversation or asks about something the contact mentioned
+  > earlier (use the memory), without sounding needy, without apologising for the silence, and without
+  > repeating a question that was already asked. If the conversation ended naturally (a goodbye, good
+  > night, the contact said they are busy) or you cannot continue without inventing facts about the
+  > owner, reply with exactly SKIP and nothing else.
+
+- the last line of the user message, the request, becomes `PROACTIVE_REQUEST`: "Write the owner's next
+  message in this chat now, continuing it after the silence, or reply with exactly SKIP. Output only the
+  message text."
+
+The `NEEDS_OWNER` rule stays. `BuiltPrompt.purpose` carries the purpose to `complete`.
+
+**The SKIP signal.** `SKIP_SIGNAL` (`prompts/texts.py`) is detected like `NEEDS_OWNER`:
+`is_bare_skip` is true when nothing but whitespace, punctuation, quotes and backticks surround it, in any
+case; `contains_skip` finds it as a whole word anywhere, in any case, and that is treated as the signal
+too, so no part of such a reply is sent. `NEEDS_OWNER` wins when both appear. For the proactive purpose
+a signal gives `GeneratedReply.skipped = True` and an empty `text`; for the reply purpose it raises
+`ReplyInvalid` (`REPLY_SKIP_REASON`), so the autopilot's invalid-reply policy applies and the token is
+never sent. The log line has the flag `skipped`. A known false positive: an English reply with the word
+"skip" in it is refused in the reply purpose (one more generation, then a hand-over).
+
+### The wrap-up context
+
+CYR-23 (folding in CYR-52). `ReplyGenerator.generate` and `prepare` and `PromptBuilder.build` take
+`wrapup: UnavailableSoon | None = None` ([humanization.md](humanization.md#wrapping-up-before-a-window));
+without it the prompt is byte for byte what it was. With it:
+
+- the user message gets one line after the time line (`WRAPUP_LINE`): `The owner becomes unavailable in
+  about N minutes (<reason>).`, with `minute` for 1, the reason `sleep` for the night and the busy
+  window's label otherwise (whitespace collapsed, layer headers removed);
+- the instructions layer gets one paragraph by phase, after the bullets and a blank line:
+  - soft: "The owner becomes unavailable soon (see the line above the dialogue). Do not open new topics
+    and steer the conversation towards a natural end within the next few exchanges."
+  - hard: "The owner becomes unavailable in a few minutes. If the contact is waiting for an answer,
+    answer briefly first. Then close the conversation in the owner's own words and style: say goodnight
+    when the reason is sleep, otherwise say that you have to go and will write later. Do not ask a new
+    question."
+  - both end with: "If the contact's last message is only a goodnight or a farewell and the owner has
+    already said goodnight or goodbye, reply with exactly SKIP and nothing else."
+
+**SKIP in a reply.** `BuiltPrompt.wrap_up` records that a context was given. A reply-purpose
+generation that carries the `SKIP` signal gives `skipped = True` only then; without a context it is still
+`ReplyInvalid` (`REPLY_SKIP_REASON`), so the invalid-reply policy applies (one more generation, then a
+hand-over). The proactive purpose is unchanged.
+
 ## History and the budget
 
 - **History.** The last `REPLY_HISTORY_MESSAGES` messages of the contact (default 20, from 1 to
@@ -138,7 +197,7 @@ visible character gives no part. The sending of the parts is in
 - The persona is never trimmed (its length is already capped at 8000 characters by the import).
   If the prompt is still over the budget, `PromptTooLarge` is raised and nothing is sent.
 - `NoMessagesToReplyTo` is raised when the loaded history has no incoming message. A history whose
-  last message is outgoing is allowed: it is a follow-up.
+  last message is outgoing is allowed: it is a follow-up, and the proactive purpose depends on it.
 - The builder reports what it kept and dropped: examples offered and kept, messages offered and
   kept, and the characters of the final prompt.
 
@@ -221,7 +280,9 @@ is imported and a conversation is stored:
 ```sh
 make reply-preview CONTACT=12
 make reply-preview CONTACT=12 MODE=flirty
-uv run python -m cyrano reply-preview 12 [--mode NAME] [--show-prompt]
+make reply-preview CONTACT=12 PROACTIVE=1
+make reply-preview CONTACT=12 AT="2026-11-04 23:45"
+uv run python -m cyrano reply-preview 12 [--mode NAME] [--show-prompt] [--proactive] [--at "YYYY-MM-DD HH:MM"]
 ```
 
 It prints the generated reply on its own line and then one stats line:
@@ -241,7 +302,15 @@ model=deepseek-chat input_tokens=1830 output_tokens=14 examples=5/8 messages=14/
 ```
 
 `examples=5/8` is kept of offered, the same for `messages`. On the model signal the first line is
-`needs owner (model signal)` instead of the reply, and the exit code is 0. With `--show-prompt` it first prints a
+`needs owner (model signal)` instead of the reply, and the exit code is 0. `--proactive` (CYR-23) runs
+the proactive purpose for the contact: the parts it would send, or `skip (model signal)` on the `SKIP`
+signal, then the same gender and stats lines; a `SKIP` without `--proactive` is a refused reply
+(`ReplyInvalid`, exit 1) unless a wrap-up context exists. When the moment is within the wrap-up time
+(and `WRAPUP_ENABLED` is on, reply purpose only), the prompt carries the context and one more line comes
+before the stats line: `wrap-up: hard, 12 min, sleep` (phase, minutes, reason). `--at "YYYY-MM-DD HH:MM"`
+(`make reply-preview ... AT="..."`), read in the schedule profile's time zone, sets the clock of the time
+line and of the context; it is never stored, and a bad value prints
+`reply-preview failed: bad --at, use "YYYY-MM-DD HH:MM"` and exits 1. The command still writes nothing. With `--show-prompt` it first prints a
 one-line warning to stderr that the prompt contains personal data, then the two messages, each
 under a `[system]` or `[user]` line. Nothing else is printed.
 

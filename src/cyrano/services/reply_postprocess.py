@@ -10,7 +10,7 @@ from cyrano.domain.reply import (
     REPLY_HEADER_REASON,
     REPLY_MAX_CHARS,
 )
-from cyrano.prompts.texts import DIALOGUE_BOUNDARY, LAYER_HEADERS, NEEDS_OWNER_SIGNAL
+from cyrano.prompts.texts import DIALOGUE_BOUNDARY, LAYER_HEADERS, NEEDS_OWNER_SIGNAL, SKIP_SIGNAL
 
 QUOTE_PAIRS = (('"', '"'), ("“", "”"), ("«", "»"))
 SPEAKER_NAMES = ("Me", "Я", "Assistant", "Ответ")
@@ -36,6 +36,7 @@ NEEDS_OWNER_ANYWHERE = re.compile(
     r"[\s_\-]?".join(re.escape(part) for part in NEEDS_OWNER_SIGNAL.split(SIGNAL_WORD_SEPARATOR)),
     re.IGNORECASE,
 )
+SKIP_ANYWHERE = re.compile(rf"\b{re.escape(SKIP_SIGNAL)}\b", re.IGNORECASE)
 SIGNAL_WRAPPERS = string.whitespace + string.punctuation + "«»“”„‘’…"
 
 
@@ -104,6 +105,14 @@ def is_bare_needs_owner(raw: str) -> bool:
 
 def contains_needs_owner(raw: str) -> bool:
     return NEEDS_OWNER_ANYWHERE.search(raw) is not None
+
+
+def is_bare_skip(raw: str) -> bool:
+    return raw.strip(SIGNAL_WRAPPERS).casefold() == SKIP_SIGNAL.casefold()
+
+
+def contains_skip(raw: str) -> bool:
+    return SKIP_ANYWHERE.search(raw) is not None
 
 
 def clean_reply(raw: str, limit: int = REPLY_MAX_CHARS) -> str:

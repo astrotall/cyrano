@@ -38,6 +38,7 @@ from cyrano.db.repositories import (
     SqlModeRepository,
     SqlOutboxRepository,
     SqlPersonaRepository,
+    SqlProactiveRepository,
     SqlReplyBacklogRepository,
     SqlScheduleProfileRepository,
     SqlSenderStateRepository,
@@ -59,6 +60,7 @@ from cyrano.outbox_cli import (
     outbox_request,
 )
 from cyrano.reply_cli import (
+    PreviewClock,
     ReplyPreviewCommand,
     ReplyPreviewRequest,
     add_reply_preview_parser,
@@ -88,6 +90,8 @@ from cyrano.services.outbox_sender import OutboxSender
 from cyrano.services.outbox_service import OutboxService
 from cyrano.services.pause_actions import PauseActions
 from cyrano.services.persona_service import PersonaService
+from cyrano.services.proactive_eligibility import ProactiveEligibility
+from cyrano.services.proactive_sweeper import ProactiveSweeper
 from cyrano.services.profile_collector import ProfileCollector
 from cyrano.services.prompt_builder import PromptBuilder
 from cyrano.services.reply_generator import ReplyGenerator
@@ -119,7 +123,7 @@ from cyrano.userbot.leomatch_source import TelethonLeomatchSource
 from cyrano.userbot.login import run_login
 from cyrano.userbot.profile_source import TelethonProfileSource
 from cyrano.userbot.runner import Userbot
-from cyrano.worker.queue import ArqReplyJobQueue, ArqSummaryJobQueue
+from cyrano.worker.queue import ArqProactiveJobQueue, ArqReplyJobQueue, ArqSummaryJobQueue
 
 logger = logging.getLogger("cyrano")
 
@@ -188,6 +192,14 @@ def _report_summary_sweeper_exit(task: asyncio.Task[None]) -> None:
     error = task.exception()
     if error is not None:
         logger.error("summary sweeper stopped", extra={"error": type(error).__name__})
+
+
+def _report_proactive_sweeper_exit(task: asyncio.Task[None]) -> None:
+    if task.cancelled():
+        return
+    error = task.exception()
+    if error is not None:
+        logger.error("proactive sweeper stopped", extra={"error": type(error).__name__})
 
 
 def _utc_now() -> datetime:
@@ -313,6 +325,15 @@ async def run(
         every_messages=settings.summary_every_messages,
         clock=_utc_now,
     )
+    proactive = SqlProactiveRepository(session_factory)
+    proactive_sweeper = ProactiveSweeper(
+        proactive,
+        ProactiveEligibility(
+            contacts, autopilot_state, sender_state, proactive, settings, schedule, clock=_utc_now
+        ),
+        ArqProactiveJobQueue(reply_jobs),
+        clock=_utc_now,
+    )
     heartbeat = asyncio.create_task(heartbeat_loop(settings.heartbeat_path, heartbeat_interval))
     collector_task: asyncio.Task[None] | None = None
     announcer_task: asyncio.Task[None] | None = None
@@ -321,6 +342,7 @@ async def run(
     early_read_task: asyncio.Task[None] | None = None
     sweeper_task: asyncio.Task[None] | None = None
     summary_sweeper_task: asyncio.Task[None] | None = None
+    proactive_sweeper_task: asyncio.Task[None] | None = None
     polling_failures: list[ControlBotError] = []
     try:
         await reply_jobs.start()
@@ -342,11 +364,16 @@ async def run(
             sweeper_task.add_done_callback(_report_sweeper_exit)
             summary_sweeper_task = asyncio.create_task(summary_sweeper.run())
             summary_sweeper_task.add_done_callback(_report_summary_sweeper_exit)
+            proactive_sweeper_task = asyncio.create_task(proactive_sweeper.run())
+            proactive_sweeper_task.add_done_callback(_report_proactive_sweeper_exit)
         await userbot.run_until(stop)
         if polling_failures:
             raise polling_failures[0]
     finally:
         logger.info("cyrano shutting down", extra={"service": "app"})
+        if proactive_sweeper_task is not None:
+            proactive_sweeper_task.cancel()
+            await asyncio.gather(proactive_sweeper_task, return_exceptions=True)
         if summary_sweeper_task is not None:
             summary_sweeper_task.cancel()
             await asyncio.gather(summary_sweeper_task, return_exceptions=True)
@@ -435,6 +462,8 @@ async def _run_reply_preview_command(settings: Settings, request: ReplyPreviewRe
     factory = LLMClientFactory(settings)
     gender = GenderResolver(settings.default_gender)
     contacts = SqlContactRepository(session_factory)
+    clock = PreviewClock(lambda: datetime.now(UTC))
+    schedule = ScheduleService(SqlScheduleProfileRepository(session_factory), settings.timezone)
     try:
         client = factory.get(LLMStep.REPLY)
         generator = ReplyGenerator(
@@ -449,12 +478,20 @@ async def _run_reply_preview_command(settings: Settings, request: ReplyPreviewRe
             builder=PromptBuilder(
                 budget_chars=settings.reply_prompt_budget_chars,
                 timezone=settings.tzinfo,
-                clock=lambda: datetime.now(UTC),
+                clock=clock,
             ),
             client=client,
             history_limit=settings.reply_history_messages,
         )
-        return await ReplyPreviewCommand(generator, client.model, contacts, gender).run(request)
+        return await ReplyPreviewCommand(
+            generator,
+            client.model,
+            contacts,
+            gender,
+            schedule=schedule,
+            clock=clock,
+            wrapup_enabled=settings.wrapup_enabled,
+        ).run(request)
     except (SQLAlchemyError, OSError) as exc:
         print(STORAGE_FAILED_MESSAGE.format(error=type(exc).__name__), file=sys.stderr)
         return EXIT_REPLY_PREVIEW_ERROR
@@ -528,6 +565,7 @@ async def _run_autopilot_command(settings: Settings, request: AutopilotRequest) 
         SqlOutboxRepository(session_factory),
         SqlReplyBacklogRepository(session_factory),
         enabled=settings.autopilot_enabled,
+        proactive_enabled=settings.proactive_enabled,
         clock=_utc_now,
     )
     try:

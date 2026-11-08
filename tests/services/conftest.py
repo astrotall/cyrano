@@ -14,6 +14,7 @@ from tests.db.conftest import (
 )
 from tests.reply_db import repos
 from tests.services.autopilot_rig import rig
+from tests.services.proactive_rig import prig
 
 __all__ = [
     "alembic_config",
@@ -24,6 +25,7 @@ __all__ = [
     "modes",
     "outbox",
     "personas",
+    "prig",
     "repos",
     "rig",
     "schedule_profiles",

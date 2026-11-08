@@ -5,7 +5,9 @@ incoming messages of an `active` contact into ONE generated reply per burst and 
 It never sends: the Telethon session lives in the app process, so the one sender there sends the row
 ([outbox-and-sender.md](outbox-and-sender.md)). The Arq worker generates and writes rows; it never
 imports Telethon. Rules S1, S2, S3: [safety-rules.md](safety-rules.md). Reasons:
-[decisions.md](decisions.md).
+[decisions.md](decisions.md). Since CYR-23 the same worker also writes proactive messages after a long
+silence, behind `PROACTIVE_ENABLED` and only while the autopilot runs; they reuse the generation policy
+of the reply job ([proactive.md](proactive.md)).
 
 ## The flow
 
@@ -42,14 +44,14 @@ HumanizationPlanner.plan (send time) ----> split_reply ----> OutboxService.enque
 | `domain/autopilot.py` | Every constant below, `AutopilotState`, `ReplyJobRequest` (the job arguments), `ReplyJobResult`, `reply_job_id`, `retry_delay` |
 | `domain/enums.py` | `AutopilotStopReason`, `AutopilotPauseReason`, `ReplyJobOutcome`, `ReplyJobReason` |
 | `domain/errors.py` | `RetryJob(defer_seconds, error_class)`, `ReplyAfterRefused`, `AutopilotStateMissing` |
-| `services/reply_job.py` | `ReplyJobRunner`, `AutopilotNotices`, `burst_messages`, `burst_texts`. No Arq import |
+| `services/reply_job.py` | `ReplyJobRunner`, `GenerationPolicy` (the generation with its retry, hand-over, stop and pause rules, shared with the proactive job since CYR-23), `AutopilotNotices`, `burst_messages`, `burst_texts`. No Arq import |
 | `services/reply_split.py` | `split_reply`: the pure split of a reply into at most `MAX_REPLY_PARTS` parts (CYR-36) |
 | `services/autopilot.py` | `AutopilotScheduler` (the debounce is chosen with `HumanizationPlanner.conversation_ongoing`, CYR-43), `AutopilotSweeper`, `autopilot_running` |
 | `services/reply_job_queue.py` | The one-method `ReplyJobQueue` Protocol |
 | `services/repositories.py` | `AutopilotStateRepository` (`get`, `stop`, `pause_until`, `resume`) and `ReplyBacklogRepository` (`awaiting_reply`, `count_unanswered_active`) |
 | `db/repositories.py`, migration `0009` | `SqlAutopilotStateRepository`, `SqlReplyBacklogRepository`, `contacts.reply_after`, the `autopilot_state` table |
-| `worker/queue.py` | `ArqReplyJobQueue`, the queue the app uses |
-| `worker/jobs.py` | `reply_to_contact`, the Arq job function |
+| `worker/queue.py` | `ArqReplyJobQueue`, the queue the app uses; `ArqSummaryJobQueue` and `ArqProactiveJobQueue` share its pool |
+| `worker/jobs.py` | `reply_to_contact`, the Arq job function; `update_contact_summary` and `proactive_to_contact` (CYR-23) beside it |
 | `worker/composition.py` | `build_worker_resources`: everything the job needs, and how it is closed |
 | `worker/settings.py` | `WorkerSettings`, `startup`, `shutdown` |
 | `bot/app.py`, `bot/notifier.py`, `bot/messages.py` | `NoticeBot` (send-only), `AUTOPILOT_NOTICES`, the Russian texts |
@@ -226,14 +228,24 @@ reason, an optional detail, the row id of the first part and the number of parts
 6. The stop-trigger detector runs on the burst: the run of consecutive incoming messages that ends
    with the effective trigger, only messages after `reply_after`. A hit calls
    `HandOverService.hand_over` with the classes and the source `text`.
-7. `ReplyGenerator.generate` with the contact's mode; the generator adds the stored summary itself
+7. `ReplyGenerator.generate` with the contact's mode, through `GenerationPolicy` (the same helper runs
+   the proactive job, CYR-23); the generator adds the stored summary itself
    (CYR-25, [summaries.md](summaries.md)):
    - `needs_owner`: hand-over with the source `model` and no classes;
    - `truncated`: one more generation with `max_tokens` = `LLM_REPLY_MAX_TOKENS` x 2, capped at
      `TRUNCATION_MAX_TOKENS`; truncated again: hand-over (model);
-   - `ReplyInvalid`: one more generation; invalid again: hand-over (model);
+   - `ReplyInvalid`: one more generation; invalid again: hand-over (model). A reply that carries the
+     proactive `SKIP` signal is `ReplyInvalid` here (CYR-23): a reply is never skipped and never sends
+     the token;
    - `PromptTooLarge` and `DefaultModeUnavailable`: hand-over (model);
    - `NoMessagesToReplyTo`: skip;
+   - the wrap-up context (CYR-23): while `WRAPUP_ENABLED` is on, the job asks
+     `HumanizationPlanner.unavailable_soon(now)` before the generation and passes the result to the
+     generator ([humanization.md](humanization.md#wrapping-up-before-a-window)); an unreadable profile
+     gives no context. A `SKIP` with a context (the contact only said goodnight after the owner did) is a
+     skip `model_skip`: no row, and `contacts.reply_after` moves forward to the effective trigger's time
+     through `ContactRepository.set_reply_after` (never backwards, the status untouched), so the sweeper no
+     longer finds the message unanswered;
    - `PersonaMissing`: stop the autopilot (`persona_missing`), one notice if newly stopped.
 8. LLM errors: `LLMAuthError` stops with `provider_auth`, `LLMRequestError` (402 insufficient balance
    included) with `provider_request`, one notice if newly stopped, never retried.
@@ -241,7 +253,9 @@ reason, an optional detail, the row id of the first part and the number of parts
    raise `RetryJob` with the next delay; on the last try the autopilot pauses for the cooldown
    (`provider_unavailable`), one notice per new pause, and no row is written.
 9. `HumanizationPlanner.plan(contact_id, trigger_message_id, now)` with the effective trigger, and with
-   `ongoing=True` for an adopted one; `PlanNotPossible` is a skip.
+   `ongoing=True` for an adopted one; `PlanNotPossible` is a skip. In the hard wrap-up phase the plan
+   uses the short reaction and is clamped before the window, or postponed after it when the reply cannot
+   finish in time ([the clamp](humanization.md#wrapping-up-before-a-window)).
 10. Before the enqueue, the contact's older `autopilot` replies that have not started are cancelled as `superseded`
     ([One reply per burst](#one-reply-per-burst)). Then the reply is split (`split_reply`, CYR-36): at
     every run of line breaks, each part stripped, empty parts dropped, the order kept, at most
@@ -266,6 +280,7 @@ partial unique index of the outbox).
 | `skipped` | `superseded`, `answered` | Step 4 |
 | `skipped` | `row_exists` | Step 5 |
 | `skipped` | `no_messages` | The generator found no incoming message |
+| `skipped` | `model_skip` | The model answered `SKIP` inside the wrap-up time (CYR-23); `reply_after` moved to the trigger |
 | `skipped` | `plan_not_possible` | Step 9 |
 | `skipped` | `enqueue_refused` | Step 10; the detail is the refusal reason (`autopilot_disabled`, `contact_not_active`, `text_empty`, ...) |
 | `skipped` | `provider_unavailable` | The cooldown pause itself could not be stored |
@@ -364,11 +379,18 @@ contact with at least `SUMMARY_EVERY_MESSAGES` messages after its summary cursor
 failure. It is independent of `AUTOPILOT_ENABLED` and of the autopilot stop and pause. Details:
 [summaries.md](summaries.md#the-sweeper-and-the-worker-job).
 
+**The proactive scan (CYR-23).** A third sibling, `ProactiveSweeper` (`services/proactive_sweeper.py`),
+starts at the same place with the same cadence and is cancelled first on shutdown, before the summary
+sweeper. While `PROACTIVE_ENABLED` and `AUTOPILOT_ENABLED` are on it enqueues one `proactive_to_contact`
+job for every `active` contact that the proactive rule finds eligible, at most 10 per scan. Details:
+[proactive.md](proactive.md).
+
 ## Constants and settings
 
 | Name | Value | Meaning |
 | --- | --- | --- |
 | `AUTOPILOT_ENABLED` | `false` | The switch, read by the app, the worker and the sender's guard |
+| `WRAPUP_ENABLED` | `true` | The wrap-up before a night or busy window (CYR-23), read by the worker's reply job and `reply-preview`; nothing happens while the autopilot is off |
 | `AUTOPILOT_DEBOUNCE_SECONDS` | 12 (0 to 300) | Delay of the job after a message when the conversation is not ongoing; the sweeper waits twice as long |
 | `AUTOPILOT_DEBOUNCE_ONGOING_SECONDS` | 4 (0 to 300, at most `AUTOPILOT_DEBOUNCE_SECONDS`) | Delay of the job after a message in an ongoing conversation (CYR-43) |
 | `AUTOPILOT_MAX_BURST_WAIT_SECONDS` | 30 (1 to 300, at least `AUTOPILOT_DEBOUNCE_SECONDS`) | Burst age from which a job adopts the newest message instead of skipping (CYR-43) |
@@ -397,6 +419,8 @@ id can be enqueued again after the job ended), `max_jobs=2`, `retry_jobs` on and
 notice go through the existing notifier classes, and their buttons are answered by the app's polling
 bot, which uses the same token), the `OutboxService` and the `ReplyJobRunner`. `shutdown` closes the
 bot session, the HTTP client and the engine, in that order, each even if the one before failed.
+The same startup builds the `ProactiveJobRunner` (CYR-23) with its own `GenerationPolicy` over the same
+generator, hand-over service, notifier and autopilot state, and the `SqlProactiveRepository`.
 `reply_to_contact(ctx, contact_id, trigger_message_id)` validates the arguments (`ReplyJobRequest`),
 calls the runner and turns `RetryJob` into `arq.Retry(defer=...)`. A missing or invalid configuration
 still ends the import with the readable `ConfigError` text.
@@ -407,7 +431,7 @@ still ends the import with the readable `ConfigError` text.
 
 | Command | Makefile | What it does |
 | --- | --- | --- |
-| `autopilot status` | `make autopilot-status` | The switch, whether the autopilot is running, stopped (with the reason) or paused (until when, with the reason), the `autopilot` outbox rows per state, and the number of `active` contacts whose latest message is incoming and newer than `reply_after`. Never a text, a name or an id |
+| `autopilot status` | `make autopilot-status` | The switch, whether the autopilot is running, stopped (with the reason) or paused (until when, with the reason), the `autopilot` outbox rows per state, and the number of `active` contacts whose latest message is incoming and newer than `reply_after`; since CYR-23 two more lines, `switch: PROACTIVE_ENABLED=...` and `proactive rows: ...` (the `proactive` rows per state). Never a text, a name or an id |
 | `autopilot resume [--yes]` | `make autopilot-resume [YES=1]` | Clears a pause. A stop is cleared only with `--yes`; without it a one-line reminder to fix the cause first and exit 1, and nothing changes. Nothing to clear is a harmless line and exit 0 |
 
 A bad command line prints the usage and exits 1; a storage failure prints `storage failed: <class>`
@@ -437,5 +461,5 @@ outbox and are cancelled by the sender's guard (`autopilot_disabled`).
 - Other languages than Russian and a little English in the stop-trigger detector.
 - Voice, video, stickers and other media: they are stored as an empty text (`[no text]` in the
   prompt) and the reply is written without knowing them.
-- Proactive messages (CYR-23).
+- Proactive messages are their own guide since CYR-23: [proactive.md](proactive.md).
 - A switch per contact (an open question).

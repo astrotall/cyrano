@@ -65,6 +65,7 @@ NOT_ACTIVE = [ContactStatus.NEW, ContactStatus.PENDING, ContactStatus.IGNORED]
 
 class _Switch:
     autopilot_enabled = True
+    proactive_enabled = True
 
 
 class ExplodingTransport:

@@ -45,8 +45,8 @@ examples-convert:
 	uv run python -m cyrano examples convert "$$INPUT" $${ME:+--me "$$ME"} $${ME_ID:+--me-id "$$ME_ID"} --out "$${OUT:-data/style-examples.json}"
 
 reply-preview:
-	@test -n "$(CONTACT)" || (echo 'usage: make reply-preview CONTACT=<contact id> [MODE=<mode name>]' >&2; exit 2)
-	uv run python -m cyrano reply-preview "$(CONTACT)" $(if $(MODE),--mode "$(MODE)")
+	@test -n "$(CONTACT)" || (echo 'usage: make reply-preview CONTACT=<contact id> [MODE=<mode name>] [PROACTIVE=1] [AT="YYYY-MM-DD HH:MM"]' >&2; exit 2)
+	uv run python -m cyrano reply-preview "$(CONTACT)" $(if $(MODE),--mode "$(MODE)") $(if $(PROACTIVE),--proactive) $(if $(AT),--at "$(AT)")
 
 outbox-enqueue:
 	@test -n "$$CONTACT" -a -n "$$TEXT" || (echo 'usage: make outbox-enqueue CONTACT=<contact id> TEXT="<text>" [IN=<seconds>]' >&2; exit 2)

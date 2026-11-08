@@ -2,9 +2,11 @@ from __future__ import annotations
 
 import logging
 
-from cyrano.domain.errors import ContactNotFound, ModeNameNotFound, PersonaMissing
+from cyrano.domain.enums import ReplyPurpose
+from cyrano.domain.errors import ContactNotFound, ModeNameNotFound, PersonaMissing, ReplyInvalid
 from cyrano.domain.models import Contact, Mode
-from cyrano.domain.reply import BuiltPrompt, GeneratedReply
+from cyrano.domain.reply import REPLY_SKIP_REASON, BuiltPrompt, GeneratedReply
+from cyrano.domain.schedule import UnavailableSoon
 from cyrano.domain.summary import read_stored_summary
 from cyrano.prompts.render import render_summary_layer
 from cyrano.services.contact_facts import build_contact_facts
@@ -12,7 +14,12 @@ from cyrano.services.gender import GenderResolver
 from cyrano.services.llm_client import LLMClient
 from cyrano.services.persona_service import PersonaService
 from cyrano.services.prompt_builder import PromptBuilder
-from cyrano.services.reply_postprocess import clean_reply, contains_needs_owner, is_bare_needs_owner
+from cyrano.services.reply_postprocess import (
+    clean_reply,
+    contains_needs_owner,
+    contains_skip,
+    is_bare_needs_owner,
+)
 from cyrano.services.repositories import ContactRepository, MessageRepository, ModeRepository
 from cyrano.services.style_examples import ExampleSelector
 
@@ -50,12 +57,22 @@ class ReplyGenerator:
         *,
         summary: str | None = None,
         max_tokens: int | None = None,
+        purpose: ReplyPurpose = ReplyPurpose.REPLY,
+        wrapup: UnavailableSoon | None = None,
     ) -> GeneratedReply:
-        prompt = await self.prepare(contact_id, mode_name, summary=summary)
+        prompt = await self.prepare(
+            contact_id, mode_name, summary=summary, purpose=purpose, wrapup=wrapup
+        )
         return await self.complete(prompt, max_tokens=max_tokens)
 
     async def prepare(
-        self, contact_id: int, mode_name: str | None = None, *, summary: str | None = None
+        self,
+        contact_id: int,
+        mode_name: str | None = None,
+        *,
+        summary: str | None = None,
+        purpose: ReplyPurpose = ReplyPurpose.REPLY,
+        wrapup: UnavailableSoon | None = None,
     ) -> BuiltPrompt:
         contact = await self._contacts.get_by_id(contact_id)
         if contact is None:
@@ -74,6 +91,8 @@ class ReplyGenerator:
             summary=summary if summary is not None else _stored_summary_text(contact),
             messages=history,
             examples=examples,
+            purpose=purpose,
+            wrapup=wrapup,
         )
 
     async def complete(
@@ -81,7 +100,10 @@ class ReplyGenerator:
     ) -> GeneratedReply:
         result = await self._client.complete(prompt.messages, max_tokens=max_tokens)
         needs_owner = contains_needs_owner(result.text)
-        text = "" if needs_owner else clean_reply(result.text)
+        skipped = not needs_owner and contains_skip(result.text)
+        if skipped and prompt.purpose is not ReplyPurpose.PROACTIVE and not prompt.wrap_up:
+            raise ReplyInvalid(REPLY_SKIP_REASON)
+        text = "" if needs_owner or skipped else clean_reply(result.text)
         logger.info(
             "reply generated",
             extra={
@@ -92,6 +114,7 @@ class ReplyGenerator:
                 "output_tokens": result.usage.output_tokens,
                 "needs_owner": needs_owner,
                 "needs_owner_leaked": needs_owner and not is_bare_needs_owner(result.text),
+                "skipped": skipped,
                 "truncated": result.truncated,
             },
         )
@@ -99,6 +122,7 @@ class ReplyGenerator:
             text=text,
             usage=result.usage,
             needs_owner=needs_owner,
+            skipped=skipped,
             truncated=result.truncated,
             examples_offered=prompt.examples_offered,
             examples_kept=prompt.examples_kept,

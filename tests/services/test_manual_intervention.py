@@ -79,6 +79,7 @@ NOT_ACTIVE = [
 
 class _Switch:
     autopilot_enabled = False
+    proactive_enabled = False
 
 
 class AppearingSleep:

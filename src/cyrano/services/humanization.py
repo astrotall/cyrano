@@ -1,10 +1,12 @@
 from __future__ import annotations
 
+import logging
+import math
 import random
 from collections.abc import Sequence
 from datetime import UTC, date, datetime, time, timedelta
 
-from cyrano.domain.enums import BlockKind, MessageDirection, PlanReason
+from cyrano.domain.enums import BlockKind, MessageDirection, PlanReason, WrapUpPhase
 from cyrano.domain.errors import NoMessagesToReplyTo, PlanNotPossible
 from cyrano.domain.models import Message
 from cyrano.domain.schedule import (
@@ -12,9 +14,12 @@ from cyrano.domain.schedule import (
     Block,
     ScheduleProfile,
     SendPlan,
+    UnavailableSoon,
     default_schedule_profile,
 )
 from cyrano.services.repositories import MessageRepository, ScheduleProfileRepository
+
+logger = logging.getLogger("cyrano.services.humanization")
 
 NIGHT_START_LABEL = "night-start"
 NIGHT_END_LABEL = "night-end"
@@ -28,6 +33,9 @@ POSTPONED_REASONS = {
     BlockKind.NIGHT: PlanReason.POSTPONED_NIGHT,
     BlockKind.BUSY: PlanReason.POSTPONED_BUSY,
 }
+WRAPUP_SEND_MARGIN_SECONDS = 30
+WRAPUP_LOOKAHEAD_DAYS = (0, 1)
+ONE_MINUTE = timedelta(minutes=1)
 
 
 def _minutes(moment: time) -> int:
@@ -81,18 +89,118 @@ def postponed_after(end: datetime, profile: ScheduleProfile, rng: random.Random)
     return end + timedelta(minutes=rng.uniform(*profile.postponed_spread_minutes))
 
 
+def _upcoming_starts(now: datetime, profile: ScheduleProfile) -> list[UnavailableSoon]:
+    today = now.astimezone(profile.zone).date()
+    found: list[tuple[datetime, int, BlockKind, str | None]] = []
+    for offset in WRAPUP_LOOKAHEAD_DAYS:
+        day = today + timedelta(days=offset)
+        night_start, _ = night_window(day, profile)
+        found.append((night_start, 0, BlockKind.NIGHT, None))
+        weekday = WEEKDAYS[day.weekday()]
+        for order, window in enumerate(profile.busy, start=1):
+            if weekday in window.days:
+                found.append(
+                    (_utc(day, window.start, profile), order, BlockKind.BUSY, window.label)
+                )
+    upcoming = sorted((item for item in found if item[0] > now), key=lambda item: item[:2])
+    return [
+        UnavailableSoon(
+            kind=kind,
+            starts_at=starts_at,
+            minutes_left=max(1, math.ceil((starts_at - now) / ONE_MINUTE)),
+            phase=WrapUpPhase.HARD
+            if starts_at - now <= timedelta(minutes=profile.wrapup_hard_minutes)
+            else WrapUpPhase.SOFT,
+            label=label,
+        )
+        for starts_at, _, kind, label in upcoming
+    ]
+
+
+def unavailable_soon(now: datetime, profile: ScheduleProfile) -> UnavailableSoon | None:
+    if blocked(now, profile) is not None:
+        return None
+    upcoming = _upcoming_starts(now, profile)
+    if not upcoming:
+        return None
+    earliest = upcoming[0]
+    if earliest.starts_at - now > timedelta(minutes=profile.wrapup_soft_minutes):
+        return None
+    return earliest
+
+
+def wrapup_deadline(soon: UnavailableSoon, typing: float) -> datetime:
+    return soon.starts_at - timedelta(seconds=typing + WRAPUP_SEND_MARGIN_SECONDS)
+
+
+def plan_wrapup_time(
+    now: datetime,
+    trigger_at: datetime,
+    ongoing: bool,
+    soon: UnavailableSoon,
+    typing: float,
+    profile: ScheduleProfile,
+    rng: random.Random,
+) -> SendPlan:
+    deadline = wrapup_deadline(soon, typing)
+    if deadline <= now:
+        return plan_send_time(now, trigger_at, ongoing, profile, rng, not_before=soon.starts_at)
+    plan = plan_send_time(now, trigger_at, True, profile, rng)
+    if plan.send_at > deadline:
+        return SendPlan(send_at=deadline, reason=PlanReason.WRAPUP)
+    return plan
+
+
 def plan_send_time(
     now: datetime,
     trigger_at: datetime,
     ongoing: bool,
     profile: ScheduleProfile,
     rng: random.Random,
+    *,
+    not_before: datetime | None = None,
 ) -> SendPlan:
     reaction = profile.reaction
     delay = rng.uniform(*(reaction.ongoing_seconds if ongoing else reaction.new_seconds))
     candidate = max(now, trigger_at + timedelta(seconds=delay))
+    if not_before is not None:
+        candidate = max(candidate, not_before)
     reason = PlanReason.ONGOING if ongoing else PlanReason.DELAYED
     for _ in range(MAX_POSTPONE_ROUNDS):
+        block = blocked(candidate, profile)
+        if block is None:
+            return SendPlan(send_at=candidate, reason=reason)
+        candidate = postponed_after(block.end, profile, rng)
+        reason = POSTPONED_REASONS[block.kind]
+    return SendPlan(send_at=candidate, reason=PlanReason.EXHAUSTED)
+
+
+def in_proactive_window(at: datetime, profile: ScheduleProfile) -> bool:
+    day = at.astimezone(profile.zone).date()
+    start, end = profile.proactive_window
+    return _utc(day, start, profile) <= at < _utc(day, end, profile)
+
+
+def proactive_window_start_after(at: datetime, profile: ScheduleProfile) -> datetime:
+    day = at.astimezone(profile.zone).date()
+    start = _utc(day, profile.proactive_window[0], profile)
+    if at < start:
+        return start
+    return _utc(day + timedelta(days=1), profile.proactive_window[0], profile)
+
+
+def plan_proactive_time(now: datetime, profile: ScheduleProfile, rng: random.Random) -> SendPlan:
+    candidate = now
+    reason = PlanReason.DELAYED
+    if in_proactive_window(now, profile) and blocked(now, profile) is None:
+        candidate = now + timedelta(seconds=rng.uniform(*profile.reaction.new_seconds))
+    for _ in range(MAX_POSTPONE_ROUNDS):
+        if not in_proactive_window(candidate, profile):
+            candidate = postponed_after(
+                proactive_window_start_after(candidate, profile), profile, rng
+            )
+            reason = PlanReason.POSTPONED_WINDOW
+            continue
         block = blocked(candidate, profile)
         if block is None:
             return SendPlan(send_at=candidate, reason=reason)
@@ -120,6 +228,14 @@ class ScheduleService:
     async def blocked_until(self, now: datetime) -> Block | None:
         return blocked(now, await self.get_profile())
 
+    async def unavailable_soon(self, now: datetime) -> UnavailableSoon | None:
+        try:
+            profile = await self.get_profile()
+        except Exception as exc:
+            logger.warning("the schedule profile was not read", extra={"error": type(exc).__name__})
+            return None
+        return unavailable_soon(now, profile)
+
 
 class HumanizationPlanner:
     def __init__(
@@ -136,9 +252,16 @@ class HumanizationPlanner:
         now: datetime,
         *,
         ongoing: bool | None = None,
+        wrapup: UnavailableSoon | None = None,
+        first_part: str = "",
     ) -> SendPlan:
         history = await self._messages.list_last(contact_id, PLANNER_HISTORY_MESSAGES)
-        return await self._plan_from(history, contact_id, trigger_message_id, now, ongoing)
+        return await self._plan_from(
+            history, contact_id, trigger_message_id, now, ongoing, wrapup, first_part
+        )
+
+    async def unavailable_soon(self, now: datetime) -> UnavailableSoon | None:
+        return await self._schedule.unavailable_soon(now)
 
     async def conversation_ongoing(self, contact_id: int, message_id: int) -> bool:
         history = await self._messages.list_last(contact_id, PLANNER_HISTORY_MESSAGES)
@@ -159,12 +282,18 @@ class HumanizationPlanner:
         trigger_id: int,
         now: datetime,
         ongoing: bool | None = None,
+        wrapup: UnavailableSoon | None = None,
+        first_part: str = "",
     ) -> SendPlan:
         trigger = _trigger_index(history, contact_id, trigger_id)
         profile = await self._schedule.get_profile()
         if ongoing is None:
             ongoing = burst_is_ongoing(history, trigger, profile)
-        return plan_send_time(now, history[trigger].created_at, ongoing, profile, self._rng)
+        trigger_at = history[trigger].created_at
+        if wrapup is not None and wrapup.phase is WrapUpPhase.HARD:
+            typing = typing_seconds(first_part, profile)
+            return plan_wrapup_time(now, trigger_at, ongoing, wrapup, typing, profile, self._rng)
+        return plan_send_time(now, trigger_at, ongoing, profile, self._rng)
 
 
 def burst_is_ongoing(history: Sequence[Message], trigger: int, profile: ScheduleProfile) -> bool:

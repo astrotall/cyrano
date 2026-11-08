@@ -47,6 +47,7 @@ QUEUED_TEXT = "resume-text-marker-zq"
 
 class _Switch:
     autopilot_enabled = False
+    proactive_enabled = False
 
 
 @pytest.fixture

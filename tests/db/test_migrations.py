@@ -35,6 +35,7 @@ TIMESTAMP_COLUMNS = {
     ("contacts", "created_at"),
     ("contacts", "last_message_at"),
     ("contacts", "reply_after"),
+    ("contacts", "proactive_not_before"),
     ("contacts", "summary_failed_at"),
     ("contacts", "updated_at"),
     ("messages", "created_at"),
@@ -271,13 +272,13 @@ async def test_revision_0011_follows_0010(alembic_config: Config) -> None:
     assert revision.down_revision == "0010"
 
 
-async def test_revision_0012_is_the_head_and_follows_0011(alembic_config: Config) -> None:
+async def test_revision_0013_is_the_head_and_follows_0012(alembic_config: Config) -> None:
     script = ScriptDirectory.from_config(alembic_config)
 
-    assert script.get_heads() == ["0012"]
-    revision = script.get_revision("0012")
+    assert script.get_heads() == ["0013"]
+    revision = script.get_revision("0013")
     assert revision is not None
-    assert revision.down_revision == "0011"
+    assert revision.down_revision == "0012"
 
 
 async def _summary_failed_at_columns(url: URL) -> list[tuple[object, ...]]:

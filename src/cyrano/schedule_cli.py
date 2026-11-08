@@ -45,11 +45,13 @@ SHOW_LINES = (
     "read pause: {read_pause} s",
     "typing: {chars} characters per second, {typing} s",
     "postponed spread: {spread} min",
+    "proactive window: {proactive_window}",
+    "wrap-up: soft {wrapup_soft} min, hard {wrapup_hard} min",
     "split pause: {split_pause} s",
     "early read: {early_read} s",
 )
 RANGE = "{}-{}"
-BUSY_WINDOW = "{days} {start}-{end}"
+BUSY_WINDOW = "{days} {start}-{end} ({label})"
 DAY_SEPARATOR = ","
 WINDOW_SEPARATOR = "; "
 NO_BUSY_WINDOWS = "none"
@@ -207,6 +209,7 @@ def _busy(profile: ScheduleProfile) -> str:
             days=DAY_SEPARATOR.join(day.value for day in window.days),
             start=window.start.strftime(TIME_FORMAT),
             end=window.end.strftime(TIME_FORMAT),
+            label=window.label,
         )
         for window in profile.busy
     ]
@@ -227,6 +230,9 @@ def _profile_lines(profile: ScheduleProfile) -> list[str]:
         "chars": profile.typing.chars_per_second,
         "typing": _int_range((profile.typing.min_seconds, profile.typing.max_seconds)),
         "spread": _int_range(profile.postponed_spread_minutes),
+        "proactive_window": _time_range(profile.proactive_window),
+        "wrapup_soft": profile.wrapup_soft_minutes,
+        "wrapup_hard": profile.wrapup_hard_minutes,
         "split_pause": _int_range(profile.split_pause_seconds),
         "early_read": _int_range(profile.early_read_seconds),
     }

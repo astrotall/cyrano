@@ -1,7 +1,7 @@
 # Safety rules
 
-**Every rule below says where it is enforced. All of them exist except S7 (limits on proactive
-messages, CYR-23, planned).** S1 and S2 are enforced since
+**Every rule below says where it is enforced. All of them exist; S7 (limits on proactive messages)
+since CYR-23.** S1 and S2 are enforced since
 CYR-19: one guarded sender is the only way to a contact. Since CYR-17 the autopilot job writes `autopilot`
 rows too, only with `AUTOPILOT_ENABLED=true`, and the same sender sends them. S8 is enforced since CYR-12,
 S5 since CYR-22, S4 since CYR-21, and S6 since CYR-18, its splitting part since CYR-36. S3 and S10 are enforced
@@ -215,14 +215,43 @@ only.
 
 ## S7. Limits on proactive messages
 
-- **Rule:** proactive messages are limited. After two unanswered proactive messages the contact
-  becomes `paused`. They go through the sender like every other message.
-- **Why:** unsolicited messages are the fastest way to complaints and bans.
-- **Enforced where:** proactive messages (CYR-23, planned). The sender's send limits exist since
-  CYR-22 (see S5), and a proactive message will count against them like every other message. The
-  remaining limits are open questions in [decisions.md](decisions.md).
-- **How it is tested:** the second unanswered proactive message pauses the contact; an answer
-  resets the counter; a paused contact gets no proactive message.
+- **Rule:** the assistant writes first only within these limits, each enforceable on its own:
+  1. Only with `PROACTIVE_ENABLED` (default `false`) and `AUTOPILOT_ENABLED`, while neither the autopilot
+     nor the sender is stopped or paused.
+  2. Only to an `active` contact.
+  3. Never to open a conversation: the contact must have written at least once.
+  4. Only when our message is the last one, and only after `PROACTIVE_AFTER_HOURS` (default 6) of
+     silence, counted from that message or from the last resume, whichever is later.
+  5. At most `PROACTIVE_MAX_PER_SILENCE` (default 2) per silence, that is after the contact's last
+     message; the contact is not paused after them, the assistant simply writes nothing more until the
+     contact writes.
+  6. At least `PROACTIVE_MIN_INTERVAL_HOURS` (default 24) between two proactive messages to one contact.
+  7. At most `PROACTIVE_DAILY_LIMIT` (default 20) in 24 hours over all contacts.
+  8. Only inside the profile's `proactive_window` (default 10:00 to 22:00) and outside every night and
+     busy window.
+  9. A message of the contact, or any other newer message in the chat, cancels a proactive message
+     that has not started.
+  10. Every proactive message goes through the one sender, the guard (which also needs both switches),
+      the send limits of S5, the stale rule and the pacing of S6.
+- **Why:** unsolicited messages are the fastest way to complaints and bans, and a person who wrote
+  first only after the other side went quiet, rarely and at sensible hours, looks normal.
+- **Enforced where:** exists (CYR-23). Rules 1 to 7 are the one pure function `decide_proactive` in
+  `services/proactive_eligibility.py`, asked by the app's `ProactiveSweeper` before a job is enqueued and
+  again by the worker's `ProactiveJobRunner` before the model is called; `contacts.proactive_not_before`
+  holds the job's postponements (after a message, after a `SKIP`, after a failure). Rule 8 is
+  `plan_proactive_time` in `services/humanization.py` and, as a safety net, `_hold_outside_hours` in
+  `services/outbox_sender.py`. Rules 9 and 10 are the sender (`_cancel_if_superseded`, `SendGuard`
+  with `REFUSED_PROACTIVE_DISABLED`, the limiter). Details: [proactive.md](proactive.md).
+- **How it is tested:** exists. `tests/services/test_proactive_eligibility.py` (each condition alone
+  gives exactly its reason, the boundaries), `tests/db/test_proactive_repository.py` (the counts and the
+  scan on real PostgreSQL), `tests/services/test_proactive_planner.py` (the window with the night and busy
+  windows, a seeded generator), `tests/services/test_proactive_job.py`,
+  `tests/services/test_proactive_sweeper.py`, `tests/services/test_proactive_sender.py` (the guard,
+  supersession, the window net, the limits, the stale rule) and
+  `tests/services/test_proactive_end_to_end.py` (one follow-up in the human order, a second not before a
+  day and never a third, a message of the contact cancelling it, nothing at night or in class hours);
+  `tests/test_proactive_structure.py` pins that the rule exists once and that the path never reaches the
+  transport.
 
 ## S8. The control bot is owner-only
 

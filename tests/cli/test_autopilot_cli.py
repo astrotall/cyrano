@@ -40,12 +40,15 @@ def state(session_factory: SessionFactory) -> SqlAutopilotStateRepository:
     return SqlAutopilotStateRepository(session_factory)
 
 
-def _commands(session_factory: SessionFactory, *, enabled: bool = True) -> AutopilotCommands:
+def _commands(
+    session_factory: SessionFactory, *, enabled: bool = True, proactive: bool = False
+) -> AutopilotCommands:
     return AutopilotCommands(
         SqlAutopilotStateRepository(session_factory),
         SqlOutboxRepository(session_factory),
         SqlReplyBacklogRepository(session_factory),
         enabled=enabled,
+        proactive_enabled=proactive,
         clock=lambda: NOW,
     )
 
@@ -86,9 +89,32 @@ async def test_status_shows_the_switch_the_state_the_rows_and_the_unanswered_cou
         "autopilot: running",
         "autopilot rows: scheduled=1 sending=0 sent=0 failed=0 cancelled=0",
         "active contacts with an unanswered incoming message: 1",
+        "switch: PROACTIVE_ENABLED=false",
+        "proactive rows: scheduled=0 sending=0 sent=0 failed=0 cancelled=0",
     ]
     for marker in (TEXT_ZQ, NAME_ZQ, FAKE_TELEGRAM_ID):
         assert_absent(marker, out)
+
+
+async def test_status_counts_the_proactive_rows_apart_from_the_autopilot_rows(
+    session_factory: SessionFactory, capsys: pytest.CaptureFixture[str]
+) -> None:
+    contact_id = await _active_contact_with_a_message(session_factory)
+    outbox = SqlOutboxRepository(session_factory)
+    await outbox.enqueue(contact_id, TEXT_ZQ, NOW, OutboxSource.PROACTIVE, 98)
+    await outbox.enqueue(contact_id, TEXT_ZQ, NOW, OutboxSource.PROACTIVE, 97)
+    second = await outbox.claim_due(NOW)
+    assert second is not None
+    await outbox.mark_cancelled(second.id, "superseded")
+
+    await _commands(session_factory, proactive=True).run(AutopilotRequest(action="status"))
+
+    lines = capsys.readouterr().out.splitlines()
+    assert "autopilot rows: scheduled=0 sending=0 sent=0 failed=0 cancelled=0" in lines
+    assert lines[-2:] == [
+        "switch: PROACTIVE_ENABLED=true",
+        "proactive rows: scheduled=1 sending=0 sent=0 failed=0 cancelled=1",
+    ]
 
 
 async def test_status_shows_a_stop_and_a_pause_with_their_reasons(

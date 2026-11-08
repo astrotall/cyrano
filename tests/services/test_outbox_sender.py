@@ -97,6 +97,7 @@ class _RawTelethon:
 @dataclass(frozen=True)
 class _Switch:
     autopilot_enabled: bool
+    proactive_enabled: bool = True
 
 
 @dataclass

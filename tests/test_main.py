@@ -1402,6 +1402,59 @@ async def test_the_summary_sweeper_starts_with_the_others_and_is_cancelled_first
     assert bot_calls.index("summary sweeper cancelled") < bot_calls.index("sweeper cancelled")
 
 
+class _ProactiveSweeperSpy:
+    def __init__(self, calls: list[str]) -> None:
+        self.calls = calls
+
+    async def run(self) -> None:
+        self.calls.append("proactive sweeper.run")
+        try:
+            await asyncio.sleep(3600)
+        except asyncio.CancelledError:
+            self.calls.append("proactive sweeper cancelled")
+            raise
+
+
+async def test_the_proactive_sweeper_starts_with_the_others_and_is_cancelled_first(
+    session_env: dict[str, str],
+    heartbeat_file: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    bot_calls: list[str],
+) -> None:
+    built: list[tuple[tuple[object, ...], dict[str, object]]] = []
+
+    def spy(*args: object, **kwargs: object) -> _ProactiveSweeperSpy:
+        built.append((args, kwargs))
+        return _ProactiveSweeperSpy(bot_calls)
+
+    _recording_sender(monkeypatch, bot_calls)
+    monkeypatch.setattr("cyrano.main.ProactiveSweeper", spy)
+    monkeypatch.setattr(
+        "cyrano.main.SummarySweeper", lambda *args, **kwargs: _SummarySweeperSpy(bot_calls, kwargs)
+    )
+    monkeypatch.setattr(
+        "cyrano.main.AutopilotSweeper", lambda *args, **kwargs: _SweeperSpy(bot_calls)
+    )
+    stop = asyncio.Event()
+    task = asyncio.create_task(
+        run(load_settings(env_file=None), stop, client_factory=_factory(FakeClient()))
+    )
+
+    await _wait_until(lambda: _contains(bot_calls, "proactive sweeper.run"))
+    stop.set()
+    await asyncio.wait_for(task, timeout=2)
+
+    assert len(built) == 1
+    assert bot_calls.index("sender.run") < bot_calls.index("proactive sweeper.run")
+    order = [
+        "proactive sweeper cancelled",
+        "summary sweeper cancelled",
+        "sweeper cancelled",
+        "sender cancelled",
+    ]
+    assert [bot_calls.index(name) for name in order] == sorted(bot_calls.index(n) for n in order)
+
+
 async def test_the_summary_scan_enqueues_with_the_autopilot_switched_off(
     session_env: dict[str, str], heartbeat_file: Path, repositories: Repositories
 ) -> None:

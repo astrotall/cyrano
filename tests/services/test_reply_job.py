@@ -40,7 +40,7 @@ from cyrano.domain.errors import (
 )
 from cyrano.domain.models import Contact, Message
 from cyrano.domain.outbox import ScheduledMessage
-from cyrano.domain.schedule import SendPlan
+from cyrano.domain.schedule import SendPlan, UnavailableSoon
 from cyrano.services.humanization import HumanizationPlanner
 from cyrano.services.reply_job import burst_texts
 from tests.privacy import assert_absent
@@ -696,6 +696,8 @@ class _NoPlan(HumanizationPlanner):
         now: datetime,
         *,
         ongoing: bool | None = None,
+        wrapup: UnavailableSoon | None = None,
+        first_part: str = "",
     ) -> SendPlan:
         raise PlanNotPossible(contact_id, trigger_message_id)
 

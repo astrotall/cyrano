@@ -29,7 +29,7 @@ refused. Errors give the JSON path and the rule, never a value and never the unk
 | `night.start` | `["01:00", "02:00"]` | `[lo, hi]`, `HH:MM`, `lo <= hi`, `hi` at most `05:00` |
 | `night.end_weekday` | `["09:00", "09:00"]` | `[lo, hi]`, `lo` after `night.start`'s `hi`. Used for Monday to Friday dates |
 | `night.end_weekend` | `["11:00", "12:00"]` | `[lo, hi]`, `lo` after `night.start`'s `hi`. Used for Saturday and Sunday dates |
-| `busy` | `[]` | At most 20 windows `{"days": [...], "from": "HH:MM", "to": "HH:MM"}`; `days` is a non-empty list of `mon`..`sun` (repeats are harmless), `from` before `to`, same day |
+| `busy` | `[]` | At most 20 windows `{"days": [...], "from": "HH:MM", "to": "HH:MM", "label": "..."}`; `days` is a non-empty list of `mon`..`sun` (repeats are harmless), `from` before `to`, same day. `label` (CYR-23, optional, default `"занят"`, trimmed, 1 to 40 characters, `MAX_BUSY_LABEL_LENGTH`) is the reason the wrap-up names for this window; it reaches the reply prompt, never a log |
 | `reaction.ongoing_seconds` | `[1, 4]` | `[lo, hi]`, integers, 0 to 3600 |
 | `reaction.new_seconds` | `[20, 120]` | `[lo, hi]`, integers, 0 to 3600 |
 | `reaction.ongoing_window_minutes` | `10` | Integer, 1 to 120 |
@@ -40,6 +40,9 @@ refused. Errors give the JSON path and the rule, never a value and never the unk
 | `postponed_spread_minutes` | `[1, 15]` | `[lo, hi]`, integers, 0 to 120 |
 | `split_pause_seconds` | `[3, 8]` | `[lo, hi]`, integers, 0 to 60 (`MAX_SPLIT_PAUSE_SECONDS`). The pause between two parts of one reply, counted from the actual send of the earlier part (CYR-36). A profile stored before the field existed reads with the default; no migration |
 | `early_read_seconds` | `[0, 1]` | `[lo, hi]`, integers, 0 to 30 (`MAX_EARLY_READ_SECONDS`), `lo <= hi`; `[0, 0]` means strictly immediate. The delay of the early read mark, drawn uniformly (a float) from the range with the injected generator (CYR-44). A profile stored before the field existed reads with the default; no migration |
+| `wrapup_soft_minutes` | `60` | Integer, 5 to 240. How long before the next night or busy window the conversation is steered to an end ([wrapping up](#wrapping-up-before-a-window), CYR-23). A profile stored before the field existed reads with the default |
+| `wrapup_hard_minutes` | `20` | Integer, 1 to `wrapup_soft_minutes` (the error names only the path `wrapup_hard_minutes`). The last minutes before the window, in which the reply says goodnight or that the owner has to go |
+| `proactive_window` | `["10:00", "22:00"]` | `[start, end]`, `HH:MM`, start strictly before end on one day (`PROACTIVE_WINDOW_RULE`, the error names only the path). When a proactive message may go out, local time, half-open: the start is inside, the end is not (CYR-23, [proactive.md](proactive.md)). A profile stored before the field existed reads with the default; no migration |
 
 A sample with invented values: `examples/schedule.sample.json`. The worked examples below use it.
 
@@ -108,6 +111,32 @@ short reaction.
 `ScheduleService` gives the rest of the code `get_profile()` (stored or default, with the time zone
 filled in) and `blocked_until(now)`.
 
+### Proactive messages
+
+CYR-23. `plan_proactive_time(now, profile, rng)` plans a proactive message, which answers nothing, so it
+has no trigger time and no ongoing rule:
+
+1. If `now` is inside the `proactive_window` and outside every night and busy window, the candidate is
+   `now + uniform(reaction.new_seconds)` and the reason `delayed`; otherwise the candidate is `now`.
+2. Up to 8 rounds (`MAX_POSTPONE_ROUNDS`, as in `plan_send_time`): a candidate outside the window moves to
+   the next window start (`proactive_window_start_after`: today's start before it, tomorrow's after it)
+   plus `uniform(postponed_spread_minutes)`, reason `postponed_window`; a candidate inside a night or busy
+   window (the same `blocked` helper) moves to its end plus the spread, reason `postponed_night` or
+   `postponed_busy`; a candidate inside the window and outside every blocked window is the plan.
+3. Eight rounds used up: the last candidate with the reason `exhausted`; the sender's checks catch it.
+
+`in_proactive_window(at, profile)` is the window test the sender's safety net uses too. Examples with the
+default window and a busy window on Tuesday from 12:00 to 14:00, `Europe/Moscow`:
+
+| Now | Plan | Reason |
+| --- | --- | --- |
+| Wed 15:00 | 15:00:20 to 15:02:00 | `delayed` |
+| Wed 09:30 | 10:01 to 10:15 | `postponed_window` |
+| Wed 22:00 | Thu 10:01 to 10:15 | `postponed_window` |
+| Tue 12:30 | 14:01 to 14:15 | `postponed_busy` |
+| Mon 03:00 | 10:01 to 10:15; the weekday night ended at 09:00 | `postponed_window` |
+| Sat 03:00 | after the weekend night, 11:00 to 12:00, plus the spread | `postponed_night` |
+
 ### Worked examples
 
 With the sample file: zone `Europe/Berlin`, night start 00:30 to 01:30, weekday end 08:00, weekend end
@@ -131,6 +160,49 @@ dates are November 2026. "New" means no recent activity before the message.
 
 A message between 00:30 and 01:30 depends on the date: before that date's drawn start it is free,
 after it it is blocked.
+
+## Wrapping up before a window
+
+CYR-23 (folding in CYR-52). Without it, replies simply stop when the night or a class window begins and
+the last messages stay unread, which looks like leaving in the middle of a sentence. With it, the
+assistant steers the conversation to an end shortly before and says goodnight or that it has to go.
+
+**The helper.** `unavailable_soon(now, profile)` (pure, `services/humanization.py`) returns nothing, or an
+`UnavailableSoon` (`domain/schedule.py`): `kind` (`night` or `busy`), `starts_at`, `minutes_left` (rounded
+up, at least 1), `phase` (`soft` or `hard`, `WrapUpPhase`) and `label` (the busy window's label, none for
+the night). It looks at the windows that **start after** `now`: the night window of today's and of
+tomorrow's local date (drawn per date as always) and the busy windows of today and tomorrow. The earliest
+start wins; on equal starts the night wins over a busy window, and two busy windows keep the order of the
+profile. It returns that start when it lies at most `wrapup_soft_minutes` ahead, with the phase `hard`
+when at most `wrapup_hard_minutes` remain, otherwise `soft`. It returns nothing while `now` is inside a
+night or busy window (the `blocked` helper decides, so a window that starts exactly now is already
+blocked) and when nothing starts within the soft limit. `ScheduleService.unavailable_soon(now)` reads the
+stored or the default profile and returns nothing (with one WARNING and the class name) when it cannot be
+read; `HumanizationPlanner.unavailable_soon` delegates to it.
+
+| Now (night start 01:00, defaults 60 and 20) | Result |
+| --- | --- |
+| 23:59:59 | nothing (60 min 1 s) |
+| 00:00 | `soft`, 60 min |
+| 00:39:59 | `soft`, 21 min |
+| 00:40 | `hard`, 20 min |
+| 00:59:59 | `hard`, 1 min |
+| 01:00 | nothing: the night has begun |
+
+**Who uses it.** The autopilot's reply job passes the context to the reply generator
+([reply-generation.md](reply-generation.md#the-wrap-up-context)) while `WRAPUP_ENABLED` (default `true`)
+is on ([autopilot.md](autopilot.md#the-job)); the proactive rule refuses any proactive message while a
+context exists, in either phase ([proactive.md](proactive.md#the-eligibility-rule)); `reply-preview`
+prints it.
+
+**The clamp.** Only in the hard phase, `HumanizationPlanner.plan(..., wrapup=..., first_part=...)` calls
+`plan_wrapup_time`: the deadline is `starts_at - (typing_seconds(first part) + WRAPUP_SEND_MARGIN_SECONDS)`
+(30 s, which also covers the read pause). When the deadline is after `now`, the reaction is drawn from
+the short `reaction.ongoing_seconds` whatever the conversation looks like, and a send time after the
+deadline is moved to it (reason `wrapup`). When the deadline is not after `now`, the reply cannot finish
+before the window: the normal planner runs with the candidate held back to `starts_at`, so the usual
+postponement places it after the window (`postponed_night` or `postponed_busy`). The soft phase changes
+no timing. Later parts follow the chain rules as before.
 
 ## The pre-send sequence
 
@@ -223,11 +295,14 @@ The planner only proposes a time. Three things stand behind it, in this order at
 
 - **The stale rule.** A row more than 6 h past its `due_at` is cancelled as `stale`, not sent late.
 - **The status guard**, before the pre-send part and again right before the send.
-- **The availability check.** An autopilot row due inside a window (the profile changed, a limit or a
-  flood wait moved it there, or the plan was `exhausted`) goes back to `scheduled`, at the window's
-  end plus the spread, with `error_class = outside_hours`. It is not dropped, it is not an attempt,
-  `due_at` stays, and the owner gets no notice. `manual_test` rows skip this check: the owner asked
-  for that message now. A later part of a reply skips it too.
+- **The availability check.** An `autopilot` or `proactive` row due inside a window (the profile
+  changed, a limit or a flood wait moved it there, or the plan was `exhausted`) goes back to
+  `scheduled`, at the window's end plus the spread, with `error_class = outside_hours`. It is not
+  dropped, it is not an attempt, `due_at` stays, and the owner gets no notice. `manual_test` rows skip
+  this check: the owner asked for that message now. A later part of a reply skips it too.
+- **The proactive window** (CYR-23). A `proactive` first part due outside `proactive_window` goes back to
+  `scheduled` at the next window start plus the spread, with `error_class = outside_window`, by the same
+  rules.
 
 **The stale rule still wins, on purpose.** `due_at` is untouched, so a row due at 02:30 and held until
 the morning is more than 6 h old when it comes back, and is cancelled as `stale` with the usual summary
@@ -244,7 +319,7 @@ line included; an invalid configuration exits with 2 like every command.
 | Command | Makefile | What it does |
 | --- | --- | --- |
 | `schedule import FILE` | `make schedule-import FILE=...` | Validates the whole file first: on any problem nothing is stored. Over 64 KiB, missing, not UTF-8 or invalid JSON are readable errors too. Then replaces the stored profile and prints a short confirmation |
-| `schedule show` | `make schedule-show` | Says whether the stored or the default profile is in use, then prints the effective profile |
+| `schedule show` | `make schedule-show` | Says whether the stored or the default profile is in use, then prints the effective profile, the `proactive window` and `wrap-up: soft N min, hard N min` lines and the busy windows with their labels in brackets included (CYR-23) |
 | `schedule check [--at "YYYY-MM-DD HH:MM"]` | `make schedule-check [AT="..."]` | Reads `--at` in the profile's zone, default now. Prints `free`, or the end and the kind. Writes nothing |
 | `schedule plan CONTACT_ID` | `make schedule-plan CONTACT=...` | The planned local time, the reason and the seconds from now for the contact's latest incoming message. Reads, never writes |
 

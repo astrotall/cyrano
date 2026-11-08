@@ -34,6 +34,8 @@ PAUSED_LINE = "autopilot: paused until {until} reason={reason}"
 ROWS_LINE = "autopilot rows: {counts}"
 ROW_COUNT = "{state}={count}"
 UNANSWERED_LINE = "active contacts with an unanswered incoming message: {count}"
+PROACTIVE_SWITCH_LINE = "switch: PROACTIVE_ENABLED={value}"
+PROACTIVE_ROWS_LINE = "proactive rows: {counts}"
 RESUME_NOTHING_LINE = "nothing to clear: the autopilot is running"
 RESUME_PAUSE_LINE = "pause cleared, it was until {until} reason={reason}"
 RESUME_STOP_LINE = "stop cleared, the reason was {reason}"
@@ -90,11 +92,13 @@ class AutopilotCommands:
         *,
         enabled: bool,
         clock: Callable[[], datetime],
+        proactive_enabled: bool = False,
     ) -> None:
         self._state = state
         self._outbox = outbox
         self._backlog = backlog
         self._enabled = enabled
+        self._proactive_enabled = proactive_enabled
         self._clock = clock
 
     async def run(self, request: AutopilotRequest) -> int:
@@ -111,17 +115,19 @@ class AutopilotCommands:
         print(SWITCH_LINE.format(value=SWITCH_ON if self._enabled else SWITCH_OFF))
         for line in _state_lines(await self._state.get(), now):
             print(line)
-        counts = await self._outbox.count_by_state(OutboxSource.AUTOPILOT)
-        print(
-            ROWS_LINE.format(
-                counts=" ".join(
-                    ROW_COUNT.format(state=state.value, count=count)
-                    for state, count in counts.items()
-                )
-            )
-        )
+        print(ROWS_LINE.format(counts=await self._counts(OutboxSource.AUTOPILOT)))
         print(UNANSWERED_LINE.format(count=await self._backlog.count_unanswered_active()))
+        print(
+            PROACTIVE_SWITCH_LINE.format(value=SWITCH_ON if self._proactive_enabled else SWITCH_OFF)
+        )
+        print(PROACTIVE_ROWS_LINE.format(counts=await self._counts(OutboxSource.PROACTIVE)))
         return EXIT_OK
+
+    async def _counts(self, source: OutboxSource) -> str:
+        counts = await self._outbox.count_by_state(source)
+        return " ".join(
+            ROW_COUNT.format(state=state.value, count=count) for state, count in counts.items()
+        )
 
     async def _resume(self, request: AutopilotRequest) -> int:
         now = self._clock()

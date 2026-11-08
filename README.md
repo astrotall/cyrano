@@ -16,8 +16,9 @@ humanization (send time planner, read mark, typing, quiet hours, a reply written
 as up to three messages), the pause on a manual message of the
 owner, the stop-triggers with the hand-over, the persona and style examples, the layered reply prompt
 with `reply-preview`, the autopilot (the Arq worker generates the replies) behind
-`AUTOPILOT_ENABLED`, which is off by default, and the contact summaries (the worker keeps a short
-memory of each conversation for the reply prompt). Planned and not built: proactive messages (CYR-23), conversation modes beyond
+`AUTOPILOT_ENABLED`, which is off by default, the contact summaries (the worker keeps a short
+memory of each conversation for the reply prompt) and proactive messages (a short follow-up after a long
+silence after your last message) behind `PROACTIVE_ENABLED`, also off by default. Planned and not built: conversation modes beyond
 the default one (CYR-15), the rest of the control panel (CYR-26) and a contact catalog.
 
 ## About the project
@@ -336,7 +337,14 @@ message, at most three (more lines are joined into the third). The first part ge
 pause and typing; every later part only its own typing, `split_pause_seconds` after the part before it
 was sent (a `[lo, hi]` pair of whole seconds in the schedule profile, 0 to 60, default `[3, 8]`; a
 profile imported before the field existed uses the default, and `make schedule-show` prints it as
-`split pause: 3-8 s`), even inside a busy window, because the reply has started. If a part
+`split pause: 3-8 s`), even inside a busy window, because the reply has started. The profile's
+`proactive_window` (`["HH:MM", "HH:MM"]`, the start before the end on one day, default
+`["10:00", "22:00"]`, printed as `proactive window: 10:00-22:00`; a profile imported before the field
+existed uses the default) is when a proactive message may go out ([Proactive messages](#proactive-messages)).
+`wrapup_soft_minutes` (5 to 240, default 60) and `wrapup_hard_minutes` (1 to the soft value, default 20)
+set the wrap-up, and every busy window may carry a `label` (at most 40 characters, default `"занят"`);
+`make schedule-show` prints `wrap-up: soft 60 min, hard 20 min` and the labels in brackets
+([Wrapping up](#wrapping-up-before-the-night-or-a-class)). If a part
 fails or is cancelled, or the contact writes in between, the rest of that reply is not sent. Every part
 counts toward the send limits.
 
@@ -439,6 +447,37 @@ The summary also holds the contact's gender when the contact has shown it in her
 
 Details: [.claude/docs/summaries.md](.claude/docs/summaries.md).
 
+### Wrapping up before the night or a class
+
+When you are about to become unavailable (the night or a busy window of the schedule profile starts
+within `wrapup_soft_minutes`, 60 by default), the reply prompt says so: the assistant stops opening new
+topics, and in the last `wrapup_hard_minutes` (20 by default) it answers briefly and says goodnight, or that
+you have to go and will write later (the busy window's `label`, `"занят"` by default, is the reason it
+gives). That last reply is planned so that it arrives before the window starts. If the contact only says
+goodnight back after you did, the model may answer `SKIP`: nothing is sent and the message counts as
+handled. Messages that arrive inside the window are answered after it, as before, and no proactive message
+starts in the wrap-up time. `WRAPUP_ENABLED=false` switches it off. Details:
+[.claude/docs/humanization.md](.claude/docs/humanization.md#wrapping-up-before-a-window).
+
+### Proactive messages
+
+When an `active` contact has been quiet for a long time after **your** last message, the assistant
+sometimes writes first: one short, natural message that continues the conversation or asks about
+something the contact mentioned (the summary helps). It never opens a conversation (the contact must have
+written at least once), writes only while the autopilot runs, at most twice per silence (after the
+contact's last message), at least a day apart, at most 20 a day in total, and only inside the schedule
+profile's `proactive_window` (10:00 to 22:00 by default) and outside the night and busy windows. If the
+contact writes, or anyone writes in the chat, before it starts, it is cancelled. The model may answer
+`SKIP` when the conversation ended naturally (then the next check is 12 hours later), and `NEEDS_OWNER`
+still hands the contact over to you. After the maximum the contact is not paused: the assistant simply
+writes nothing more until the contact writes.
+
+To enable it: get the autopilot and the summaries working first, check `make schedule-show` (the
+`proactive window` line) and a few `make reply-preview CONTACT=... PROACTIVE=1`, then set
+`PROACTIVE_ENABLED=true` in `.env`, restart the app and the worker, and watch a test contact of your own;
+`make autopilot-status` shows the `proactive` rows. Details:
+[.claude/docs/proactive.md](.claude/docs/proactive.md).
+
 ### Code layers
 
 Import direction (enforced by review, and by a test for `domain`, `prompts`, `db`, `services`, `userbot` and
@@ -503,7 +542,7 @@ What exists now:
 ├── alembic.ini                   # points at migrations/; no URL, it comes from Settings
 ├── migrations/
 │   ├── env.py                    # async environment, URL from Settings
-│   └── versions/                 # 0001 creates the contacts, messages and modes tables and seeds the default mode; 0002 creates persona and style_examples; 0003 creates scheduled_messages (the outbox); 0004 creates sender_state and the index of the send limits; 0005 adds due_at to scheduled_messages; 0006 creates schedule_profile; 0007 adds contacts.pause_reason; 0008 allows stop_trigger as a pause reason; 0009 adds contacts.reply_after and creates autopilot_state; 0010 adds scheduled_messages.follows_id (the parts of a reply); 0011 adds contacts.summary_failed_at; 0012 adds contacts.gender (the owner's choice of the grammatical gender)
+│   └── versions/                 # 0001 creates the contacts, messages and modes tables and seeds the default mode; 0002 creates persona and style_examples; 0003 creates scheduled_messages (the outbox); 0004 creates sender_state and the index of the send limits; 0005 adds due_at to scheduled_messages; 0006 creates schedule_profile; 0007 adds contacts.pause_reason; 0008 allows stop_trigger as a pause reason; 0009 adds contacts.reply_after and creates autopilot_state; 0010 adds scheduled_messages.follows_id (the parts of a reply); 0011 adds contacts.summary_failed_at; 0012 adds contacts.gender (the owner's choice of the grammatical gender); 0013 allows the outbox source proactive and adds contacts.proactive_not_before
 ├── examples/                     # invented sample persona, style examples and schedule (the real files go to data/, never to git)
 ├── .dockerignore
 ├── .gitignore
@@ -516,6 +555,7 @@ What exists now:
 │   ├── reply-generation.md       # the layered prompt, the budget, the reply cleaning, reply-preview
 │   ├── stop-triggers.md          # stop-trigger classes, patterns, the hand-over, the notice, stop-check
 │   ├── summaries.md              # contact summaries: schema, cursor, sanitising, sweeper, the layer, commands
+│   ├── proactive.md              # proactive messages: the rule, the sweeper and the job, SKIP, the window, the checklist
 │   ├── outbox-and-sender.md      # the outbox, the one sender, the guard, limits, pause and stop, errors, owner commands
 │   ├── safety-rules.md           # S1..S10
 │   └── decisions.md              # decided and open
@@ -591,18 +631,22 @@ What exists now:
 │   │   ├── stop_triggers.py      # the pure stop-trigger detector
 │   │   ├── hand_over.py          # HandOverService: pause, cancel, one notice to the owner
 │   │   ├── hand_over_notifier.py # HandOverNotifier Protocol: notify_hand_over
-│   │   ├── reply_job.py          # ReplyJobRunner: one generated reply per burst into the outbox
+│   │   ├── reply_job.py          # ReplyJobRunner: one generated reply per burst into the outbox; GenerationPolicy, shared with the proactive job
 │   │   ├── autopilot.py          # AutopilotScheduler and AutopilotSweeper: put reply jobs on the queue
 │   │   ├── reply_job_queue.py    # ReplyJobQueue Protocol: enqueue
 │   │   ├── summary_sanitizer.py  # removes contact details from a model summary
 │   │   ├── summary_updater.py    # SummaryUpdater: one chunk of messages into the stored summary
 │   │   ├── summary_sweeper.py    # SummarySweeper: puts summary jobs on the queue
-│   │   └── summary_job_queue.py  # SummaryJobQueue Protocol: enqueue
+│   │   ├── summary_job_queue.py  # SummaryJobQueue Protocol: enqueue
+│   │   ├── proactive_eligibility.py # the one proactive rule: decide_proactive and ProactiveEligibility
+│   │   ├── proactive_sweeper.py  # ProactiveSweeper: puts proactive jobs on the queue
+│   │   ├── proactive_job.py      # ProactiveJobRunner: one follow-up after a silence into the outbox
+│   │   └── proactive_job_queue.py # ProactiveJobQueue Protocol: enqueue
 │   └── worker/                   # the only package that imports arq; never imports Telethon
 │       ├── settings.py           # Arq WorkerSettings, startup, shutdown
-│       ├── jobs.py               # reply_to_contact and update_contact_summary, the job functions
+│       ├── jobs.py               # reply_to_contact, update_contact_summary and proactive_to_contact, the job functions
 │       ├── composition.py        # builds and closes what the job needs
-│       └── queue.py              # ArqReplyJobQueue and ArqSummaryJobQueue, used by the app
+│       └── queue.py              # ArqReplyJobQueue, ArqSummaryJobQueue and ArqProactiveJobQueue, used by the app
 └── tests/                        # mirrors src/cyrano; database tests need a real PostgreSQL; test_docs_in_sync.py checks the documents against the code
 ```
 
@@ -780,7 +824,7 @@ to Redis, Postgres, the LLM provider and the Bot API for the owner notices; the 
 | `make login-docker` | The same inside the compose image and volume |
 | `make persona-import FILE=...`, `make examples-import FILE=...`, `make examples-stats` | Import the persona text, import style examples from JSON, print counts per tag (see [Persona and style examples](#persona-and-style-examples)) |
 | `make examples-convert INPUT=... ME=... \| ME_ID=... [OUT=...]` | Convert a Telegram Desktop JSON chat export into a draft examples file; give exactly one of `ME` and `ME_ID`; needs no `.env` and no database |
-| `make reply-preview CONTACT=... [MODE=...]` | Generate one reply for a stored conversation and print it with a stats line; sends nothing, writes nothing (see [Previewing a reply](#previewing-a-reply)) |
+| `make reply-preview CONTACT=... [MODE=...] [PROACTIVE=1] [AT="YYYY-MM-DD HH:MM"]` | Generate one reply (or, with `PROACTIVE=1`, the proactive follow-up) for a stored conversation and print it with a stats line, as if it were `AT`; sends nothing, writes nothing (see [Previewing a reply](#previewing-a-reply)) |
 | `make outbox-enqueue CONTACT=... TEXT="..." [IN=...]`, `make outbox-list [STATE=...] [LIMIT=...]`, `make outbox-cancel ID=...`, `make outbox-retry ID=... [IN=...] [YES=1]`, `make outbox-status`, `make outbox-resume [YES=1]` | The owner's commands for the outbox (see [The outbox and the sender](#the-outbox-and-the-sender)) |
 | `make schedule-import FILE=...`, `make schedule-show`, `make schedule-check [AT="YYYY-MM-DD HH:MM"]`, `make schedule-plan CONTACT=...` | The owner's commands for the schedule profile (see [Humanization and the schedule](#humanization-and-the-schedule)) |
 | `make stop-check TEXT="..."` or `make stop-check CONTACT=...` | Print the stop-trigger classes of a phrase (no `.env` needed) or of the contact's last 3 incoming messages; changes nothing, prints no text (see [When a contact touches a sensitive topic](#when-a-contact-touches-a-sensitive-topic)) |
@@ -855,8 +899,8 @@ readable message on an error. `STYLE_EXAMPLES_MAX` limits how many examples one 
 
 ### Previewing a reply
 
-`make reply-preview CONTACT=<contact id> [MODE=<mode name>]` (or
-`uv run python -m cyrano reply-preview ID [--mode NAME] [--show-prompt]`) builds the layered prompt
+`make reply-preview CONTACT=<contact id> [MODE=<mode name>] [PROACTIVE=1] [AT="YYYY-MM-DD HH:MM"]` (or
+`uv run python -m cyrano reply-preview ID [--mode NAME] [--show-prompt] [--proactive] [--at "YYYY-MM-DD HH:MM"]`) builds the layered prompt
 from the persona, the mode, the contact's profile facts, the examples and the last messages of a
 stored conversation (and the contact's summary, when there is one), asks the LLM for the owner's next message and prints it, followed by one stats
 line (model, tokens, examples and messages kept of offered, prompt characters). It lets the owner
@@ -866,7 +910,12 @@ database. `--show-prompt` prints the two messages of the prompt first, with a wa
 personal data. A reply of several lines prints one numbered line per message the autopilot would send
 (`[1/2] ...`, `[2/2] ...`); a one-line reply prints as before. If the model asks to hand the
 conversation over (a sensitive topic, see above), the first line is `needs owner (model signal)`
-instead of a reply. Errors print one line with the error
+instead of a reply. `--proactive` (`PROACTIVE=1`) asks for the proactive follow-up the assistant would
+write now after a silence ([Proactive messages](#proactive-messages)) and prints its parts, or
+`skip (model signal)` when the model would write nothing. `--at` (`AT=...`, read in the schedule
+profile's time zone) previews the reply as if it were that moment; inside the wrap-up time one more line
+before the stats line shows the context, for example `wrap-up: hard, 12 min, sleep`, and a bad value is
+one readable error line. Errors print one line with the error
 class and exit with 1. Layers, budget, cleaning and what the prompt contains: [.claude/docs/reply-generation.md](.claude/docs/reply-generation.md).
 
 ### Migrations
@@ -921,6 +970,12 @@ the default applies.
 | `AUTOPILOT_MAX_BURST_WAIT_SECONDS` | no | `30` | How long a burst of messages may go unanswered before a reply job answers its newest message instead of waiting for the contact to stop, from 1 to 300 and not below `AUTOPILOT_DEBOUNCE_SECONDS` |
 | `SUMMARY_ENABLED` | no | `true` | `false` stops the app's sweep from putting summary jobs on the queue; `summary update` still works. Restart the app after a change |
 | `SUMMARY_EVERY_MESSAGES` | no | `12` | How many new messages (both directions) after the last summary make a contact due for the next one, from 4 to 200 |
+| `WRAPUP_ENABLED` | no | `true` | `false` stops the wrap-up before the night or a busy window: replies then simply stop when the window begins. Nothing changes while `AUTOPILOT_ENABLED` is `false`. Not printed in the startup line. Restart the worker after a change |
+| `PROACTIVE_ENABLED` | no | `false` | `true` switches proactive messages on (CYR-23): the app's sweep enqueues follow-up jobs, the worker writes `proactive` rows and the sender sends them. Works only with `AUTOPILOT_ENABLED=true`. Restart the app and the worker after a change. Not printed in the startup line |
+| `PROACTIVE_AFTER_HOURS` | no | `6` | Hours of silence after your last message (or after the last resume) before a follow-up, from 1 to 72 |
+| `PROACTIVE_MAX_PER_SILENCE` | no | `2` | Most follow-ups after the contact's last message, from 1 to 5 |
+| `PROACTIVE_MIN_INTERVAL_HOURS` | no | `24` | Least hours between two follow-ups to one contact, from 1 to 168 |
+| `PROACTIVE_DAILY_LIMIT` | no | `20` | Most follow-ups in 24 hours over all contacts, from 1 to 200 |
 | `DEFAULT_CONTACT_GENDER` | no | `unknown` | The grammatical gender used for a contact when neither you, the conversation nor the name decided it: `female`, `male` or `unknown` (case does not matter). Any other value stops the app with a readable error. With `unknown` the Reply buttons wait for the gender. Not printed in the startup line |
 | `SEND_LIMIT_MINUTE` | no | `4` | Most outgoing messages per minute, all contacts together; at least 1, not above `SEND_LIMIT_HOUR` |
 | `SEND_LIMIT_HOUR` | no | `40` | Most outgoing messages per hour, all contacts together; at least 1, not above `SEND_LIMIT_DAY` |

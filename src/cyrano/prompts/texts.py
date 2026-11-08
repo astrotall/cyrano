@@ -18,6 +18,7 @@ LAYER_HEADERS = (
 )
 
 NEEDS_OWNER_SIGNAL = "NEEDS_OWNER"
+SKIP_SIGNAL = "SKIP"
 
 INSTRUCTIONS = f"""\
 You write the owner's next message in a Telegram chat, as the owner would write it.
@@ -78,6 +79,40 @@ NEXT_MESSAGE_REQUEST = (
     "Write the owner's next message in this chat now. Output only the message text."
 )
 LAYER_SEPARATOR = "\n\n"
+
+PROACTIVE_INSTRUCTIONS = (
+    "The contact has not written for {hours} {unit} since the last message of the dialogue. "
+    "Write ONE short natural message that continues the conversation or asks about something "
+    "the contact mentioned earlier (use the memory), without sounding needy, without apologising "
+    "for the silence, and without repeating a question that was already asked. If the "
+    "conversation ended naturally (a goodbye, good night, the contact said they are busy) or you "
+    "cannot continue without inventing facts about the owner, reply with exactly {signal} and "
+    "nothing else."
+)
+PROACTIVE_HOUR_UNIT = "hour"
+WRAPUP_LINE = "The owner becomes unavailable in about {minutes} {unit} ({reason})."
+WRAPUP_MINUTE_UNIT = "minute"
+WRAPUP_MINUTES_UNIT = "minutes"
+WRAPUP_SLEEP_REASON = "sleep"
+WRAPUP_SOFT_INSTRUCTIONS = (
+    "The owner becomes unavailable soon (see the line above the dialogue). Do not open new topics "
+    "and steer the conversation towards a natural end within the next few exchanges."
+)
+WRAPUP_HARD_INSTRUCTIONS = (
+    "The owner becomes unavailable in a few minutes. If the contact is waiting for an answer, "
+    "answer briefly first. Then close the conversation in the owner's own words and style: say "
+    "goodnight when the reason is sleep, otherwise say that you have to go and will write later. "
+    "Do not ask a new question."
+)
+WRAPUP_SKIP_RULE = (
+    "If the contact's last message is only a goodnight or a farewell and the owner has already "
+    "said goodnight or goodbye, reply with exactly {signal} and nothing else."
+)
+PROACTIVE_HOURS_UNIT = "hours"
+PROACTIVE_REQUEST = (
+    "Write the owner's next message in this chat now, continuing it after the silence, "
+    "or reply with exactly {signal}. Output only the message text."
+)
 
 SUMMARY_MEMORY_NOTE = (
     "Memory from earlier messages of this chat; it may be incomplete or outdated, "

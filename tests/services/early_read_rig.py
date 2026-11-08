@@ -83,6 +83,7 @@ def free_profile_with(**fields: object) -> ScheduleProfile:
 @dataclass
 class Switch:
     autopilot_enabled: bool = True
+    proactive_enabled: bool = True
     early_read_enabled: bool = True
 
 

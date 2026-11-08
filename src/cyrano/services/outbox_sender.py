@@ -29,12 +29,14 @@ from cyrano.domain.errors import (
 )
 from cyrano.domain.models import Contact
 from cyrano.domain.outbox import (
+    AUTOMATIC_SOURCES,
     CANCEL_REASON_SEND_REJECTED,
     CANCEL_REASON_STALE,
     CANCEL_REASON_SUPERSEDED,
     CAUSE_SEND_DEADLINE,
     ERROR_INTERRUPTED,
     ERROR_OUTSIDE_HOURS,
+    ERROR_OUTSIDE_WINDOW,
     ERROR_RATE_LIMITED,
     ERROR_UNCERTAIN,
     LIMIT_NOTICE_INTERVAL_SECONDS,
@@ -45,9 +47,16 @@ from cyrano.domain.outbox import (
     ScheduledMessage,
     SenderState,
 )
+from cyrano.domain.proactive import OUTSIDE_WINDOW_KIND
 from cyrano.domain.schedule import MAX_TYPING_SECONDS, ScheduleProfile
 from cyrano.services.early_read import EarlyReadGate, EarlyReadQueue
-from cyrano.services.humanization import ScheduleService, postponed_after, typing_seconds
+from cyrano.services.humanization import (
+    ScheduleService,
+    in_proactive_window,
+    postponed_after,
+    proactive_window_start_after,
+    typing_seconds,
+)
 from cyrano.services.message_transport import MessageTransport
 from cyrano.services.owner_notifier import OwnerNotifier
 from cyrano.services.repositories import (
@@ -291,7 +300,7 @@ class OutboxSender:
             return
         follower = row.follows_id is not None
         if (
-            row.source is OutboxSource.AUTOPILOT
+            row.source in AUTOMATIC_SOURCES
             and not follower
             and await self._hold_outside_hours(row, now)
         ):
@@ -336,7 +345,7 @@ class OutboxSender:
         await self._outbox.schedule_followers(row.id, self._clock() + timedelta(seconds=pause))
 
     async def _is_superseded(self, row: ScheduledMessage) -> bool:
-        if row.source is not OutboxSource.AUTOPILOT or row.follows_id is not None:
+        if row.source not in AUTOMATIC_SOURCES or row.follows_id is not None:
             return False
         if row.trigger_message_id is None:
             return False
@@ -362,13 +371,24 @@ class OutboxSender:
     async def _hold_outside_hours(self, row: ScheduledMessage, now: datetime) -> bool:
         block = await self._schedule.blocked_until(now)
         if block is None:
-            return False
-        profile = await self._schedule.get_profile()
-        send_at = postponed_after(block.end, profile, self._rng)
-        await self._outbox.reschedule(row.id, send_at, ERROR_OUTSIDE_HOURS)
+            if row.source is not OutboxSource.PROACTIVE:
+                return False
+            profile = await self._schedule.get_profile()
+            if in_proactive_window(now, profile):
+                return False
+            end, error, kind = (
+                proactive_window_start_after(now, profile),
+                ERROR_OUTSIDE_WINDOW,
+                OUTSIDE_WINDOW_KIND,
+            )
+        else:
+            profile = await self._schedule.get_profile()
+            end, error, kind = block.end, ERROR_OUTSIDE_HOURS, block.kind.value
+        send_at = postponed_after(end, profile, self._rng)
+        await self._outbox.reschedule(row.id, send_at, error)
         logger.info(
             "outbox row delayed outside the available hours",
-            extra={"row_id": row.id, "contact_id": row.contact_id, "kind": block.kind.value},
+            extra={"row_id": row.id, "contact_id": row.contact_id, "kind": kind},
         )
         return True
 

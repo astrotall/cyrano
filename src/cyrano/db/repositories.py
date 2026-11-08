@@ -16,6 +16,7 @@ from sqlalchemy import (
     literal,
     or_,
     select,
+    true,
     tuple_,
     update,
 )
@@ -83,6 +84,7 @@ from cyrano.domain.outbox import (
     ScheduledMessage,
     SenderState,
 )
+from cyrano.domain.proactive import DialogueTail, ProactiveDue
 from cyrano.domain.schedule import ScheduleProfile
 from cyrano.domain.style import ExamplesAddResult, Persona, StyleExample, StyleExampleCreate
 from cyrano.domain.summary import (
@@ -173,6 +175,15 @@ class SqlContactRepository:
                     row.reply_after = reply_after
                 await session.flush()
             return _status_change(row, changed=changed)
+
+    async def set_reply_after(self, contact_id: int, when: datetime) -> Contact:
+        _require_aware(when)
+        async with self._session_factory.begin() as session:
+            row = await _locked_contact(session, contact_id)
+            if row.reply_after is None or row.reply_after < when:
+                row.reply_after = when
+                await session.flush()
+            return Contact.model_validate(row)
 
     async def set_mode(self, contact_id: int, mode_id: int) -> Contact:
         async with self._session_factory.begin() as session:
@@ -1190,3 +1201,139 @@ class SqlSummaryRepository:
                 SummaryDue(contact_id=row[0], waiting=row[1], up_to_message_id=row[2])
                 for row in rows
             ]
+
+
+def _proactive_first_parts() -> list[ColumnElement[bool]]:
+    return [
+        ScheduledMessageRow.source == OutboxSource.PROACTIVE,
+        ScheduledMessageRow.state != OutboxState.CANCELLED,
+        ScheduledMessageRow.follows_id.is_(None),
+    ]
+
+
+def _newest_first(row: type[MessageRow]) -> tuple[ColumnElement[datetime], ColumnElement[int]]:
+    return row.created_at.desc(), row.id.desc()
+
+
+class SqlProactiveRepository:
+    def __init__(self, session_factory: SessionFactory) -> None:
+        self._session_factory = session_factory
+
+    async def dialogue_tail(self, contact_id: int) -> DialogueTail:
+        newest = select(MessageRow).where(MessageRow.contact_id == contact_id)
+        newest = newest.order_by(*_newest_first(MessageRow)).limit(1)
+        incoming = newest.where(MessageRow.direction == MessageDirection.INCOMING)
+        async with self._session_factory() as session:
+            last = await session.scalar(newest)
+            last_incoming = await session.scalar(incoming)
+            return DialogueTail(
+                last=None if last is None else Message.model_validate(last),
+                last_incoming=None
+                if last_incoming is None
+                else Message.model_validate(last_incoming),
+            )
+
+    async def count_proactive_after(self, contact_id: int, message_id: int) -> int:
+        reference = aliased(MessageRow)
+        trigger = aliased(MessageRow)
+        statement = (
+            select(func.count(ScheduledMessageRow.id))
+            .join(trigger, trigger.id == ScheduledMessageRow.trigger_message_id)
+            .join(reference, reference.id == message_id)
+            .where(
+                ScheduledMessageRow.contact_id == contact_id,
+                *_proactive_first_parts(),
+                tuple_(trigger.created_at, trigger.id) > tuple_(reference.created_at, reference.id),
+            )
+        )
+        async with self._session_factory() as session:
+            return await session.scalar(statement) or 0
+
+    async def newest_proactive_due_at(self, contact_id: int) -> datetime | None:
+        statement = select(func.max(ScheduledMessageRow.due_at)).where(
+            ScheduledMessageRow.contact_id == contact_id, *_proactive_first_parts()
+        )
+        async with self._session_factory() as session:
+            return await session.scalar(statement)
+
+    async def count_proactive_due_since(self, since: datetime) -> int:
+        _require_aware(since)
+        statement = select(func.count(ScheduledMessageRow.id)).where(
+            ScheduledMessageRow.due_at > since, *_proactive_first_parts()
+        )
+        async with self._session_factory() as session:
+            return await session.scalar(statement) or 0
+
+    async def contacts_due_for_proactive(
+        self,
+        *,
+        silent_since: datetime,
+        now: datetime,
+        max_per_silence: int,
+        interval_since: datetime,
+        limit: int,
+    ) -> list[ProactiveDue]:
+        _require_aware(silent_since)
+        _require_aware(now)
+        _require_aware(interval_since)
+        if limit <= 0:
+            return []
+        newest = _latest_messages_of_active_contacts()
+        incoming = aliased(MessageRow)
+        last_incoming = (
+            select(incoming.created_at, incoming.id)
+            .where(
+                incoming.contact_id == newest.contact_id,
+                incoming.direction == MessageDirection.INCOMING,
+            )
+            .order_by(*_newest_first(incoming))
+            .limit(1)
+            .lateral()
+        )
+        trigger = aliased(MessageRow)
+        silence_rows = (
+            select(func.count(ScheduledMessageRow.id))
+            .join(trigger, trigger.id == ScheduledMessageRow.trigger_message_id)
+            .where(
+                ScheduledMessageRow.contact_id == newest.contact_id,
+                *_proactive_first_parts(),
+                tuple_(trigger.created_at, trigger.id)
+                > tuple_(last_incoming.c.created_at, last_incoming.c.id),
+            )
+            .scalar_subquery()
+        )
+        recent_row = exists().where(
+            ScheduledMessageRow.contact_id == newest.contact_id,
+            *_proactive_first_parts(),
+            ScheduledMessageRow.due_at > interval_since,
+        )
+        silence_start = func.greatest(
+            newest.created_at, func.coalesce(ContactRow.reply_after, newest.created_at)
+        )
+        statement = (
+            select(newest.contact_id, newest.id)
+            .join(ContactRow, ContactRow.id == newest.contact_id)
+            .join(last_incoming, true())
+            .where(
+                newest.direction == MessageDirection.OUTGOING,
+                or_(
+                    ContactRow.proactive_not_before.is_(None),
+                    ContactRow.proactive_not_before <= now,
+                ),
+                silence_start <= silent_since,
+                silence_rows < max_per_silence,
+                ~recent_row,
+            )
+            .order_by(newest.created_at.desc(), newest.contact_id)
+            .limit(limit)
+        )
+        async with self._session_factory() as session:
+            rows = (await session.execute(statement)).all()
+            return [ProactiveDue(contact_id=row[0], last_message_id=row[1]) for row in rows]
+
+    async def set_proactive_not_before(self, contact_id: int, when: datetime) -> None:
+        _require_aware(when)
+        async with self._session_factory.begin() as session:
+            row = await _locked_contact(session, contact_id)
+            row.proactive_not_before = when
+            await session.flush()

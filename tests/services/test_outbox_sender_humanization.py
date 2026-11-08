@@ -116,6 +116,7 @@ LOG_STEPS = [SendStep.MARK_READ, SendStep.PAUSE, SendStep.TYPING, SendStep.SEND]
 @dataclass(frozen=True)
 class _Switch:
     autopilot_enabled: bool
+    proactive_enabled: bool = True
 
 
 class _RecordingSleep:

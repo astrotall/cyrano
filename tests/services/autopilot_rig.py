@@ -108,6 +108,7 @@ class SequenceLLMClient:
 @dataclass
 class Switch:
     autopilot_enabled: bool = True
+    proactive_enabled: bool = True
 
 
 @dataclass
@@ -159,6 +160,7 @@ class AutopilotRig:
         planner: HumanizationPlanner | None = None,
         max_tokens: int = BASE_MAX_TOKENS,
         max_burst_wait_seconds: int = DEFAULT_AUTOPILOT_MAX_BURST_WAIT_SECONDS,
+        wrapup_enabled: bool = False,
     ) -> ReplyJobRunner:
         return ReplyJobRunner(
             contacts=self.contacts,
@@ -175,6 +177,7 @@ class AutopilotRig:
             max_tokens=max_tokens,
             max_burst_wait_seconds=max_burst_wait_seconds,
             clock=self.clock,
+            wrapup_enabled=wrapup_enabled,
         )
 
     async def contact(self, status: ContactStatus = ContactStatus.ACTIVE) -> Contact:

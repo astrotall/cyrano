@@ -49,6 +49,18 @@ MAX_AUTOPILOT_MAX_BURST_WAIT_SECONDS = 300
 DEFAULT_SUMMARY_EVERY_MESSAGES = 12
 MIN_SUMMARY_EVERY_MESSAGES = 4
 MAX_SUMMARY_EVERY_MESSAGES = 200
+DEFAULT_PROACTIVE_AFTER_HOURS = 6
+MIN_PROACTIVE_AFTER_HOURS = 1
+MAX_PROACTIVE_AFTER_HOURS = 72
+DEFAULT_PROACTIVE_MAX_PER_SILENCE = 2
+MIN_PROACTIVE_MAX_PER_SILENCE = 1
+MAX_PROACTIVE_MAX_PER_SILENCE = 5
+DEFAULT_PROACTIVE_MIN_INTERVAL_HOURS = 24
+MIN_PROACTIVE_MIN_INTERVAL_HOURS = 1
+MAX_PROACTIVE_MIN_INTERVAL_HOURS = 168
+DEFAULT_PROACTIVE_DAILY_LIMIT = 20
+MIN_PROACTIVE_DAILY_LIMIT = 1
+MAX_PROACTIVE_DAILY_LIMIT = 200
 MIN_SEND_LIMIT = 1
 DEFAULT_SEND_LIMIT_MINUTE = 4
 DEFAULT_SEND_LIMIT_HOUR = 40
@@ -143,6 +155,7 @@ class Settings(BaseSettings):
     )
     autopilot_enabled: bool = False
     early_read_enabled: bool = True
+    wrapup_enabled: bool = True
     autopilot_debounce_seconds: int = Field(
         default=DEFAULT_AUTOPILOT_DEBOUNCE_SECONDS,
         ge=MIN_AUTOPILOT_DEBOUNCE_SECONDS,
@@ -164,6 +177,27 @@ class Settings(BaseSettings):
         default=DEFAULT_SUMMARY_EVERY_MESSAGES,
         ge=MIN_SUMMARY_EVERY_MESSAGES,
         le=MAX_SUMMARY_EVERY_MESSAGES,
+    )
+    proactive_enabled: bool = False
+    proactive_after_hours: int = Field(
+        default=DEFAULT_PROACTIVE_AFTER_HOURS,
+        ge=MIN_PROACTIVE_AFTER_HOURS,
+        le=MAX_PROACTIVE_AFTER_HOURS,
+    )
+    proactive_max_per_silence: int = Field(
+        default=DEFAULT_PROACTIVE_MAX_PER_SILENCE,
+        ge=MIN_PROACTIVE_MAX_PER_SILENCE,
+        le=MAX_PROACTIVE_MAX_PER_SILENCE,
+    )
+    proactive_min_interval_hours: int = Field(
+        default=DEFAULT_PROACTIVE_MIN_INTERVAL_HOURS,
+        ge=MIN_PROACTIVE_MIN_INTERVAL_HOURS,
+        le=MAX_PROACTIVE_MIN_INTERVAL_HOURS,
+    )
+    proactive_daily_limit: int = Field(
+        default=DEFAULT_PROACTIVE_DAILY_LIMIT,
+        ge=MIN_PROACTIVE_DAILY_LIMIT,
+        le=MAX_PROACTIVE_DAILY_LIMIT,
     )
     send_limit_minute: int = Field(default=DEFAULT_SEND_LIMIT_MINUTE, ge=MIN_SEND_LIMIT)
     send_limit_hour: int = Field(default=DEFAULT_SEND_LIMIT_HOUR, ge=MIN_SEND_LIMIT)

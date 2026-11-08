@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from pydantic import BaseModel, ConfigDict, Field
 
-from cyrano.domain.enums import ContactGender
+from cyrano.domain.enums import ContactGender, ReplyPurpose
 from cyrano.domain.llm import LLMMessage, LLMUsage
 
 MIN_HISTORY_MESSAGES = 4
@@ -16,6 +16,7 @@ FACT_BIO_LIMIT = 300
 REPLY_EMPTY_REASON = "empty after cleaning"
 REPLY_BOUNDARY_REASON = "contains the dialogue boundary"
 REPLY_HEADER_REASON = "contains a prompt layer header"
+REPLY_SKIP_REASON = "contains the skip signal outside a proactive message"
 
 
 class _Frozen(BaseModel):
@@ -38,12 +39,15 @@ class BuiltPrompt(_Frozen):
     messages_offered: int = Field(ge=0)
     messages_kept: int = Field(ge=0)
     characters: int = Field(ge=0)
+    purpose: ReplyPurpose = ReplyPurpose.REPLY
+    wrap_up: bool = False
 
 
 class GeneratedReply(_Frozen):
     text: str
     usage: LLMUsage
     needs_owner: bool = False
+    skipped: bool = False
     truncated: bool = False
     examples_offered: int = Field(ge=0)
     examples_kept: int = Field(ge=0)

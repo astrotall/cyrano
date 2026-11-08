@@ -3,9 +3,11 @@ from __future__ import annotations
 import asyncio
 from datetime import UTC, datetime
 from pathlib import Path
+from zoneinfo import ZoneInfo
 
 import httpx
 import pytest
+from sqlalchemy import text
 from sqlalchemy.engine import URL
 
 from cyrano import main as main_module
@@ -15,6 +17,7 @@ from cyrano.db.session import SessionFactory
 from cyrano.domain.enums import ContactGender
 from cyrano.domain.errors import LLMAuthError, LLMUnavailableError
 from cyrano.domain.models import ModeCreate
+from cyrano.domain.schedule import ScheduleProfile
 from cyrano.domain.summary import SUMMARY_VERSION, ContactSummary, StoredSummary, SummaryCursor
 from cyrano.llm.factory import LLMClientFactory
 from cyrano.main import main
@@ -22,10 +25,17 @@ from cyrano.prompts.texts import DIALOGUE_BOUNDARY, SUMMARY_HEADER, SUMMARY_MEMO
 from cyrano.reply_cli import (
     NEEDS_OWNER_LINE,
     PERSONAL_DATA_WARNING,
+    PreviewClock,
     ReplyPreviewCommand,
     ReplyPreviewRequest,
+    reply_preview_request,
 )
 from cyrano.services.gender import GenderResolver
+from cyrano.services.humanization import ScheduleService
+from cyrano.services.persona_service import PersonaService
+from cyrano.services.prompt_builder import PromptBuilder
+from cyrano.services.reply_generator import ReplyGenerator
+from cyrano.services.style_examples import ExampleSelector
 from tests.db.conftest import execute
 from tests.llm.fakes import Script, completion_response, error_response
 from tests.privacy import FAKE_TELEGRAM_ID, assert_absent
@@ -42,6 +52,7 @@ from tests.reply_db import (
     row_counts,
 )
 from tests.services.fakes import ScriptedLLMClient
+from tests.services.outbox_fakes import InMemoryScheduleProfiles
 
 MODEL = "fake-model"
 GENDER_LINE_UNKNOWN = "gender: unknown (unknown)"
@@ -671,3 +682,227 @@ async def test_the_gender_line_never_carries_a_name_or_a_message(
     assert_absent(USERNAME_MARKER, lines[1])
     assert_absent(MESSAGE_MARKER, lines[1])
     assert_absent("Contactfirst", lines[1])
+
+
+SKIP_PREVIEW_LINE = "skip (model signal)"
+COUNT_STATEMENTS = (
+    "SELECT count(*) FROM scheduled_messages",
+    "SELECT count(*) FROM messages",
+    "SELECT count(*) FROM contacts",
+)
+PROACTIVE_PART_ONE = "proactive-part-one-zq"
+PROACTIVE_PART_TWO = "proactive-part-two-zq"
+
+
+async def test_the_proactive_preview_prints_the_parts_and_the_stats(
+    repos: Repositories, session_factory: SessionFactory, capsys: pytest.CaptureFixture[str]
+) -> None:
+    contact = await ready_contact(repos)
+    client = ScriptedLLMClient(f"{PROACTIVE_PART_ONE}\n{PROACTIVE_PART_TWO}")
+    before = await row_counts_of(session_factory)
+
+    code = await _command(repos, client).run(ReplyPreviewRequest(contact.id, proactive=True))
+
+    captured = capsys.readouterr()
+    lines = captured.out.splitlines()
+    assert code == 0
+    assert captured.err == ""
+    assert lines[:2] == [f"[1/2] {PROACTIVE_PART_ONE}", f"[2/2] {PROACTIVE_PART_TWO}"]
+    assert lines[2] == GENDER_LINE_UNKNOWN
+    assert lines[3].startswith(STATS_PATTERN)
+    assert "reply with exactly SKIP" in client.calls[0][0][1].content
+    assert "reply with exactly SKIP" in client.calls[0][0][0].content
+    assert await row_counts_of(session_factory) == before
+
+
+@pytest.mark.parametrize("raw", ["SKIP", "`skip`", f"{REPLY_MARKER} SKIP"])
+async def test_the_proactive_preview_prints_the_skip_line_and_exits_zero(
+    repos: Repositories, capsys: pytest.CaptureFixture[str], raw: str
+) -> None:
+    contact = await ready_contact(repos)
+
+    code = await _command(repos, ScriptedLLMClient(raw)).run(
+        ReplyPreviewRequest(contact.id, proactive=True)
+    )
+
+    captured = capsys.readouterr()
+    lines = captured.out.splitlines()
+    assert code == 0
+    assert lines[0] == SKIP_PREVIEW_LINE
+    assert lines[1] == GENDER_LINE_UNKNOWN
+    assert lines[2].startswith(STATS_PATTERN)
+    assert len(lines) == 3
+    assert_absent(REPLY_MARKER, captured.out)
+
+
+async def test_a_skip_in_a_normal_preview_is_a_refused_reply(
+    repos: Repositories, capsys: pytest.CaptureFixture[str]
+) -> None:
+    contact = await ready_contact(repos)
+
+    code = await _command(repos, ScriptedLLMClient("SKIP")).run(ReplyPreviewRequest(contact.id))
+
+    captured = capsys.readouterr()
+    assert code == 1
+    assert captured.out == ""
+    assert "ReplyInvalid" in captured.err
+
+
+def test_the_command_line_reads_the_proactive_flag() -> None:
+    args = main_module._parse_args(["reply-preview", "12", "--proactive"])
+    plain = main_module._parse_args(["reply-preview", "12"])
+
+    assert reply_preview_request(args) == ReplyPreviewRequest(12, proactive=True)
+    assert reply_preview_request(plain) == ReplyPreviewRequest(12)
+
+
+async def row_counts_of(session_factory: SessionFactory) -> list[int]:
+    counts = []
+    async with session_factory() as session:
+        for statement in COUNT_STATEMENTS:
+            counts.append(int((await session.execute(text(statement))).scalar_one()))
+    return counts
+
+
+BERLIN_ZONE = ZoneInfo("Europe/Berlin")
+BAD_AT_VALUES = ["tomorrow-zq", "2026-11-04", "2026-13-04 10:00", "04.11.2026 10:00"]
+WRAPUP_PROFILE = ScheduleProfile.model_validate(
+    {
+        "version": 1,
+        "timezone": "Europe/Berlin",
+        "night": {"start": ["01:00", "01:00"]},
+        "busy": [{"days": ["wed"], "from": "14:00", "to": "15:00", "label": "лекция"}],
+    }
+)
+
+
+def _wrapup_command(
+    repos: Repositories, client: ScriptedLLMClient, *, wrapup_enabled: bool = True
+) -> ReplyPreviewCommand:
+    clock = PreviewClock(lambda: datetime(2026, 11, 4, 9, 0, tzinfo=UTC))
+    generator = ReplyGenerator(
+        contacts=repos.contacts,
+        messages=repos.messages,
+        modes=repos.modes,
+        persona=PersonaService(repos.personas),
+        examples=ExampleSelector(repos.style_examples, 8),
+        gender=GenderResolver(),
+        builder=PromptBuilder(
+            budget_chars=BIG_BUDGET, timezone=ZoneInfo("Europe/Berlin"), clock=clock
+        ),
+        client=client,
+        history_limit=HISTORY_LIMIT,
+    )
+    return ReplyPreviewCommand(
+        generator,
+        MODEL,
+        repos.contacts,
+        GenderResolver(),
+        schedule=ScheduleService(InMemoryScheduleProfiles(WRAPUP_PROFILE), "UTC"),
+        clock=clock,
+        wrapup_enabled=wrapup_enabled,
+    )
+
+
+@pytest.mark.parametrize(
+    ("at", "line"),
+    [
+        ("2026-11-04 00:48", "wrap-up: hard, 12 min, sleep"),
+        ("2026-11-04 00:30", "wrap-up: soft, 30 min, sleep"),
+        ("2026-11-04 13:30", "wrap-up: soft, 30 min, лекция"),
+    ],
+)
+async def test_the_preview_prints_the_wrapup_line_before_the_stats(
+    repos: Repositories, capsys: pytest.CaptureFixture[str], at: str, line: str
+) -> None:
+    contact = await ready_contact(repos)
+    client = ScriptedLLMClient("спокойной ночи")
+
+    code = await _wrapup_command(repos, client).run(ReplyPreviewRequest(contact.id, at=at))
+
+    lines = capsys.readouterr().out.splitlines()
+    assert code == 0
+    assert lines[1] == GENDER_LINE_UNKNOWN
+    assert lines[2] == line
+    assert lines[3].startswith(STATS_PATTERN)
+    user = client.calls[0][0][1].content
+    assert user.splitlines()[0].startswith(f"Current local time: Wednesday, {at} ")
+    assert "The owner becomes unavailable in about" in user.splitlines()[1]
+
+
+@pytest.mark.parametrize("at", ["2026-11-04 03:00", "2026-11-04 14:30", "2026-11-04 18:00"])
+async def test_a_time_inside_or_far_from_a_window_gives_no_wrapup_line(
+    repos: Repositories, capsys: pytest.CaptureFixture[str], at: str
+) -> None:
+    contact = await ready_contact(repos)
+    client = ScriptedLLMClient("fine")
+
+    await _wrapup_command(repos, client).run(ReplyPreviewRequest(contact.id, at=at))
+
+    out = capsys.readouterr().out
+    assert "wrap-up:" not in out
+    assert "becomes unavailable" not in client.calls[0][0][1].content
+
+
+async def test_with_the_switch_off_the_preview_gives_no_wrapup_line(
+    repos: Repositories, capsys: pytest.CaptureFixture[str]
+) -> None:
+    contact = await ready_contact(repos)
+
+    await _wrapup_command(repos, ScriptedLLMClient("fine"), wrapup_enabled=False).run(
+        ReplyPreviewRequest(contact.id, at="2026-11-04 00:48")
+    )
+
+    assert "wrap-up:" not in capsys.readouterr().out
+
+
+async def test_a_skip_inside_the_wrapup_time_prints_the_skip_line(
+    repos: Repositories, capsys: pytest.CaptureFixture[str]
+) -> None:
+    contact = await ready_contact(repos)
+
+    code = await _wrapup_command(repos, ScriptedLLMClient("SKIP")).run(
+        ReplyPreviewRequest(contact.id, at="2026-11-04 00:48")
+    )
+
+    assert code == 0
+    assert capsys.readouterr().out.splitlines()[0] == SKIP_PREVIEW_LINE
+
+
+@pytest.mark.parametrize(
+    "at", ["tomorrow-zq", "2026-11-04", "2026-13-04 10:00", "04.11.2026 10:00"]
+)
+async def test_a_bad_at_is_one_readable_line_and_exit_one(
+    repos: Repositories, capsys: pytest.CaptureFixture[str], at: str
+) -> None:
+    contact = await ready_contact(repos)
+    client = ScriptedLLMClient("fine")
+
+    code = await _wrapup_command(repos, client).run(ReplyPreviewRequest(contact.id, at=at))
+
+    captured = capsys.readouterr()
+    assert code == 1
+    assert captured.out == ""
+    assert captured.err == 'reply-preview failed: bad --at, use "YYYY-MM-DD HH:MM"\n'
+    assert client.calls == []
+
+
+async def test_the_preview_with_at_writes_nothing(
+    repos: Repositories, session_factory: SessionFactory
+) -> None:
+    contact = await ready_contact(repos)
+    before = await row_counts_of(session_factory)
+
+    await _wrapup_command(repos, ScriptedLLMClient("SKIP")).run(
+        ReplyPreviewRequest(contact.id, at="2026-11-04 00:48")
+    )
+
+    assert await row_counts_of(session_factory) == before
+    stored = await repos.contacts.get_by_id(contact.id)
+    assert stored is not None and stored.reply_after is None
+
+
+def test_the_command_line_reads_the_at_option() -> None:
+    args = main_module._parse_args(["reply-preview", "12", "--at", "2026-11-04 00:48"])
+
+    assert reply_preview_request(args) == ReplyPreviewRequest(12, at="2026-11-04 00:48")

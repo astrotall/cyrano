@@ -326,6 +326,17 @@ profile imported before the field existed uses the default, and `make schedule-s
 fails or is cancelled, or the contact writes in between, the rest of that reply is not sent. Every part
 counts toward the send limits.
 
+**The early read (CYR-44).** While a conversation is lively, a message of an `active` contact is marked
+read soon after it arrives, not only when the reply starts, as a person sitting in the chat does. The
+delay is drawn from `early_read_seconds` in the schedule profile (a `[lo, hi]` pair of whole seconds, 0 to 30,
+default `[0, 1]`; `[0, 0]` marks it read at once; `make schedule-show` prints `early read: 0-1 s`; a profile
+imported before the field existed uses the default). Only the read mark moves earlier: typing and the
+pre-send part stay as they were. It needs `AUTOPILOT_ENABLED=true` and `EARLY_READ_ENABLED` (on by
+default), a running autopilot and sender, an ongoing conversation and a moment outside the night and busy
+windows; otherwise a message stays unread until its reply, as before. It is not a message: it is not
+counted by the send limits and never touches the outbox. A request lives only in the app's memory, so a
+restart drops the ones that were waiting.
+
 Without an imported file the built-in default profile is used: night from 01:00-02:00 until 09:00, on
 Saturday and Sunday until 11:00-12:00, no busy windows, in `TIMEZONE`.
 
@@ -354,7 +365,8 @@ sent, all its parts included. The worker checks the contact, the message (not ol
 from before a resume, not answered yet), runs the stop-trigger check on the whole burst, generates the
 reply with your persona and examples, asks the planner for the send time and writes an `autopilot`
 row, or one row per line of a multi-line reply; the app's sender sends them with the usual guard,
-limits, read mark and typing. A sweep in the app
+limits, read mark and typing. In a lively conversation the chat is marked read within a second or so of
+each message ([the early read](#humanization-and-the-schedule)). A sweep in the app
 every minute picks up messages whose job was lost, and those that arrived while a contact was still
 waiting for your decision.
 
@@ -545,6 +557,7 @@ What exists now:
 │   │   ├── outbox_service.py     # OutboxService: text validation, guard, row
 │   │   ├── send_limiter.py       # the six send limits, counted from stored messages
 │   │   ├── outbox_sender.py      # OutboxSender: the only caller of the transport
+│   │   ├── early_read.py         # EarlyReadQueue, EarlyReadGate, EarlyReadScheduler: the early read requests
 │   │   ├── humanization.py       # the send time planner, ScheduleService, HumanizationPlanner
 │   │   ├── schedule_files.py     # validating and importing the schedule file
 │   │   ├── message_transport.py  # MessageTransport Protocol: send_text, show_typing, mark_read
@@ -878,6 +891,7 @@ the default applies.
 | `REPLY_HISTORY_MESSAGES` | no | `20` | How many last messages of a contact go into the reply prompt, from 1 to 100 |
 | `REPLY_PROMPT_BUDGET_CHARS` | no | `24000` | Character budget of the whole reply prompt, from 4000 to 200000; over it, examples and then the oldest messages are dropped |
 | `AUTOPILOT_ENABLED` | no | `false` | `true` switches the autopilot on: the app enqueues reply jobs, the worker writes `autopilot` rows and the sender sends them. Restart the app and the worker after a change. The owner's test commands do not consult this switch; the status check applies to both |
+| `EARLY_READ_ENABLED` | no | `true` | `false` stops the early read mark (CYR-44): a message of an `active` contact is then marked read only when its reply starts. It does nothing while `AUTOPILOT_ENABLED` is `false`. The delay is the schedule profile's `early_read_seconds`. Restart the app after a change |
 | `AUTOPILOT_DEBOUNCE_SECONDS` | no | `12` | Delay of a reply job after an incoming message when the conversation is not ongoing, from 0 to 300; the sweep waits twice as long before it enqueues a lost job |
 | `AUTOPILOT_DEBOUNCE_ONGOING_SECONDS` | no | `4` | Delay of a reply job in an ongoing conversation (the last activity before the burst is less than the schedule profile's `ongoing_window_minutes` old), from 0 to 300 and not above `AUTOPILOT_DEBOUNCE_SECONDS` |
 | `AUTOPILOT_MAX_BURST_WAIT_SECONDS` | no | `30` | How long a burst of messages may go unanswered before a reply job answers its newest message instead of waiting for the contact to stop, from 1 to 300 and not below `AUTOPILOT_DEBOUNCE_SECONDS` |

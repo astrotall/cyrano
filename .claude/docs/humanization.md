@@ -9,6 +9,8 @@ account should stay within safe behaviour. Two parts do this:
   `schedule plan` command calls it too.
 - **The pre-send part of the sender** decides **how** it goes out: read mark, a pause, typing, then
   the message. It runs for every row of the sender, the owner's test rows included.
+- **The early read** (CYR-44) decides **when an incoming message is marked read** while a conversation is
+  lively: soon after it arrives, not only when the reply starts ([below](#the-early-read)).
 
 Since CYR-36 a reply the model wrote as several lines goes out as up to three messages, one per part,
 with a short pause between them ([multi-part replies](outbox-and-sender.md#multi-part-replies)). The rule
@@ -37,6 +39,7 @@ refused. Errors give the JSON path and the rule, never a value and never the unk
 | `typing.max_seconds` | `25` | Integer, `min_seconds` to 60 |
 | `postponed_spread_minutes` | `[1, 15]` | `[lo, hi]`, integers, 0 to 120 |
 | `split_pause_seconds` | `[3, 8]` | `[lo, hi]`, integers, 0 to 60 (`MAX_SPLIT_PAUSE_SECONDS`). The pause between two parts of one reply, counted from the actual send of the earlier part (CYR-36). A profile stored before the field existed reads with the default; no migration |
+| `early_read_seconds` | `[0, 1]` | `[lo, hi]`, integers, 0 to 30 (`MAX_EARLY_READ_SECONDS`), `lo <= hi`; `[0, 0]` means strictly immediate. The delay of the early read mark, drawn uniformly (a float) from the range with the injected generator (CYR-44). A profile stored before the field existed reads with the default; no migration |
 
 A sample with invented values: `examples/schedule.sample.json`. The worked examples below use it.
 
@@ -154,6 +157,65 @@ have not opened. Details and the error table: [outbox-and-sender.md](outbox-and-
 and the send goes on, because the reply matters more than the indicator. Two failures are not cosmetic,
 because they are about the account: `SendFloodWait` and `SendAccountBlocked`, handled exactly as on a
 send.
+
+## The early read
+
+Without it, a message stays unread until the reply starts: the read mark is the first step of the
+pre-send part, which comes after the debounce, the reaction delay and the claim. In a lively
+conversation that is many seconds in which the contact sees their message unread while a person sitting
+in the chat would have read it at once. Since CYR-44 the chat is marked read soon after the message
+arrives, and only the read mark moves: typing and the pre-send sequence stay exactly where they are. The
+read mark of the pre-send part still happens later and is harmless (a second read of a chat that is
+already read shows nothing).
+
+**It is a request, then an execution.** The intake registers a request, the sender's second coroutine
+executes it. The registry (`services/early_read.py`) never touches the transport; only
+`services/outbox_sender.py` calls `mark_read` ([outbox-and-sender.md](outbox-and-sender.md#the-early-read-coroutine)).
+
+**Registered only when every condition holds**, each read fresh at that moment:
+
+| Condition | Where it comes from |
+| --- | --- |
+| `EARLY_READ_ENABLED` is true | Setting, default on |
+| `AUTOPILOT_ENABLED` is true | Setting; nothing happens with the autopilot off |
+| The autopilot is neither stopped nor in a cooldown pause | `autopilot_state` |
+| The sender is neither paused (flood wait) nor stopped (account problem) | `sender_state` |
+| The contact exists and is `active` | A contact just handed over, paused or ignored is no longer active |
+| The conversation is ongoing | The same rule as the adaptive debounce: `HumanizationPlanner.conversation_ongoing`, which calls `burst_is_ongoing` ([the ongoing rule](#the-planner)); there is no second copy |
+| The moment is outside every blocked window | `ScheduleService.blocked_until(now)` is nothing: not in the night window, not in a busy window |
+
+The intake asks the scheduler last: after the stop-trigger gate and after the autopilot scheduler, so a
+contact that the gate handed over is no longer active and gets no request. Any failure of the scheduler (a
+repository error, an unreadable profile, a message missing from the history) is caught, logged with the
+class name only and never breaks the intake.
+
+**The request.** One pending request per contact: a second request for a contact that already has one is
+ignored and does not move its due time, so a burst of five messages gives one read mark. The due time is
+the moment of the message plus `uniform(early_read_seconds)`. Between two early reads of one contact
+there are at least 5 seconds (`EARLY_READ_MIN_INTERVAL_SECONDS`): a request registered or taken sooner
+than that after the previous execution is deferred to the previous time plus the interval. The registry
+is in memory only: a restart loses the pending requests, which is harmless because the reply path still
+marks the chat read.
+
+**Execution** (every 0.5 s, `EARLY_READ_POLL_INTERVAL`): take the due requests; check again everything
+except the pace of the conversation (the settings, the autopilot, the sender, the contact, the blocked
+windows), because the world may have changed in the few seconds since the message; call `mark_read` under
+a 15 s deadline. A failed check skips the request. A flood wait pauses the whole sender with the usual rules
+and notice and drops the request. An account-level error stops the sender. Any other failure is cosmetic:
+logged with the class name, counted and dropped. The early read is not a message: no send limit counts it
+and the outbox never sees it.
+
+Examples with the default `[0, 1]` and a profile whose busy window is Tuesday 09:00 to 10:30:
+
+| Situation | Result |
+| --- | --- |
+| Tue 15:00:00, the contact answered the owner at 14:59, a new message arrives | Read mark at 15:00:00 to 15:00:01 (the executor polls every 0.5 s, so it may land up to 0.5 s later) |
+| Tue 15:00:00, the contact writes again at 15:00:02, after the first read mark was made at 15:00:00.4 | A new request is registered and deferred to the first execution plus 5 s, 15:00:05.4 |
+| Tue 15:00:00, five messages within 0.2 s, before the executor polled | One request and one read mark; a message after the first read mark waits out the 5 s interval |
+| Tue 15:00:00, the first message after two hours of silence | No request; the chat is marked read when the reply starts, as before |
+| Tue 09:30, a message in an ongoing conversation | No request: inside the busy window |
+| Tue 15:00:00, the message contains a meeting proposal | Handed over, contact paused, no request |
+| Tue 15:00:00, the request is due, and at 15:00:00.2 the owner pauses the contact | Skipped at execution: not active |
 
 ## The safety net
 

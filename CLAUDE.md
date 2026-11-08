@@ -55,6 +55,10 @@ What exists now:
   behind `SUMMARY_ENABLED`, default on), the worker distils the next chunk of the dialogue into a
   structured, sanitised summary on the contact with a compare-and-set on its cursor, and the reply
   generator shows it as the summary layer, `told_about_owner` included.
+- The early read (CYR-44), behind `EARLY_READ_ENABLED` (default on) and a running autopilot: in a lively
+  conversation of an `active` contact, outside the night and busy windows, the intake registers a request
+  and the sender's second coroutine marks the chat read soon after the message (the profile's
+  `early_read_seconds`, default 0 to 1 s); only the read mark moves earlier.
 - The owner's commands: `login`, `llm-check`, `persona`, `examples`, `reply-preview`, `outbox`,
   `schedule`, `stop-check`, `autopilot` and `summary` (the list is in the README).
 
@@ -152,6 +156,7 @@ Changing any of these is a large change (see Workflow expectations). Reasons:
 │   │                             outbox_service (validation and enqueue), outbox_sender (the one sender),
 │   │                             message_transport (the write Protocol of the sender), owner_notifier (the owner notice Protocol),
 │   │                             humanization (the send time planner and the schedule service),
+│   │                             early_read (the early read requests: queue, gate, scheduler),
 │   │                             schedule_files (the schedule file), manual_intervention (the manual message detector),
 │   │                             manual_pause_notifier (the manual pause notice Protocol),
 │   │                             stop_triggers (the pure detector), hand_over (pause, cancel and one notice),
@@ -349,6 +354,15 @@ stored summary in `ReplyGenerator`, `ArqSummaryJobQueue` and `ArqReplyJobQueue.p
 `update_contact_summary` and the updater in the worker composition, the optional `SUMMARY_ENABLED` and
 `SUMMARY_EVERY_MESSAGES` settings, `summary_cli.py` with the `summary` commands and their Makefile
 targets, the guide `summaries.md`, and the tests, with the new scans in `tests/test_summary_writers.py`.
+CYR-44 added the early read mark: `services/early_read.py` (`EarlyReadQueue`, `EarlyReadGate`,
+`EarlyReadScheduler`, none of which can reach the transport), `domain/early_read.py`
+(`EarlyReadRequest`, `EARLY_READ_MIN_INTERVAL_SECONDS`), the `EarlyReadReason` and `EarlyReadOutcome` enums,
+the optional `early_read` argument of `IntakeService` (asked last), the second coroutine
+`OutboxSender.run_early_reads` (started by `main.py` as its own task right after the sender's and cancelled
+before it; `_handle_flood_wait` and `_stop_for_account` take an optional row, `SenderNotices` gained
+`flood_wait_early_read`), the optional `EARLY_READ_ENABLED` setting, the profile field `early_read_seconds`
+(default `[0, 1]`, 0 to 30) with its `schedule show` line and the sample, and the tests, with the new scans in
+`tests/test_one_sender.py` and `tests/test_ongoing_rule.py`.
 
 ## Detailed guides
 

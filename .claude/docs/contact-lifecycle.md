@@ -93,7 +93,7 @@ otherwise the `default` mode. If `default` itself is missing or disabled they ra
 | 7 | When the job runs it re-checks the switch, the autopilot state, the status, `reply_after`, the age, supersession and an existing row, runs the stop-trigger detector on the burst again, and only then generates; anything but `active` ends the job with no reply. The model signal hands the contact over | CYR-17, CYR-20 |
 | 8 | The layered prompt is built: persona, mode fragment with few-shot examples, contact summary, last N messages | CYR-14, CYR-15, CYR-16, CYR-25 |
 | 9 | The LLM is called through the LLM interface; the response is validated | CYR-13 |
-| 10 | The job asks the planner for the send time ([humanization.md](humanization.md)) and writes an `autopilot` row, or a chain of up to three when the reply has several lines, one message per line (CYR-36). The sender sends it: status guard, FloodWait handling, rate limits, the read mark, typing and quiet hours, the parts in order (see [outbox-and-sender.md](outbox-and-sender.md)) | CYR-19, CYR-22, CYR-18, CYR-17, CYR-36 |
+| 10 | The job asks the planner for the send time ([humanization.md](humanization.md)) and writes an `autopilot` row, or a chain of up to three when the reply has several lines, one message per line (CYR-36). The sender sends it: status guard, FloodWait handling, rate limits, the read mark, typing and quiet hours, the parts in order (see [outbox-and-sender.md](outbox-and-sender.md)). In a lively conversation the chat was already marked read soon after the message by the early read ([humanization.md](humanization.md#the-early-read)); the read mark of the pre-send part then repeats it harmlessly | CYR-19, CYR-22, CYR-18, CYR-17, CYR-36, CYR-44 |
 | 11 | Background: contact summaries of `active` and `paused` contacts every `SUMMARY_EVERY_MESSAGES` messages (exists, [summaries.md](summaries.md)); proactive messages and reminders for undecided cards (planned) | CYR-25, CYR-23, CYR-24 |
 
 Stop-triggers are detected three times: by the pattern detector on the incoming text (step 5), by
@@ -105,7 +105,9 @@ threshold.
 
 Exists. The userbot listens on the second account and passes every real private message to
 `IntakeService.handle` in `services/intake.py`. The intake only listens and stores: it never sends,
-never marks anything as read and never answers anyone ([S2](safety-rules.md)).
+never marks anything as read itself and never answers anyone ([S2](safety-rules.md)). Since CYR-44 it
+registers a request for an early read mark as its last step for an `active` contact; the sender's second
+coroutine executes it ([humanization.md](humanization.md#the-early-read)).
 
 What counts as a message to register: an incoming message in a private chat with a real user.
 Rejected without any effect, only counted in a DEBUG log: own (outgoing) messages, groups,

@@ -250,7 +250,8 @@ async def test_show_says_when_the_default_profile_is_in_use(
     assert "read pause: 1-3 s" in out
     assert "typing: 5 characters per second, 2-25 s" in out
     assert "postponed spread: 1-15 min" in out
-    assert out.splitlines()[-1] == "split pause: 3-8 s"
+    assert "split pause: 3-8 s" in out
+    assert out.splitlines()[-1] == "early read: 0-1 s"
 
 
 async def test_show_prints_the_stored_profile(
@@ -276,6 +277,28 @@ async def test_show_prints_a_stored_split_pause(
     assert await commands.run(ScheduleRequest(action="show")) == 0
 
     assert "split pause: 5-9 s" in capsys.readouterr().out
+
+
+async def test_show_prints_a_stored_early_read_range(
+    commands: ScheduleCommands, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    await commands.run(_import(_file(tmp_path, {**VALID, "early_read_seconds": [0, 0]})))
+    capsys.readouterr()
+
+    assert await commands.run(ScheduleRequest(action="show")) == 0
+
+    assert "early read: 0-0 s" in capsys.readouterr().out
+
+
+async def test_the_sample_file_imports_and_shows_its_early_read_range(
+    commands: ScheduleCommands, capsys: pytest.CaptureFixture[str]
+) -> None:
+    assert await commands.run(_import(SAMPLE)) == 0
+    capsys.readouterr()
+
+    assert await commands.run(ScheduleRequest(action="show")) == 0
+
+    assert "early read: 0-1 s" in capsys.readouterr().out
 
 
 async def test_check_says_free_at_a_free_moment(

@@ -106,7 +106,9 @@ message and so counts toward the send limits.
 ## The sender
 
 `services/outbox_sender.py`, `OutboxSender`, a background task of the app. Its module is the only
-one in `src` that calls the transport. Strictly sequential: one row at a time, one row per poll.
+one in `src` that calls the transport. The row loop is strictly sequential: one row at a time, one row
+per poll. Since CYR-44 the same class has a second coroutine, `run_early_reads`, that marks chats read
+and is independent of the row loop ([the early read coroutine](#the-early-read-coroutine)).
 
 | Constant | Value | Meaning |
 | --- | --- | --- |
@@ -117,6 +119,9 @@ one in `src` that calls the transport. Strictly sequential: one row at a time, o
 | `PRE_SEND_DEADLINE_MARGIN` | 15 s | Added to the profile's `typing.max_seconds` for the deadline of the pre-send part; the read pause (at most 10 s) fits inside it |
 | `LONGEST_PRE_SEND` | 75 s | The longest legal pre-send part: `MAX_TYPING_SECONDS` (60 s) plus the margin |
 | `SENDING_STALE_MARGIN` | 20 s | Keeps a healthy claim from ever counting as stuck; a test asserts the relation |
+| `EARLY_READ_POLL_INTERVAL` | 0.5 s | Pause between polls of the early read coroutine (CYR-44) |
+| `EARLY_READ_DEADLINE` | 15 s | Deadline of one early read mark |
+| `EARLY_READ_MIN_INTERVAL_SECONDS` (`domain/early_read.py`) | 5 s | Least time between two early reads of one contact |
 | `FLOOD_WAIT_MARGIN` | 5 s | Added to the wait Telegram asks for |
 | `FLOOD_WAIT_NOTIFY_ABOVE` | 60 s | A longer wait notifies the owner |
 | `ROW_STALE_AFTER_SECONDS` | 6 h | A row whose `due_at` is older than this is cancelled, not sent |
@@ -257,6 +262,56 @@ It runs under one deadline, the profile's `typing.max_seconds` + `PRE_SEND_DEADL
 | Cancellation (shutdown) | Leaves the row in `sending`, for the next startup sweep, as for a send |
 | The guard refuses after it | The row is cancelled with the reason; nothing is sent |
 
+### The early read coroutine
+
+Since CYR-44, `OutboxSender.run_early_reads()` is a second coroutine of the same class, started by
+`main.py` as its own task right after the row loop's task. It marks the chat of an `active` contact read
+soon after a message of a lively conversation, before the reply's own pre-send read mark. Why it lives
+here: only this module may call the transport (S2), so the intake side only registers a **request** in
+`services/early_read.py` (`EarlyReadQueue`, `EarlyReadGate`, `EarlyReadScheduler`, none of which can reach
+the transport, and a scan asserts it), and this coroutine **executes** it. The conditions of the request
+and the profile field `early_read_seconds` are in [humanization.md](humanization.md#the-early-read).
+
+Every poll (`EARLY_READ_POLL_INTERVAL`, with the injected sleep and clock):
+
+1. `take_due(now)`: the due requests, in due order, removed from the queue. A request that would fall
+   within 5 s of the previous early read of its contact is deferred, not taken.
+2. For each request, the gate checks again what the scheduler checked, except the pace of the
+   conversation: `EARLY_READ_ENABLED`, `AUTOPILOT_ENABLED`, the autopilot state (stopped or cooling
+   down), the sender state (paused or stopped), the contact (exists and `active`) and the blocked windows
+   (night, busy). A failed check skips the request with its reason.
+3. The execution time is remembered for the interval of that contact, then `mark_read(tg_id)` runs under
+   `EARLY_READ_DEADLINE`.
+
+| What happens | What the sender does |
+| --- | --- |
+| The read succeeds | Outcome `ok` |
+| A check fails | Outcome `skipped`, with the reason (`disabled`, `autopilot_off`, `autopilot_stopped`, `autopilot_paused`, `sender_stopped`, `sender_paused`, `contact_missing`, `contact_not_active`, `blocked_window`); nothing is called |
+| `SendFloodWait` | Outcome `dropped`. Exactly as on a send: `pause_until` through `_handle_flood_wait`, the same margin and the same threshold for the notice; the notice has its own text without a row (`flood_wait_early_read`). The request is not retried |
+| `SendAccountBlocked` | Outcome `dropped`. Exactly as on a send: `stop` through `_stop_for_account`, one notice for a new stop. The request is not retried |
+| Any other failure, the deadline included | Outcome `failed`: cosmetic, logged with the class name, counted, dropped. The contact is never paused for it |
+| Cancellation (shutdown) | Nothing is left half done and nothing is retried; no outcome line for the interrupted request |
+
+**It is not a message.** It is not counted by the send limits, never touches the outbox and never
+creates a row, a part or a message. Its flood and account handling goes through the same two handlers as
+the row loop (`_handle_flood_wait` and `_stop_for_account` take an optional row), so a scan still sees one
+place that pauses and one that stops the sender.
+
+**It runs independently of the row loop.** The two coroutines may use the transport at the same time, for
+example an early read while the row loop sits in its typing step. They share no lock. Every shared state
+change is idempotent: `pause_until` only extends a pause and returns whether it was new, `stop` returns
+whether the sender was newly stopped, and the owner notice follows only a new pause or stop, so two
+coroutines that hit the same flood wait give one notice.
+
+**The log line.** One INFO line per request outcome, message `early read`, logger
+`cyrano.services.outbox_sender`: `contact_id`, `outcome` (`ok`, `failed`, `skipped`, `dropped`), `reason`
+(only `skipped`), `error_class` (only `failed` and `dropped`) and `duration_ms`. No text, name, username or
+Telegram id. The counters per outcome are kept in memory (`early_read_counts`).
+
+**Shutdown.** `main.py` cancels the early read task before the row loop's task, after the sweepers; the
+order of the other tasks is unchanged. The registry is in memory, so a restart loses the pending
+requests, which only means a chat stays unread until its reply, as before CYR-44.
+
 ### Reading the logs
 
 Since CYR-38 every row that reaches the pre-send part gets exactly four INFO lines with the message
@@ -293,7 +348,8 @@ A normal sequence, with invented ids:
 `ts` is written when a step ends, so a step started at `ts - duration_ms`. Above, the read mark was
 accepted by Telegram at 12:00:00.310, the pause ran until 12:00:03.161, the typing was held from then
 until 12:00:18.362, and the message was accepted half a second later. Group the lines by `row_id`;
-the sender handles one row at a time, so the lines of one row are never interleaved with another's.
+the sender handles one row at a time, so the lines of one row are never interleaved with another's. The
+`early read` lines of the second coroutine are a different message and may fall between them.
 
 **A failed read mark or a late display.** When the contact's client shows the read mark only after the
 message, look at the `mark_read` line of that row. `ok` with a `ts` before the `typing` and `send`
@@ -495,7 +551,7 @@ with the class name, and the loop goes on: one bad row never stops it. Only canc
 ## The transport, the notifier and the adapter
 
 - `MessageTransport` (`services/message_transport.py`) has exactly three methods, and only the sender
-  calls them: `send_text(tg_id, text) -> SentMessage`, `show_typing(tg_id, seconds)` and
+  calls them (since CYR-44 from two coroutines, the row loop and the early read, which may overlap): `send_text(tg_id, text) -> SentMessage`, `show_typing(tg_id, seconds)` and
   `mark_read(tg_id)`.
 - `OwnerNotifier` (`services/owner_notifier.py`) has exactly one method: `notify(text)`.
 - `TelethonAdapter` (`userbot/adapter.py`) is the only module that touches the Telethon client

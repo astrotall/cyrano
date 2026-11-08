@@ -46,6 +46,7 @@ SHOW_LINES = (
     "typing: {chars} characters per second, {typing} s",
     "postponed spread: {spread} min",
     "split pause: {split_pause} s",
+    "early read: {early_read} s",
 )
 RANGE = "{}-{}"
 BUSY_WINDOW = "{days} {start}-{end}"
@@ -227,5 +228,6 @@ def _profile_lines(profile: ScheduleProfile) -> list[str]:
         "typing": _int_range((profile.typing.min_seconds, profile.typing.max_seconds)),
         "spread": _int_range(profile.postponed_spread_minutes),
         "split_pause": _int_range(profile.split_pause_seconds),
+        "early_read": _int_range(profile.early_read_seconds),
     }
     return [line.format(**values) for line in SHOW_LINES]

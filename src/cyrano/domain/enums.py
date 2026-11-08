@@ -214,3 +214,23 @@ class SummaryReason(StrEnum):
     INVALID_OUTPUT = "invalid_output"
     PROMPT_TOO_LARGE = "prompt_too_large"
     UNEXPECTED_ERROR = "unexpected_error"
+
+
+class EarlyReadReason(StrEnum):
+    DISABLED = "disabled"
+    AUTOPILOT_OFF = "autopilot_off"
+    AUTOPILOT_STOPPED = "autopilot_stopped"
+    AUTOPILOT_PAUSED = "autopilot_paused"
+    SENDER_STOPPED = "sender_stopped"
+    SENDER_PAUSED = "sender_paused"
+    CONTACT_MISSING = "contact_missing"
+    CONTACT_NOT_ACTIVE = "contact_not_active"
+    BLOCKED_WINDOW = "blocked_window"
+    NOT_ONGOING = "not_ongoing"
+
+
+class EarlyReadOutcome(StrEnum):
+    OK = "ok"
+    FAILED = "failed"
+    SKIPPED = "skipped"
+    DROPPED = "dropped"

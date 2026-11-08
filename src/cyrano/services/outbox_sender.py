@@ -3,13 +3,16 @@ from __future__ import annotations
 import asyncio
 import logging
 import random
+from collections import Counter
 from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from enum import StrEnum
 
+from cyrano.domain.early_read import EarlyReadRequest
 from cyrano.domain.enums import (
     ContactStatus,
+    EarlyReadOutcome,
     LimitScope,
     LimitWindow,
     OutboxSource,
@@ -43,6 +46,7 @@ from cyrano.domain.outbox import (
     SenderState,
 )
 from cyrano.domain.schedule import MAX_TYPING_SECONDS, ScheduleProfile
+from cyrano.services.early_read import EarlyReadGate, EarlyReadQueue
 from cyrano.services.humanization import ScheduleService, postponed_after, typing_seconds
 from cyrano.services.message_transport import MessageTransport
 from cyrano.services.owner_notifier import OwnerNotifier
@@ -59,6 +63,8 @@ logger = logging.getLogger("cyrano.services.outbox_sender")
 
 SENDER_POLL_INTERVAL = 2.0
 SENDER_STALE_CHECK_INTERVAL = 60.0
+EARLY_READ_POLL_INTERVAL = 0.5
+EARLY_READ_DEADLINE = 15.0
 SENDER_SEND_DEADLINE = 100.0
 PRE_SEND_DEADLINE_MARGIN = 15.0
 LONGEST_PRE_SEND = MAX_TYPING_SECONDS + PRE_SEND_DEADLINE_MARGIN
@@ -69,6 +75,7 @@ FLOOD_WAIT_NOTIFY_ABOVE = 60.0
 OWNER_NOTIFY_DEADLINE = 15.0
 NOTIFIED_LIMIT_WINDOWS = frozenset({LimitWindow.HOUR, LimitWindow.DAY})
 STEP_LOG_MESSAGE = "outbox row step"
+EARLY_READ_LOG_MESSAGE = "early read"
 STEP_DURATION_UNIT = timedelta(milliseconds=1)
 _SYSTEM_RANDOM = random.SystemRandom()
 
@@ -95,6 +102,8 @@ def _utc_now() -> datetime:
 class SenderTimings:
     poll_interval: float = SENDER_POLL_INTERVAL
     stale_check_interval: float = SENDER_STALE_CHECK_INTERVAL
+    early_read_poll_interval: float = EARLY_READ_POLL_INTERVAL
+    early_read_deadline: float = EARLY_READ_DEADLINE
     stale_after: float = SENDING_STALE_AFTER
     send_deadline: float = SENDER_SEND_DEADLINE
     pre_send_margin: float = PRE_SEND_DEADLINE_MARGIN
@@ -113,6 +122,7 @@ class SenderNotices:
     failed: str
     uncertain: str
     flood_wait: str
+    flood_wait_early_read: str
     account_stopped: str
     contact_paused: str
     stale_summary: str
@@ -147,6 +157,8 @@ class OutboxSender:
         timings: SenderTimings | None = None,
         sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
         rng: random.Random = _SYSTEM_RANDOM,
+        early_reads: EarlyReadQueue | None = None,
+        early_gate: EarlyReadGate | None = None,
     ) -> None:
         self._outbox = outbox
         self._contacts = contacts
@@ -162,6 +174,9 @@ class OutboxSender:
         self._timings = timings if timings is not None else SenderTimings()
         self._sleep = sleep
         self._rng = rng
+        self._early_reads = early_reads
+        self._early_gate = early_gate
+        self._early_read_counts: Counter[EarlyReadOutcome] = Counter()
         self._limit_notified_at: dict[tuple[LimitScope, LimitWindow], datetime] = {}
         self._stale_unreported = 0
         self._stale_contact_ids: list[int] = []
@@ -171,6 +186,25 @@ class OutboxSender:
     async def run(self) -> None:
         await self._step(self.sweep_interrupted)
         await self.poll_forever()
+
+    @property
+    def early_read_counts(self) -> dict[EarlyReadOutcome, int]:
+        return {outcome: self._early_read_counts[outcome] for outcome in EarlyReadOutcome}
+
+    async def run_early_reads(self) -> None:
+        if self._early_reads is None or self._early_gate is None:
+            return
+        while True:
+            await self._step(self.execute_early_reads)
+            await self._sleep(self._timings.early_read_poll_interval)
+
+    async def execute_early_reads(self) -> int:
+        if self._early_reads is None or self._early_gate is None:
+            return 0
+        requests = self._early_reads.take_due(self._clock())
+        for request in requests:
+            await self._execute_early_read(request, self._early_reads, self._early_gate)
+        return len(requests)
 
     async def poll_forever(self) -> None:
         stale_every = timedelta(seconds=self._timings.stale_check_interval)
@@ -473,43 +507,111 @@ class OutboxSender:
 
     async def _handle_failure(self, row: ScheduledMessage, failure: SendFailure) -> None:
         if isinstance(failure, SendFloodWait):
-            await self._handle_flood_wait(row, failure)
+            await self._handle_flood_wait(failure, row.contact_id, row)
         elif isinstance(failure, SendAccountBlocked):
-            await self._stop_for_account(row, failure.kind)
+            await self._stop_for_account(failure.kind, row.contact_id, row)
         elif isinstance(failure, SendRejected):
             await self._handle_rejected(row, failure)
         else:
             await self._fail_uncertain(row, failure.error_class)
 
-    async def _handle_flood_wait(self, row: ScheduledMessage, failure: SendFloodWait) -> None:
+    async def _handle_flood_wait(
+        self, failure: SendFloodWait, contact_id: int, row: ScheduledMessage | None = None
+    ) -> None:
         now = self._clock()
         until = now + timedelta(seconds=failure.seconds + self._timings.flood_margin)
         is_new = await self._state.pause_until(until, failure.error_class, now=now)
-        await self._outbox.reschedule(row.id, until, failure.error_class)
-        logger.warning(
-            "the sender is paused by a flood wait",
-            extra={"row_id": row.id, "contact_id": row.contact_id, "seconds": failure.seconds},
-        )
+        extra: dict[str, object] = {"contact_id": contact_id, "seconds": failure.seconds}
+        if row is not None:
+            await self._outbox.reschedule(row.id, until, failure.error_class)
+            extra["row_id"] = row.id
+        logger.warning("the sender is paused by a flood wait", extra=extra)
         if is_new and failure.seconds > self._timings.flood_notify_above:
+            notice = (
+                self._notices.flood_wait if row is not None else self._notices.flood_wait_early_read
+            )
             await self._notify(
-                self._notices.flood_wait.format(
-                    row_id=row.id, contact_id=row.contact_id, seconds=failure.seconds
+                notice.format(
+                    row_id=None if row is None else row.id,
+                    contact_id=contact_id,
+                    seconds=failure.seconds,
                 )
             )
 
-    async def _stop_for_account(self, row: ScheduledMessage, kind: str) -> None:
+    async def _stop_for_account(
+        self, kind: str, contact_id: int, row: ScheduledMessage | None = None
+    ) -> None:
         newly_stopped = await self._state.stop(kind)
         if newly_stopped:
             self._stop_noticed_at = self._clock()
-        logger.error(
-            "the sender is stopped by an account problem",
-            extra={"row_id": row.id, "contact_id": row.contact_id, "error": kind},
-        )
+        extra: dict[str, object] = {"contact_id": contact_id, "error": kind}
+        if row is not None:
+            extra["row_id"] = row.id
+        logger.error("the sender is stopped by an account problem", extra=extra)
         try:
-            await self._outbox.mark_failed(row.id, kind)
+            if row is not None:
+                await self._outbox.mark_failed(row.id, kind)
         finally:
             if newly_stopped:
                 await self._notify(self._notices.account_stopped.format(kind=kind))
+
+    async def _execute_early_read(
+        self, request: EarlyReadRequest, queue: EarlyReadQueue, gate: EarlyReadGate
+    ) -> None:
+        started = self._clock()
+        outcome = EarlyReadOutcome.OK
+        reason: str | None = None
+        error: Exception | None = None
+        try:
+            verdict = await gate.check(request.contact_id)
+            if verdict.contact is None:
+                outcome = EarlyReadOutcome.SKIPPED
+                reason = None if verdict.reason is None else verdict.reason.value
+            else:
+                queue.record_executed(request.contact_id, started)
+                async with asyncio.timeout(self._timings.early_read_deadline):
+                    await self._transport.mark_read(verdict.contact.tg_id)
+        except (SendFloodWait, SendAccountBlocked) as exc:
+            outcome, error = EarlyReadOutcome.DROPPED, exc
+        except Exception as exc:
+            outcome, error = EarlyReadOutcome.FAILED, exc
+        self._log_early_read(request, outcome, started, reason, error)
+        if isinstance(error, SendFloodWait | SendAccountBlocked):
+            await self._react_to_early_read_failure(request, error)
+
+    async def _react_to_early_read_failure(
+        self, request: EarlyReadRequest, failure: SendFloodWait | SendAccountBlocked
+    ) -> None:
+        try:
+            if isinstance(failure, SendFloodWait):
+                await self._handle_flood_wait(failure, request.contact_id)
+            else:
+                await self._stop_for_account(failure.kind, request.contact_id)
+        except Exception as exc:
+            logger.error(
+                "early read failure handling failed",
+                extra={"contact_id": request.contact_id, "error": type(exc).__name__},
+            )
+
+    def _log_early_read(
+        self,
+        request: EarlyReadRequest,
+        outcome: EarlyReadOutcome,
+        started: datetime,
+        reason: str | None,
+        error: Exception | None,
+    ) -> None:
+        self._early_read_counts[outcome] += 1
+        extra: dict[str, object] = {
+            "contact_id": request.contact_id,
+            "outcome": outcome.value,
+            "duration_ms": round((self._clock() - started) / STEP_DURATION_UNIT),
+        }
+        if reason is not None:
+            extra["reason"] = reason
+        if error is not None:
+            extra["error_class"] = type(error).__name__
+        logger.info(EARLY_READ_LOG_MESSAGE, extra=extra)
 
     async def _handle_rejected(self, row: ScheduledMessage, failure: SendRejected) -> None:
         if failure.reason is RejectionReason.RECIPIENT:

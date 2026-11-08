@@ -12,6 +12,7 @@ from cyrano.domain.outbox import SenderState
 from cyrano.domain.schedule import UnavailableSoon
 
 SECONDS_PER_HOUR = 3600
+HOURS_PER_DAY = 24
 PROACTIVE_SWEEP_LIMIT = 10
 PROACTIVE_DAILY_WINDOW_SECONDS = 24 * SECONDS_PER_HOUR
 MODEL_SKIP_POSTPONE_SECONDS = 12 * SECONDS_PER_HOUR

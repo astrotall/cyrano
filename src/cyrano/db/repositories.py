@@ -1268,12 +1268,14 @@ class SqlProactiveRepository:
         self,
         *,
         silent_since: datetime,
+        silent_not_before: datetime,
         now: datetime,
         max_per_silence: int,
         interval_since: datetime,
         limit: int,
     ) -> list[ProactiveDue]:
         _require_aware(silent_since)
+        _require_aware(silent_not_before)
         _require_aware(now)
         _require_aware(interval_since)
         if limit <= 0:
@@ -1321,6 +1323,7 @@ class SqlProactiveRepository:
                     ContactRow.proactive_not_before <= now,
                 ),
                 silence_start <= silent_since,
+                silence_start >= silent_not_before,
                 silence_rows < max_per_silence,
                 ~recent_row,
             )

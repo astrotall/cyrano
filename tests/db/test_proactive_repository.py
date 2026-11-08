@@ -69,9 +69,16 @@ class _World:
             contact.id, [TEXT] * parts, due, source, trigger.id
         )
 
-    async def due(self, *, max_per_silence: int = 2, limit: int = 10) -> list[tuple[int, int]]:
+    async def due(
+        self,
+        *,
+        max_per_silence: int = 2,
+        limit: int = 10,
+        max_silence: timedelta = 72 * HOUR,
+    ) -> list[tuple[int, int]]:
         found = await self.repo.contacts_due_for_proactive(
             silent_since=NOW - 6 * HOUR,
+            silent_not_before=NOW - max_silence,
             now=NOW,
             max_per_silence=max_per_silence,
             interval_since=NOW - 24 * HOUR,
@@ -191,6 +198,66 @@ async def test_a_silence_of_exactly_the_threshold_is_due(world: _World) -> None:
     await world.silent(short, 6 * HOUR - timedelta(seconds=1))
 
     assert await world.due() == [(contact.id, last.id)]
+
+
+async def test_a_silence_of_exactly_the_upper_bound_is_due_and_one_second_more_is_not(
+    world: _World,
+) -> None:
+    at_limit = await world.contact()
+    last = await world.silent(at_limit, 72 * HOUR)
+    over = await world.contact()
+    await world.silent(over, 72 * HOUR + timedelta(seconds=1))
+
+    assert await world.due() == [(at_limit.id, last.id)]
+
+
+async def test_the_bound_is_the_one_the_caller_passes(world: _World) -> None:
+    thirty = await world.contact()
+    await world.silent(thirty, 30 * HOUR)
+    twenty = await world.contact()
+    last = await world.silent(twenty, 20 * HOUR)
+
+    assert await world.due(max_silence=24 * HOUR) == [(twenty.id, last.id)]
+    assert len(await world.due(max_silence=30 * HOUR)) == 2
+
+
+async def test_a_long_silent_contact_is_not_returned_while_a_recent_one_is(
+    world: _World,
+) -> None:
+    long_silent = await world.contact()
+    await world.silent(long_silent, 400 * HOUR)
+    recent = await world.contact()
+    last = await world.silent(recent, 8 * HOUR)
+
+    assert await world.due() == [(recent.id, last.id)]
+    stored = await world.contacts.get_by_id(long_silent.id)
+    assert stored is not None
+    assert stored.proactive_not_before is None
+
+
+async def test_the_upper_bound_counts_from_the_later_of_the_last_message_and_the_resume(
+    world: _World,
+) -> None:
+    resumed_recently = await world.contact()
+    first = await world.silent(resumed_recently, 100 * HOUR)
+    await world.contacts.set_status(resumed_recently.id, ContactStatus.PAUSED)
+    await world.contacts.set_status(
+        resumed_recently.id, ContactStatus.ACTIVE, reply_after=NOW - 10 * HOUR
+    )
+    resumed_long_ago = await world.contact()
+    await world.silent(resumed_long_ago, 100 * HOUR)
+    await world.contacts.set_status(resumed_long_ago.id, ContactStatus.PAUSED)
+    await world.contacts.set_status(
+        resumed_long_ago.id, ContactStatus.ACTIVE, reply_after=NOW - 80 * HOUR
+    )
+    old_resume = await world.contact()
+    recent_last = await world.silent(old_resume, 7 * HOUR)
+    await world.contacts.set_status(old_resume.id, ContactStatus.PAUSED)
+    await world.contacts.set_status(
+        old_resume.id, ContactStatus.ACTIVE, reply_after=NOW - 200 * HOUR
+    )
+
+    assert await world.due() == [(old_resume.id, recent_last.id), (resumed_recently.id, first.id)]
 
 
 @pytest.mark.parametrize(

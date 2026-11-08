@@ -231,6 +231,7 @@ def test_every_setting_is_either_logged_or_deliberately_withheld() -> None:
         "summary_every_messages",
         "proactive_enabled",
         "proactive_after_hours",
+        "proactive_max_silence_days",
         "proactive_max_per_silence",
         "proactive_min_interval_hours",
         "proactive_daily_limit",
@@ -869,6 +870,7 @@ def test_the_default_contact_gender_is_withheld_from_the_startup_summary(
 
 PROACTIVE_VARIABLES = {
     "PROACTIVE_AFTER_HOURS": (6, 1, 72),
+    "PROACTIVE_MAX_SILENCE_DAYS": (3, 1, 30),
     "PROACTIVE_MAX_PER_SILENCE": (2, 1, 5),
     "PROACTIVE_MIN_INTERVAL_HOURS": (24, 1, 168),
     "PROACTIVE_DAILY_LIMIT": (20, 1, 200),
@@ -934,6 +936,39 @@ def test_a_proactive_setting_out_of_range_is_readable_without_the_value(
     message = str(raised.value)
     assert name in message
     assert value not in message
+    assert "Traceback" not in message
+
+
+@pytest.mark.parametrize(
+    ("after_hours", "days"), [("48", "2"), ("72", "3"), ("1", "1"), ("24", "30")]
+)
+def test_the_proactive_silence_bounds_may_meet(
+    full_env: dict[str, str], monkeypatch: pytest.MonkeyPatch, after_hours: str, days: str
+) -> None:
+    monkeypatch.setenv("PROACTIVE_AFTER_HOURS", after_hours)
+    monkeypatch.setenv("PROACTIVE_MAX_SILENCE_DAYS", days)
+
+    settings = load_settings(env_file=None)
+
+    assert settings.proactive_after_hours == int(after_hours)
+    assert settings.proactive_max_silence_days == int(days)
+
+
+@pytest.mark.parametrize(("after_hours", "days"), [("49", "2"), ("25", "1"), ("72", "2")])
+def test_a_lower_bound_above_the_upper_bound_names_both_variables_and_no_values(
+    full_env: dict[str, str], monkeypatch: pytest.MonkeyPatch, after_hours: str, days: str
+) -> None:
+    monkeypatch.setenv("PROACTIVE_AFTER_HOURS", after_hours)
+    monkeypatch.setenv("PROACTIVE_MAX_SILENCE_DAYS", days)
+
+    with pytest.raises(ConfigError) as raised:
+        load_settings(env_file=None)
+
+    message = str(raised.value)
+    assert "PROACTIVE_AFTER_HOURS" in message
+    assert "PROACTIVE_MAX_SILENCE_DAYS" in message
+    assert after_hours not in message
+    assert f"={days}" not in message
     assert "Traceback" not in message
 
 

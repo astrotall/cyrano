@@ -10,6 +10,7 @@ from pydantic import Field, SecretStr, ValidationError, field_validator, model_v
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 from cyrano.domain.enums import ContactGender
+from cyrano.domain.proactive import HOURS_PER_DAY
 from cyrano.health import default_heartbeat_path
 
 LogLevel = Literal["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"]
@@ -52,6 +53,9 @@ MAX_SUMMARY_EVERY_MESSAGES = 200
 DEFAULT_PROACTIVE_AFTER_HOURS = 6
 MIN_PROACTIVE_AFTER_HOURS = 1
 MAX_PROACTIVE_AFTER_HOURS = 72
+DEFAULT_PROACTIVE_MAX_SILENCE_DAYS = 3
+MIN_PROACTIVE_MAX_SILENCE_DAYS = 1
+MAX_PROACTIVE_MAX_SILENCE_DAYS = 30
 DEFAULT_PROACTIVE_MAX_PER_SILENCE = 2
 MIN_PROACTIVE_MAX_PER_SILENCE = 1
 MAX_PROACTIVE_MAX_PER_SILENCE = 5
@@ -80,6 +84,9 @@ SEND_LIMIT_ORDER = (
 AUTOPILOT_TIMING_ORDER = (
     ("autopilot_debounce_ongoing_seconds", "autopilot_debounce_seconds"),
     ("autopilot_debounce_seconds", "autopilot_max_burst_wait_seconds"),
+)
+PROACTIVE_SILENCE_ORDER_MESSAGE = (
+    "PROACTIVE_AFTER_HOURS must not be above PROACTIVE_MAX_SILENCE_DAYS counted in hours"
 )
 
 LOGGED_SETTINGS = frozenset(
@@ -184,6 +191,11 @@ class Settings(BaseSettings):
         ge=MIN_PROACTIVE_AFTER_HOURS,
         le=MAX_PROACTIVE_AFTER_HOURS,
     )
+    proactive_max_silence_days: int = Field(
+        default=DEFAULT_PROACTIVE_MAX_SILENCE_DAYS,
+        ge=MIN_PROACTIVE_MAX_SILENCE_DAYS,
+        le=MAX_PROACTIVE_MAX_SILENCE_DAYS,
+    )
     proactive_max_per_silence: int = Field(
         default=DEFAULT_PROACTIVE_MAX_PER_SILENCE,
         ge=MIN_PROACTIVE_MAX_PER_SILENCE,
@@ -287,6 +299,8 @@ class Settings(BaseSettings):
             for lower, upper in (*SEND_LIMIT_ORDER, *AUTOPILOT_TIMING_ORDER)
             if getattr(self, lower) > getattr(self, upper)
         ]
+        if self.proactive_after_hours > self.proactive_max_silence_days * HOURS_PER_DAY:
+            broken.append(PROACTIVE_SILENCE_ORDER_MESSAGE)
         if broken:
             raise ValueError("; ".join(broken))
         return self

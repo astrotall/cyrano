@@ -116,6 +116,18 @@ SINGLE_FAILURES: list[tuple[ProactiveSnapshot, Rules, ProactiveReason]] = [
         Rules(),
         ProactiveReason.SILENCE_TOO_SHORT,
     ),
+    (
+        eligible_snapshot(silence=72 * HOUR + timedelta(seconds=1)),
+        Rules(),
+        ProactiveReason.SILENCE_TOO_LONG,
+    ),
+    (
+        replace(
+            eligible_snapshot(silence=100 * HOUR), contact=contact(reply_after=NOW - 80 * HOUR)
+        ),
+        Rules(),
+        ProactiveReason.SILENCE_TOO_LONG,
+    ),
     (replace(BASE, silence_rows=2), Rules(), ProactiveReason.SILENCE_LIMIT_REACHED),
     (
         replace(BASE, newest_row_due_at=NOW - 24 * HOUR + timedelta(seconds=1)),
@@ -166,6 +178,83 @@ def test_the_threshold_follows_the_setting(after_hours: int) -> None:
 
     assert decide_proactive(exactly, rules) is ProactiveReason.ELIGIBLE
     assert decide_proactive(short, rules) is ProactiveReason.SILENCE_TOO_SHORT
+
+
+@pytest.mark.parametrize("max_days", [1, 3, 30])
+def test_the_upper_bound_is_inclusive_and_follows_the_setting(max_days: int) -> None:
+    rules = Rules(proactive_max_silence_days=max_days)
+    exactly = eligible_snapshot(silence=max_days * 24 * HOUR)
+    over = eligible_snapshot(silence=max_days * 24 * HOUR + timedelta(seconds=1))
+
+    assert decide_proactive(exactly, rules) is ProactiveReason.ELIGIBLE
+    assert decide_proactive(over, rules) is ProactiveReason.SILENCE_TOO_LONG
+
+
+def test_the_lower_bound_is_unchanged_next_to_the_upper_one() -> None:
+    exactly = eligible_snapshot(silence=6 * HOUR)
+    short = eligible_snapshot(silence=6 * HOUR - timedelta(seconds=1))
+
+    assert decide_proactive(exactly, Rules()) is ProactiveReason.ELIGIBLE
+    assert decide_proactive(short, Rules()) is ProactiveReason.SILENCE_TOO_SHORT
+
+
+def test_a_recent_resume_shortens_the_measured_silence_below_the_upper_bound() -> None:
+    long_ago = eligible_snapshot(silence=100 * HOUR)
+
+    assert decide_proactive(long_ago, Rules()) is ProactiveReason.SILENCE_TOO_LONG
+    resumed = replace(long_ago, contact=contact(reply_after=NOW - 10 * HOUR))
+    assert silence_started_at(resumed) == NOW - 10 * HOUR
+    assert decide_proactive(resumed, Rules()) is ProactiveReason.ELIGIBLE
+    just_resumed = replace(long_ago, contact=contact(reply_after=NOW - 6 * HOUR))
+    assert decide_proactive(just_resumed, Rules()) is ProactiveReason.ELIGIBLE
+    too_recent = replace(long_ago, contact=contact(reply_after=NOW - 5 * HOUR))
+    assert decide_proactive(too_recent, Rules()) is ProactiveReason.SILENCE_TOO_SHORT
+
+
+def test_a_resume_long_ago_does_not_lengthen_the_silence_past_the_last_message() -> None:
+    recent_last = replace(
+        eligible_snapshot(silence=7 * HOUR), contact=contact(reply_after=NOW - 200 * HOUR)
+    )
+
+    assert silence_started_at(recent_last) == NOW - 7 * HOUR
+    assert decide_proactive(recent_last, Rules()) is ProactiveReason.ELIGIBLE
+
+
+def test_a_silence_that_is_too_long_hides_the_later_conditions() -> None:
+    everything_else = replace(
+        eligible_snapshot(silence=100 * HOUR),
+        silence_rows=9,
+        newest_row_due_at=NOW + HOUR,
+        daily_rows=999,
+    )
+
+    assert decide_proactive(everything_else, Rules()) is ProactiveReason.SILENCE_TOO_LONG
+
+
+def test_the_earlier_conditions_still_win_over_a_silence_that_is_too_long() -> None:
+    long_silence = eligible_snapshot(silence=100 * HOUR)
+
+    assert (
+        decide_proactive(replace(long_silence, contact=None), Rules())
+        is ProactiveReason.CONTACT_MISSING
+    )
+    assert (
+        decide_proactive(replace(long_silence, contact=contact(not_before=NOW + HOUR)), Rules())
+        is ProactiveReason.POSTPONED
+    )
+    assert (
+        decide_proactive(replace(long_silence, unavailable=UNAVAILABLE_CASES[0]), Rules())
+        is ProactiveReason.UNAVAILABLE_SOON
+    )
+
+
+def test_the_lower_bound_is_checked_before_the_upper_one() -> None:
+    inverted = Rules(proactive_after_hours=72, proactive_max_silence_days=1)
+
+    assert (
+        decide_proactive(eligible_snapshot(silence=30 * HOUR), inverted)
+        is ProactiveReason.SILENCE_TOO_SHORT
+    )
 
 
 def test_the_silence_counts_from_the_later_of_the_last_message_and_reply_after() -> None:

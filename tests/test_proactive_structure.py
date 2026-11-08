@@ -21,6 +21,7 @@ DB_REPOSITORIES_MODULE = "db/repositories.py"
 DB_MODELS_MODULE = "db/models.py"
 DOMAIN_MODELS_MODULE = "domain/models.py"
 MAIN_MODULE = "main.py"
+CONFIG_MODULE = "config.py"
 PROACTIVE_MODULES = (ELIGIBILITY_MODULE, SWEEPER_MODULE, JOB_MODULE, QUEUE_PROTOCOL_MODULE)
 TRANSPORT_METHODS = frozenset({"send_text", "show_typing", "mark_read"})
 RULE_FUNCTION = "decide_proactive"
@@ -36,6 +37,7 @@ OUTBOX_SOURCE = "OutboxSource"
 RULE_SETTINGS = frozenset(
     {
         "proactive_after_hours",
+        "proactive_max_silence_days",
         "proactive_max_per_silence",
         "proactive_min_interval_hours",
         "proactive_daily_limit",
@@ -111,10 +113,12 @@ def test_the_eligibility_rule_is_defined_once() -> None:
     assert _users(lambda tree: bool(_enum_members_used(tree, REASON_ENUM))) == {ELIGIBILITY_MODULE}
 
 
-def test_the_rule_settings_are_read_only_by_the_rule_the_scan_and_the_job() -> None:
+def test_the_rule_settings_are_read_only_by_the_rule_the_scan_the_job_and_the_config_check() -> (
+    None
+):
     readers = _users(lambda tree: bool(_attributes(tree) & RULE_SETTINGS))
 
-    assert readers == {ELIGIBILITY_MODULE, SWEEPER_MODULE, JOB_MODULE}
+    assert readers == {ELIGIBILITY_MODULE, SWEEPER_MODULE, JOB_MODULE, CONFIG_MODULE}
 
 
 def test_the_sweeper_and_the_job_both_ask_the_one_rule() -> None:

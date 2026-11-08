@@ -66,7 +66,9 @@ What exists now:
   generates one short follow-up with the proactive purpose (or the model's `SKIP`) and writes a `proactive`
   chain inside the profile's `proactive_window`; at most `PROACTIVE_MAX_PER_SILENCE` per silence,
   `PROACTIVE_MIN_INTERVAL_HOURS` apart and `PROACTIVE_DAILY_LIMIT` a day; any newer message cancels a
-  follow-up that has not started; no automatic pause after the maximum.
+  follow-up that has not started; no automatic pause after the maximum. CYR-53 added the upper bound,
+  `PROACTIVE_MAX_SILENCE_DAYS` (default 3): a longer silence is left alone (`silence_too_long`, checked after
+  `silence_too_short`, inclusive, the same silence start; the scan filters on it with `silent_not_before`).
 - The owner's commands: `login`, `llm-check`, `persona`, `examples`, `reply-preview` (with
   `--proactive`), `outbox`, `schedule`, `stop-check`, `autopilot` and `summary` (the list is in the README).
 

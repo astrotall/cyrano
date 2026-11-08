@@ -21,6 +21,7 @@ class Rules:
     proactive_enabled: bool = True
     autopilot_enabled: bool = True
     proactive_after_hours: int = 6
+    proactive_max_silence_days: int = 3
     proactive_max_per_silence: int = 2
     proactive_min_interval_hours: int = 24
     proactive_daily_limit: int = 20

@@ -7,6 +7,7 @@ from typing import Protocol
 
 from cyrano.domain.enums import ContactStatus, MessageDirection, ProactiveReason
 from cyrano.domain.proactive import (
+    HOURS_PER_DAY,
     PROACTIVE_DAILY_WINDOW_SECONDS,
     SECONDS_PER_HOUR,
     ProactiveSnapshot,
@@ -31,6 +32,9 @@ class ProactiveSettings(Protocol):
     def proactive_after_hours(self) -> int: ...
 
     @property
+    def proactive_max_silence_days(self) -> int: ...
+
+    @property
     def proactive_max_per_silence(self) -> int: ...
 
     @property
@@ -42,6 +46,10 @@ class ProactiveSettings(Protocol):
 
 def hours(value: int) -> timedelta:
     return timedelta(seconds=value * SECONDS_PER_HOUR)
+
+
+def max_silence(rules: ProactiveSettings) -> timedelta:
+    return hours(rules.proactive_max_silence_days * HOURS_PER_DAY)
 
 
 def switch_reason(rules: ProactiveSettings) -> ProactiveReason | None:
@@ -90,6 +98,8 @@ def decide_proactive(snapshot: ProactiveSnapshot, rules: ProactiveSettings) -> P
     started = silence_started_at(snapshot)
     if started is None or now - started < hours(rules.proactive_after_hours):
         return ProactiveReason.SILENCE_TOO_SHORT
+    if now - started > max_silence(rules):
+        return ProactiveReason.SILENCE_TOO_LONG
     if snapshot.silence_rows >= rules.proactive_max_per_silence:
         return ProactiveReason.SILENCE_LIMIT_REACHED
     newest = snapshot.newest_row_due_at

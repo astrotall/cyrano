@@ -57,6 +57,7 @@ class _FlakyScan:
         self,
         *,
         silent_since: datetime,
+        silent_not_before: datetime,
         now: datetime,
         max_per_silence: int,
         interval_since: datetime,
@@ -68,6 +69,7 @@ class _FlakyScan:
             raise RuntimeError("invented storage failure")
         return await self._inner.contacts_due_for_proactive(
             silent_since=silent_since,
+            silent_not_before=silent_not_before,
             now=now,
             max_per_silence=max_per_silence,
             interval_since=interval_since,
@@ -127,6 +129,44 @@ async def test_a_scan_enqueues_one_job_per_due_contact_with_its_last_message(
     assert enqueued == 2
     assert queue.jobs == [(due_one.id, last_one.id), (due_two.id, last_two.id)]
     assert {short.id, answered.id, paused.id}.isdisjoint(job[0] for job in queue.jobs)
+
+
+async def test_a_long_silent_contact_is_not_enqueued_while_a_recent_one_is(
+    prig: ProactiveRig,
+) -> None:
+    long_silent, _ = await prig.silent_contact(100)
+    recent, last = await prig.silent_contact(7)
+    queue = _Queue()
+
+    assert await _sweeper(prig, queue).sweep() == 1
+
+    assert queue.jobs == [(recent.id, last.id)]
+    assert (await prig.rig.reload(long_silent)).proactive_not_before is None
+    assert await prig.rig.outbox.list_rows(None, 10) == []
+
+
+async def test_the_silence_exactly_at_the_upper_bound_is_enqueued_and_one_second_more_is_not(
+    prig: ProactiveRig,
+) -> None:
+    at_limit, last = await prig.silent_contact(72)
+    over, _ = await prig.silent_contact(72 + 1 / 3600)
+    queue = _Queue()
+
+    await _sweeper(prig, queue).sweep()
+
+    assert queue.jobs == [(at_limit.id, last.id)]
+    assert over.id not in {job[0] for job in queue.jobs}
+
+
+async def test_the_upper_bound_follows_the_setting(rig: AutopilotRig) -> None:
+    prig = ProactiveRig(rig, replace(ProactiveRig(rig).rules, proactive_max_silence_days=1))
+    await prig.silent_contact(30)
+    inside, last = await prig.silent_contact(20)
+    queue = _Queue()
+
+    await _sweeper(prig, queue).sweep()
+
+    assert queue.jobs == [(inside.id, last.id)]
 
 
 async def test_the_scan_keeps_to_its_limit(prig: ProactiveRig) -> None:

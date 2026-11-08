@@ -13,6 +13,9 @@ Reasons: [decisions.md](decisions.md).
 - It writes only to an `active` contact whose last message (by `(created_at, id)`) is outgoing and who
   has written at least one message. It **never opens a conversation**: a history without an incoming
   message is never eligible.
+- It does not revive a conversation that has been silent for too long: a silence longer than
+  `PROACTIVE_MAX_SILENCE_DAYS` (default 3 days) is left alone, so switching the feature on does not send one
+  message to every contact who went quiet weeks ago, which would look needy and out of place (CYR-53).
 - It writes at most `PROACTIVE_MAX_PER_SILENCE` messages (default 2) after the contact's last incoming
   message, at least `PROACTIVE_MIN_INTERVAL_HOURS` (default 24) apart, and at most
   `PROACTIVE_DAILY_LIMIT` (default 20) a day over all contacts.
@@ -33,12 +36,14 @@ value. None of them is in the startup log line.
 | --- | --- | --- | --- |
 | `PROACTIVE_ENABLED` | `false` | | The switch, read by the app's sweeper, the worker's job and the sender's guard |
 | `PROACTIVE_AFTER_HOURS` | 6 | 1 to 72 | The silence after our last message (or after the last resume) that makes a contact eligible |
+| `PROACTIVE_MAX_SILENCE_DAYS` | 3 | 1 to 30 | The longest silence, in days, after which a contact is still eligible; a longer silence is left alone. Counted in hours it must be at least `PROACTIVE_AFTER_HOURS`, otherwise the `ConfigError` names both variables |
 | `PROACTIVE_MAX_PER_SILENCE` | 2 | 1 to 5 | Proactive messages after the contact's last incoming message |
 | `PROACTIVE_MIN_INTERVAL_HOURS` | 24 | 1 to 168 | The least time between two proactive messages to one contact |
 | `PROACTIVE_DAILY_LIMIT` | 20 | 1 to 200 | Proactive messages in any 24 hours over all contacts |
 | `proactive_window` (schedule profile) | `["10:00", "22:00"]` | `HH:MM`, start before end on one day | When a proactive message may go out ([humanization.md](humanization.md#the-profile)) |
 
-Constants (`domain/proactive.py`): `PROACTIVE_SWEEP_LIMIT` (10 contacts per scan),
+Constants (`domain/proactive.py`): `HOURS_PER_DAY` (24, converts the days of the upper bound),
+`PROACTIVE_SWEEP_LIMIT` (10 contacts per scan),
 `MODEL_SKIP_POSTPONE_SECONDS` (12 h), `FAILURE_POSTPONE_SECONDS` (1 h), `PROACTIVE_DAILY_WINDOW_SECONDS`
 (24 h), the job name `proactive_to_contact` and the job id `proactive-<contact id>-<last message id>`.
 
@@ -65,11 +70,13 @@ the rule appears. The conditions are checked in this order, and the first that f
 9. The last message of the history is outgoing, otherwise `last_message_incoming`.
 10. The silence, counted from the **later** of that last message's time and `contacts.reply_after`, is at
    least `PROACTIVE_AFTER_HOURS`; exactly the threshold is enough. Otherwise `silence_too_short`.
-11. Fewer than `PROACTIVE_MAX_PER_SILENCE` proactive messages belong to this silence, otherwise
+11. The same silence, measured the same way, is at most `PROACTIVE_MAX_SILENCE_DAYS` days; exactly the
+    bound is still enough, only a strictly longer silence fails. Otherwise `silence_too_long` (CYR-53).
+12. Fewer than `PROACTIVE_MAX_PER_SILENCE` proactive messages belong to this silence, otherwise
     `silence_limit_reached`.
-12. The contact's newest proactive message is at least `PROACTIVE_MIN_INTERVAL_HOURS` old (exactly the
+13. The contact's newest proactive message is at least `PROACTIVE_MIN_INTERVAL_HOURS` old (exactly the
     interval is enough), otherwise `min_interval`.
-13. Fewer than `PROACTIVE_DAILY_LIMIT` proactive messages over all contacts fall in the last 24 hours,
+14. Fewer than `PROACTIVE_DAILY_LIMIT` proactive messages over all contacts fall in the last 24 hours,
     otherwise `daily_limit`.
 
 All conditions true gives `eligible`.
@@ -88,9 +95,12 @@ too, and the rule never compares the database clock with the job's clock.
 `count_proactive_due_since(since)`, `contacts_due_for_proactive(...)` and
 `set_proactive_not_before(contact_id, when)`. The scan returns `active` contacts whose postponement has
 passed, whose last message is outgoing, who have an incoming message and whose silence reached the
-threshold; it also leaves out contacts at the per-silence maximum and inside the interval, so contacts
+threshold (`silent_since`) without exceeding the upper bound (`silent_not_before`, inclusive, counted from
+the same silence start as the pure rule); it also leaves out contacts at the per-silence maximum and inside the interval, so contacts
 that can never be eligible do not fill the 10 places of a scan. The most recent silence comes first.
-The pure rule re-checks everything.
+The pure rule re-checks everything. A contact whose silence is too long is simply left alone: the scan
+never returns it, the job that meets it anyway skips with `silence_too_long`, and nothing is written to
+its row (`proactive_not_before` stays as it was), no outbox row is made and nothing is logged per contact.
 
 ## The flow
 

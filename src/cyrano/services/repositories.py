@@ -246,6 +246,7 @@ class ProactiveRepository(Protocol):
         self,
         *,
         silent_since: datetime,
+        silent_not_before: datetime,
         now: datetime,
         max_per_silence: int,
         interval_since: datetime,

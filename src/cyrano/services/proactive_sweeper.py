@@ -7,7 +7,12 @@ from datetime import datetime
 
 from cyrano.domain.autopilot import SWEEP_INTERVAL_SECONDS
 from cyrano.domain.proactive import PROACTIVE_SWEEP_LIMIT
-from cyrano.services.proactive_eligibility import ProactiveEligibility, hours, switch_reason
+from cyrano.services.proactive_eligibility import (
+    ProactiveEligibility,
+    hours,
+    max_silence,
+    switch_reason,
+)
 from cyrano.services.proactive_job_queue import ProactiveJobQueue
 from cyrano.services.repositories import ProactiveRepository
 
@@ -49,6 +54,7 @@ class ProactiveSweeper:
         now = self._clock()
         due = await self._proactive.contacts_due_for_proactive(
             silent_since=now - hours(rules.proactive_after_hours),
+            silent_not_before=now - max_silence(rules),
             now=now,
             max_per_silence=rules.proactive_max_per_silence,
             interval_since=now - hours(rules.proactive_min_interval_hours),

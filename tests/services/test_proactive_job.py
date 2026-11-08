@@ -19,6 +19,7 @@ from cyrano.domain.enums import (
     PlanReason,
     ProactiveJobOutcome,
     ProactiveJobReason,
+    ProactiveReason,
     ReplyJobOutcome,
     ReplyJobReason,
 )
@@ -381,6 +382,29 @@ async def test_an_ineligible_contact_is_skipped_with_the_eligibility_reason(
 
     assert result.reason is ProactiveJobReason.PROACTIVE_DISABLED
     assert client.calls == 0
+
+
+async def test_a_contact_that_became_too_silent_after_the_scan_is_refused_and_left_alone(
+    prig: ProactiveRig,
+) -> None:
+    contact, last = await prig.silent_contact()
+    assert (await prig.eligibility().check(contact.id)).eligible
+    prig.later(70)
+    client = SequenceLLMClient(llm_result(FOLLOW_UP_TEXT_ZQ))
+
+    result = await prig.runner(client).run(contact.id, last.id)
+
+    assert result.outcome is ProactiveJobOutcome.SKIPPED
+    assert result.reason is ProactiveJobReason.SILENCE_TOO_LONG
+    assert client.calls == 0
+    assert await prig.rig.outbox.list_rows(None, 10) == []
+    assert await _not_before(prig, contact) is None
+
+
+def test_the_job_has_a_reason_for_every_reason_of_the_rule() -> None:
+    assert {reason.value for reason in ProactiveReason} - {ProactiveReason.ELIGIBLE.value} <= {
+        reason.value for reason in ProactiveJobReason
+    }
 
 
 async def test_a_guard_refusal_at_enqueue_is_a_skip_with_its_reason(prig: ProactiveRig) -> None:

@@ -470,7 +470,9 @@ profile's `proactive_window` (10:00 to 22:00 by default) and outside the night a
 contact writes, or anyone writes in the chat, before it starts, it is cancelled. The model may answer
 `SKIP` when the conversation ended naturally (then the next check is 12 hours later), and `NEEDS_OWNER`
 still hands the contact over to you. After the maximum the contact is not paused: the assistant simply
-writes nothing more until the contact writes.
+writes nothing more until the contact writes. A conversation that has been silent for longer than
+`PROACTIVE_MAX_SILENCE_DAYS` (3 days by default) is left alone, so switching the feature on does not
+message every contact who went quiet weeks ago.
 
 To enable it: get the autopilot and the summaries working first, check `make schedule-show` (the
 `proactive window` line) and a few `make reply-preview CONTACT=... PROACTIVE=1`, then set
@@ -973,6 +975,7 @@ the default applies.
 | `WRAPUP_ENABLED` | no | `true` | `false` stops the wrap-up before the night or a busy window: replies then simply stop when the window begins. Nothing changes while `AUTOPILOT_ENABLED` is `false`. Not printed in the startup line. Restart the worker after a change |
 | `PROACTIVE_ENABLED` | no | `false` | `true` switches proactive messages on (CYR-23): the app's sweep enqueues follow-up jobs, the worker writes `proactive` rows and the sender sends them. Works only with `AUTOPILOT_ENABLED=true`. Restart the app and the worker after a change. Not printed in the startup line |
 | `PROACTIVE_AFTER_HOURS` | no | `6` | Hours of silence after your last message (or after the last resume) before a follow-up, from 1 to 72 |
+| `PROACTIVE_MAX_SILENCE_DAYS` | no | `3` | Most days of silence after your last message (or after the last resume) in which a follow-up is still written; a longer silence is left alone. From 1 to 30, and counted in hours at least `PROACTIVE_AFTER_HOURS`. Not printed in the startup line |
 | `PROACTIVE_MAX_PER_SILENCE` | no | `2` | Most follow-ups after the contact's last message, from 1 to 5 |
 | `PROACTIVE_MIN_INTERVAL_HOURS` | no | `24` | Least hours between two follow-ups to one contact, from 1 to 168 |
 | `PROACTIVE_DAILY_LIMIT` | no | `20` | Most follow-ups in 24 hours over all contacts, from 1 to 200 |

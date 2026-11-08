@@ -234,3 +234,12 @@ class RetryJob(DomainError):
         super().__init__(f"the reply job will be retried in {defer_seconds} s after {error_class}")
         self.defer_seconds = defer_seconds
         self.error_class = error_class
+
+
+class SummaryPromptTooLarge(DomainError):
+    def __init__(self, characters: int, limit: int) -> None:
+        super().__init__(
+            f"the summary prompt has {characters} characters at its smallest, over {limit}"
+        )
+        self.characters = characters
+        self.limit = limit

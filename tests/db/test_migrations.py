@@ -35,6 +35,7 @@ TIMESTAMP_COLUMNS = {
     ("contacts", "created_at"),
     ("contacts", "last_message_at"),
     ("contacts", "reply_after"),
+    ("contacts", "summary_failed_at"),
     ("contacts", "updated_at"),
     ("messages", "created_at"),
     ("modes", "created_at"),
@@ -257,13 +258,50 @@ async def test_revision_0009_follows_0008(alembic_config: Config) -> None:
     assert revision.down_revision == "0008"
 
 
-async def test_revision_0010_is_the_head_and_follows_0009(alembic_config: Config) -> None:
-    script = ScriptDirectory.from_config(alembic_config)
-
-    assert script.get_heads() == ["0010"]
-    revision = script.get_revision("0010")
+async def test_revision_0010_follows_0009(alembic_config: Config) -> None:
+    revision = ScriptDirectory.from_config(alembic_config).get_revision("0010")
     assert revision is not None
     assert revision.down_revision == "0009"
+
+
+async def test_revision_0011_is_the_head_and_follows_0010(alembic_config: Config) -> None:
+    script = ScriptDirectory.from_config(alembic_config)
+
+    assert script.get_heads() == ["0011"]
+    revision = script.get_revision("0011")
+    assert revision is not None
+    assert revision.down_revision == "0010"
+
+
+async def _summary_failed_at_columns(url: URL) -> list[tuple[object, ...]]:
+    return await fetch_all(
+        url,
+        "SELECT is_nullable, data_type FROM information_schema.columns "
+        "WHERE table_name = 'contacts' AND column_name = 'summary_failed_at'",
+    )
+
+
+async def test_revision_0011_adds_summary_failed_at_and_downgrades_to_0010_keeping_the_rows(
+    database_url: URL, alembic_config: Config
+) -> None:
+    await asyncio.to_thread(command.upgrade, alembic_config, "0010")
+    await execute(
+        database_url,
+        "INSERT INTO contacts (tg_id, status, summary) "  # noqa: S608
+        f"""VALUES ({FAKE_TELEGRAM_ID}, 'active', '{{"version": 1}}'::jsonb)""",
+    )
+
+    await asyncio.to_thread(command.upgrade, alembic_config, "0011")
+    assert await _summary_failed_at_columns(database_url) == [("YES", "timestamp with time zone")]
+    assert await fetch_all(database_url, "SELECT summary_failed_at FROM contacts") == [(None,)]
+    await execute(database_url, "UPDATE contacts SET summary_failed_at = now()")
+
+    await asyncio.to_thread(command.downgrade, alembic_config, "0010")
+    assert await _summary_failed_at_columns(database_url) == []
+    assert await fetch_all(database_url, "SELECT summary->>'version' FROM contacts") == [("1",)]
+
+    await asyncio.to_thread(command.upgrade, alembic_config, "head")
+    assert await fetch_all(database_url, "SELECT summary_failed_at FROM contacts") == [(None,)]
 
 
 async def _follows_id_columns(url: URL) -> list[tuple[object, ...]]:

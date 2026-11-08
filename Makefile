@@ -1,4 +1,4 @@
-.PHONY: install check test fmt up down logs migrate revision db-up login login-docker llm-check persona-import examples-import examples-stats examples-convert reply-preview outbox-enqueue outbox-list outbox-cancel outbox-retry outbox-status outbox-resume schedule-import schedule-show schedule-check schedule-plan stop-check autopilot-status autopilot-resume setup-hooks
+.PHONY: install check test fmt up down logs migrate revision db-up login login-docker llm-check persona-import examples-import examples-stats examples-convert reply-preview outbox-enqueue outbox-list outbox-cancel outbox-retry outbox-status outbox-resume schedule-import schedule-show schedule-check schedule-plan stop-check autopilot-status autopilot-resume summary-update summary-show summary-clear setup-hooks
 
 install:
 	uv sync --locked
@@ -93,6 +93,18 @@ autopilot-status:
 
 autopilot-resume:
 	uv run python -m cyrano autopilot resume $${YES:+--yes}
+
+summary-update:
+	@test -n "$$CONTACT" || (echo 'usage: make summary-update CONTACT=<contact id>' >&2; exit 2)
+	uv run python -m cyrano summary update "$$CONTACT"
+
+summary-show:
+	@test -n "$$CONTACT" || (echo 'usage: make summary-show CONTACT=<contact id>' >&2; exit 2)
+	uv run python -m cyrano summary show "$$CONTACT"
+
+summary-clear:
+	@test -n "$$CONTACT" || (echo 'usage: make summary-clear CONTACT=<contact id> YES=1' >&2; exit 2)
+	uv run python -m cyrano summary clear "$$CONTACT" $${YES:+--yes}
 
 revision:
 	@test -n "$(m)" || (echo 'usage: make revision m="what changed"' >&2; exit 2)

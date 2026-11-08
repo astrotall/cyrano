@@ -94,7 +94,7 @@ otherwise the `default` mode. If `default` itself is missing or disabled they ra
 | 8 | The layered prompt is built: persona, mode fragment with few-shot examples, contact summary, last N messages | CYR-14, CYR-15, CYR-16, CYR-25 |
 | 9 | The LLM is called through the LLM interface; the response is validated | CYR-13 |
 | 10 | The job asks the planner for the send time ([humanization.md](humanization.md)) and writes an `autopilot` row, or a chain of up to three when the reply has several lines, one message per line (CYR-36). The sender sends it: status guard, FloodWait handling, rate limits, the read mark, typing and quiet hours, the parts in order (see [outbox-and-sender.md](outbox-and-sender.md)) | CYR-19, CYR-22, CYR-18, CYR-17, CYR-36 |
-| 11 | Background: contact summaries, proactive messages, reminders for undecided cards | CYR-25, CYR-23, CYR-24 |
+| 11 | Background: contact summaries of `active` and `paused` contacts every `SUMMARY_EVERY_MESSAGES` messages (exists, [summaries.md](summaries.md)); proactive messages and reminders for undecided cards (planned) | CYR-25, CYR-23, CYR-24 |
 
 Stop-triggers are detected three times: by the pattern detector on the incoming text (step 5), by
 the same detector on the whole burst in the job (step 7), and by the model's `NEEDS_OWNER` signal in
@@ -404,7 +404,8 @@ Fixed in CYR-9. Table `contacts`:
 | `mode_id` | Chosen mode, nullable, foreign key to `modes` |
 | `pause_reason` | Why the contact is `paused`: `manual_message`, `send_rejected`, `owner` or `stop_trigger`; `NULL` for every other status and for contacts paused before CYR-21. A check constraint allows only these values (migration `0007`, widened by `0008`, no backfill) |
 | `profile` | JSONB object: bio, photo path, matching-bot card text and card photo paths, `collected_at`. Structure: [The stored profile](#the-stored-profile) (CYR-11) |
-| `summary` | JSONB object: contact summary. Its schema arrives with CYR-25 |
+| `summary` | JSONB object: the contact summary (CYR-25), `{}` when there is none: `version`, `updated_at`, `cursor` (the `created_at` and id of the last message it covers) and `data` (the fields of [summaries.md](summaries.md#the-schema)). Written only by the summary updater and cleared only by `summary clear` |
+| `summary_failed_at` | When the last summary update failed, or `NULL`; the sweeper skips the contact for 10 minutes after it, and a successful update or `summary clear` empties it (migration `0011`, CYR-25) |
 | `last_message_at` | Time of the latest message **from the contact**, in the message time of [Message times](#message-times); only moves forward, a late event or an older replayed message does not take it back. A message we send does not move it (CYR-19) |
 | `reply_after` | When the owner last resumed the contact, or `NULL`; the autopilot never answers a message whose time is at or before it (migration `0009`, CYR-17) |
 | `created_at`, `updated_at` | `updated_at` moves only when a row really changes |

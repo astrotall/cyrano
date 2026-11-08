@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+from datetime import UTC, datetime
 from pathlib import Path
 
 import httpx
@@ -9,11 +10,14 @@ from sqlalchemy.engine import URL
 
 from cyrano import main as main_module
 from cyrano.config import Settings
+from cyrano.db.repositories import SqlSummaryRepository
+from cyrano.db.session import SessionFactory
 from cyrano.domain.errors import LLMAuthError, LLMUnavailableError
 from cyrano.domain.models import ModeCreate
+from cyrano.domain.summary import SUMMARY_VERSION, ContactSummary, StoredSummary, SummaryCursor
 from cyrano.llm.factory import LLMClientFactory
 from cyrano.main import main
-from cyrano.prompts.texts import DIALOGUE_BOUNDARY
+from cyrano.prompts.texts import DIALOGUE_BOUNDARY, SUMMARY_HEADER, SUMMARY_MEMORY_NOTE
 from cyrano.reply_cli import (
     NEEDS_OWNER_LINE,
     PERSONAL_DATA_WARNING,
@@ -92,6 +96,29 @@ async def test_show_prompt_prints_a_warning_then_both_messages_then_the_reply(
     stats = captured.out.splitlines()[-1]
     assert captured.out == f"[system]\n{system}\n[user]\n{user}\n{REPLY_MARKER}\n{stats}\n"
     assert stats.startswith(STATS_PATTERN)
+
+
+async def test_show_prompt_shows_the_stored_summary_layer(
+    repos: Repositories, session_factory: SessionFactory, capsys: pytest.CaptureFixture[str]
+) -> None:
+    contact = await ready_contact(repos)
+    moment = datetime(2026, 11, 8, 12, 0, tzinfo=UTC)
+    stored = StoredSummary(
+        version=SUMMARY_VERSION,
+        updated_at=moment,
+        cursor=SummaryCursor(created_at=moment, message_id=1),
+        data=ContactSummary(told_about_owner=["preview-told-marker-zq"]),
+    )
+    await SqlSummaryRepository(session_factory).store_summary(contact.id, stored, None)
+
+    code = await _command(repos, ScriptedLLMClient(REPLY_MARKER)).run(
+        ReplyPreviewRequest(contact.id, show_prompt=True)
+    )
+
+    out = capsys.readouterr().out
+    assert code == 0
+    assert f"{SUMMARY_HEADER}\n{SUMMARY_MEMORY_NOTE}" in out
+    assert "- preview-told-marker-zq" in out
 
 
 async def test_without_show_prompt_the_prompt_is_not_printed(

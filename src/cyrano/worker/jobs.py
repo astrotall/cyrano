@@ -1,15 +1,24 @@
 from __future__ import annotations
 
+import logging
+
 from arq import Retry
 
 from cyrano.domain.autopilot import ReplyJobRequest
+from cyrano.domain.enums import SummaryReason
 from cyrano.domain.errors import RetryJob
+from cyrano.domain.summary import SummaryJobRequest
 from cyrano.services.reply_job import ReplyJobRunner
+from cyrano.services.summary_updater import SummaryUpdater
+
+logger = logging.getLogger("cyrano.worker.jobs")
 
 RUNNER_KEY = "reply_job_runner"
+SUMMARY_UPDATER_KEY = "summary_updater"
 JOB_TRY_KEY = "job_try"
 FIRST_ATTEMPT = 1
 MISSING_RUNNER_MESSAGE = "the worker context has no reply job runner"
+MISSING_UPDATER_MESSAGE = "the worker context has no summary updater"
 
 
 def runner_from(ctx: dict[str, object]) -> ReplyJobRunner:
@@ -17,6 +26,13 @@ def runner_from(ctx: dict[str, object]) -> ReplyJobRunner:
     if not isinstance(runner, ReplyJobRunner):
         raise RuntimeError(MISSING_RUNNER_MESSAGE)
     return runner
+
+
+def updater_from(ctx: dict[str, object]) -> SummaryUpdater:
+    updater = ctx.get(SUMMARY_UPDATER_KEY)
+    if not isinstance(updater, SummaryUpdater):
+        raise RuntimeError(MISSING_UPDATER_MESSAGE)
+    return updater
 
 
 def attempt_from(ctx: dict[str, object]) -> int:
@@ -33,4 +49,33 @@ async def reply_to_contact(ctx: dict[str, object], contact_id: int, trigger_mess
         )
     except RetryJob as exc:
         raise Retry(defer=exc.defer_seconds) from None
+    return result.reason.value
+
+
+async def update_contact_summary(
+    ctx: dict[str, object], contact_id: int, up_to_message_id: int
+) -> str:
+    request = SummaryJobRequest(contact_id=contact_id, up_to_message_id=up_to_message_id)
+    updater = updater_from(ctx)
+    try:
+        result = await updater.update(request.contact_id)
+    except Exception as exc:
+        logger.error(
+            "summary job failed",
+            extra={
+                "contact_id": request.contact_id,
+                "up_to_message_id": request.up_to_message_id,
+                "error": type(exc).__name__,
+            },
+        )
+        return SummaryReason.UNEXPECTED_ERROR.value
+    logger.info(
+        "summary job finished",
+        extra={
+            "contact_id": request.contact_id,
+            "up_to_message_id": request.up_to_message_id,
+            "outcome": result.outcome.value,
+            "reason": result.reason.value,
+        },
+    )
     return result.reason.value

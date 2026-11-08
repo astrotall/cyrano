@@ -19,6 +19,7 @@ from cyrano.db.repositories import (
     SqlPersonaRepository,
     SqlScheduleProfileRepository,
     SqlStyleExampleRepository,
+    SqlSummaryRepository,
 )
 from cyrano.db.session import build_engine, build_session_factory
 from cyrano.domain.enums import LLMStep
@@ -32,6 +33,7 @@ from cyrano.services.reply_generator import ReplyGenerator
 from cyrano.services.reply_job import ReplyJobRunner
 from cyrano.services.send_guard import SendGuard
 from cyrano.services.style_examples import ExampleSelector
+from cyrano.services.summary_updater import SummaryUpdater
 
 
 def _utc_now() -> datetime:
@@ -41,6 +43,7 @@ def _utc_now() -> datetime:
 @dataclass(frozen=True, slots=True)
 class WorkerResources:
     runner: ReplyJobRunner
+    summary_updater: SummaryUpdater
     engine: AsyncEngine
     llm: LLMClientFactory
     bot: NoticeBot
@@ -98,4 +101,12 @@ def build_worker_resources(
         max_burst_wait_seconds=settings.autopilot_max_burst_wait_seconds,
         clock=_utc_now,
     )
-    return WorkerResources(runner=runner, engine=engine, llm=llm, bot=bot)
+    summary_updater = SummaryUpdater(
+        contacts=contacts,
+        summaries=SqlSummaryRepository(session_factory),
+        client=llm.get(LLMStep.SUMMARY),
+        clock=_utc_now,
+    )
+    return WorkerResources(
+        runner=runner, summary_updater=summary_updater, engine=engine, llm=llm, bot=bot
+    )

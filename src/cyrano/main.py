@@ -35,6 +35,7 @@ from cyrano.db.repositories import (
     SqlScheduleProfileRepository,
     SqlSenderStateRepository,
     SqlStyleExampleRepository,
+    SqlSummaryRepository,
 )
 from cyrano.db.session import build_engine, build_session_factory
 from cyrano.domain.enums import LLMStep
@@ -85,6 +86,8 @@ from cyrano.services.send_guard import SendGuard
 from cyrano.services.send_limiter import SendLimiter
 from cyrano.services.style_examples import ExampleSelector
 from cyrano.services.style_import import ExamplesImporter, PersonaImporter
+from cyrano.services.summary_sweeper import SummarySweeper
+from cyrano.services.summary_updater import SummaryUpdater
 from cyrano.stop_check_cli import (
     StopCheckCommands,
     StopCheckUsageError,
@@ -93,13 +96,20 @@ from cyrano.stop_check_cli import (
     stop_check_request,
 )
 from cyrano.style_cli import StyleCommands, StyleRequest, add_style_parsers, style_request
+from cyrano.summary_cli import (
+    SummaryCommands,
+    SummaryRequest,
+    SummaryUsageError,
+    add_summary_parser,
+    summary_request,
+)
 from cyrano.userbot.client import UserbotAccess, build_access, ensure_session_exists
 from cyrano.userbot.errors import UserbotError
 from cyrano.userbot.leomatch_source import TelethonLeomatchSource
 from cyrano.userbot.login import run_login
 from cyrano.userbot.profile_source import TelethonProfileSource
 from cyrano.userbot.runner import Userbot
-from cyrano.worker.queue import ArqReplyJobQueue
+from cyrano.worker.queue import ArqReplyJobQueue, ArqSummaryJobQueue
 
 logger = logging.getLogger("cyrano")
 
@@ -115,6 +125,7 @@ EXIT_OUTBOX_ERROR = 1
 EXIT_SCHEDULE_ERROR = 1
 EXIT_STOP_CHECK_ERROR = 1
 EXIT_AUTOPILOT_ERROR = 1
+EXIT_SUMMARY_ERROR = 1
 LOGIN_CANCELLED_MESSAGE = "Login cancelled. Nothing was saved."
 POLLING_ENDED_REASON = "polling ended unexpectedly"
 STORAGE_FAILED_MESSAGE = "storage failed: {error}"
@@ -150,6 +161,14 @@ def _report_sweeper_exit(task: asyncio.Task[None]) -> None:
     error = task.exception()
     if error is not None:
         logger.error("autopilot sweeper stopped", extra={"error": type(error).__name__})
+
+
+def _report_summary_sweeper_exit(task: asyncio.Task[None]) -> None:
+    if task.cancelled():
+        return
+    error = task.exception()
+    if error is not None:
+        logger.error("summary sweeper stopped", extra={"error": type(error).__name__})
 
 
 def _utc_now() -> datetime:
@@ -250,12 +269,20 @@ async def run(
         debounce_seconds=settings.autopilot_debounce_seconds,
         clock=_utc_now,
     )
+    summary_sweeper = SummarySweeper(
+        SqlSummaryRepository(session_factory),
+        ArqSummaryJobQueue(reply_jobs),
+        enabled=settings.summary_enabled,
+        every_messages=settings.summary_every_messages,
+        clock=_utc_now,
+    )
     heartbeat = asyncio.create_task(heartbeat_loop(settings.heartbeat_path, heartbeat_interval))
     collector_task: asyncio.Task[None] | None = None
     announcer_task: asyncio.Task[None] | None = None
     polling_task: asyncio.Task[None] | None = None
     sender_task: asyncio.Task[None] | None = None
     sweeper_task: asyncio.Task[None] | None = None
+    summary_sweeper_task: asyncio.Task[None] | None = None
     polling_failures: list[ControlBotError] = []
     try:
         await reply_jobs.start()
@@ -273,11 +300,16 @@ async def run(
             sender_task.add_done_callback(_report_sender_exit)
             sweeper_task = asyncio.create_task(sweeper.run())
             sweeper_task.add_done_callback(_report_sweeper_exit)
+            summary_sweeper_task = asyncio.create_task(summary_sweeper.run())
+            summary_sweeper_task.add_done_callback(_report_summary_sweeper_exit)
         await userbot.run_until(stop)
         if polling_failures:
             raise polling_failures[0]
     finally:
         logger.info("cyrano shutting down", extra={"service": "app"})
+        if summary_sweeper_task is not None:
+            summary_sweeper_task.cancel()
+            await asyncio.gather(summary_sweeper_task, return_exceptions=True)
         if sweeper_task is not None:
             sweeper_task.cancel()
             await asyncio.gather(sweeper_task, return_exceptions=True)
@@ -461,6 +493,28 @@ async def _run_autopilot_command(settings: Settings, request: AutopilotRequest) 
         await engine.dispose()
 
 
+async def _run_summary_command(settings: Settings, request: SummaryRequest) -> int:
+    engine = build_engine(settings)
+    session_factory = build_session_factory(engine)
+    contacts = SqlContactRepository(session_factory)
+    summaries = SqlSummaryRepository(session_factory)
+    factory = LLMClientFactory(settings)
+    try:
+        updater = SummaryUpdater(
+            contacts=contacts,
+            summaries=summaries,
+            client=factory.get(LLMStep.SUMMARY),
+            clock=_utc_now,
+        )
+        return await SummaryCommands(updater, contacts, summaries).run(request)
+    except (SQLAlchemyError, OSError) as exc:
+        print(STORAGE_FAILED_MESSAGE.format(error=type(exc).__name__), file=sys.stderr)
+        return EXIT_SUMMARY_ERROR
+    finally:
+        await factory.aclose()
+        await engine.dispose()
+
+
 def _parse_args(argv: Sequence[str] | None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(prog="python -m cyrano", description=APP_DESCRIPTION)
     commands = parser.add_subparsers(dest="command")
@@ -472,6 +526,7 @@ def _parse_args(argv: Sequence[str] | None) -> argparse.Namespace:
     add_schedule_parser(commands)
     add_stop_check_parser(commands)
     add_autopilot_parser(commands)
+    add_summary_parser(commands)
     return parser.parse_args(argv)
 
 
@@ -500,6 +555,11 @@ def main(argv: Sequence[str] | None = None) -> int:
     except AutopilotUsageError as exc:
         print(exc, file=sys.stderr)
         return EXIT_AUTOPILOT_ERROR
+    try:
+        summary = summary_request(args)
+    except SummaryUsageError as exc:
+        print(exc, file=sys.stderr)
+        return EXIT_SUMMARY_ERROR
     if stop_check is not None and stop_check.text is not None:
         return run_text_check(stop_check.text)
     try:
@@ -516,6 +576,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         return asyncio.run(_run_schedule_command(settings, schedule))
     if autopilot is not None:
         return asyncio.run(_run_autopilot_command(settings, autopilot))
+    if summary is not None:
+        return asyncio.run(_run_summary_command(settings, summary))
     if stop_check is not None and stop_check.contact_id is not None:
         return asyncio.run(_run_stop_check_command(settings, stop_check.contact_id))
     preview = reply_preview_request(args)

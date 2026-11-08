@@ -5,7 +5,8 @@ command exist since CYR-16. The generator itself sends nothing and writes nothin
 `reply-preview` and, since CYR-17, the autopilot job in the worker process
 ([autopilot.md](autopilot.md)), which writes the reply to the outbox; `main.run` (the app) does not
 build it. Since CYR-20 the instructions carry the hand-over rule and the generator recognises the
-`NEEDS_OWNER` signal ([stop-triggers.md](stop-triggers.md)).
+`NEEDS_OWNER` signal ([stop-triggers.md](stop-triggers.md)). Since CYR-25 the generator loads the
+contact's stored summary into the summary layer ([summaries.md](summaries.md)).
 
 Code map and import rules: [architecture.md](architecture.md). Reasons: [decisions.md](decisions.md).
 The persona and the examples: [persona-and-examples.md](persona-and-examples.md). The LLM client:
@@ -39,7 +40,7 @@ a header line on its own line:
 | 2 | `=== PERSONA ===` | The stored persona text, exactly as stored and never trimmed | never (no persona is an error) |
 | 3 | `=== MODE ===` | The prompt fragment of the contact's mode | the fragment is blank |
 | 4 | `=== CONTACT FACTS ===` | Facts from the contact's profile, with a note that they may be inaccurate | no fact is present |
-| 5 | `=== CONTACT SUMMARY ===` | A summary text passed in by the caller | no summary (always, until CYR-25) |
+| 5 | `=== CONTACT SUMMARY ===` | The contact's stored summary with a memory note and the `told_about_owner` block ([The summary layer](#the-summary-layer)), or a text passed in by the caller | no readable summary, or one with no field |
 | 6 | `=== STYLE EXAMPLES ===` | The examples of the mode as numbered blocks of `Contact:` and `Me:` lines, each ending with `Me:` | no example |
 
 The user message has three parts: a line with the current local date, time and weekday in
@@ -84,6 +85,22 @@ Each value becomes one line (whitespace runs collapse), so a bio cannot open a n
 
 **Never in the prompt:** the username, the Telegram id, the internal ids, the photo paths and the
 raw Leomatch texts (the card text and the match message).
+
+### The summary layer
+
+CYR-25. The generator reads `contacts.summary` with the tolerant reader (`read_stored_summary`;
+an unreadable or old shape is no summary and never raises) and renders it with
+`render_summary_layer` (`prompts/render.py`). An explicit `summary` argument wins over the stored
+one. The layer starts with one English line, `SUMMARY_MEMORY_NOTE`: memory from earlier messages
+that may be incomplete or outdated, and the dialogue below wins on any conflict. Then one line per
+non-empty field with a short Russian label (`- Имя: ...`, `- Возраст: ...`, `- Город: ...`,
+`- Занятие: ...`, `- Интересы: ...`, `- Настроение и тон: ...`, `- Договорённости и планы: ...`,
+`- Открытые вопросы: ...`, `- Заметки: ...`), list items joined with `; `. The `told_about_owner`
+entries follow in their own block under `TOLD_ABOUT_OWNER_NOTE`, which says the reply must stay
+consistent with every line, one `- ` line each. Every value is collapsed to one line. A summary
+with no field gives no layer, and a contact without a summary gets the prompt it got before. The
+layer is never trimmed by the budget (only examples and history are); the caps of the schema
+bound it. The schema, the cursor and how the summary is made: [summaries.md](summaries.md).
 
 ### The line-per-message convention
 
@@ -232,6 +249,7 @@ The prompt is sent to the LLM provider, so everything in it leaves the machine:
 - the mode fragment;
 - the style examples, **the other person's lines in them included**;
 - the contact's name, age, city, about text and bio (see above);
+- the contact's stored summary (CYR-25), `told_about_owner` included;
 - the last messages of the conversation, both sides;
 - the current local time.
 
@@ -252,7 +270,6 @@ settings.
 
 ## Not done here
 
-- No summary is produced: the layer takes any text, and nobody passes one until CYR-25.
 - No commitment statement in the instructions.
 - The generator hands nothing over itself: the autopilot job acts on the model signal (CYR-17).
 - No sending, no delay, no pacing here: the autopilot, the planner and the sender do that (CYR-17,

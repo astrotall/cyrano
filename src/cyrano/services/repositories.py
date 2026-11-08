@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import Sequence
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Protocol
 
 from cyrano.domain.autopilot import AutopilotState
@@ -26,6 +26,7 @@ from cyrano.domain.models import (
 from cyrano.domain.outbox import OutgoingPeak, ScheduledMessage, SenderState
 from cyrano.domain.schedule import ScheduleProfile
 from cyrano.domain.style import ExamplesAddResult, Persona, StyleExample, StyleExampleCreate
+from cyrano.domain.summary import StoredSummary, SummaryCursor, SummaryDue
 
 
 class ContactRepository(Protocol):
@@ -204,3 +205,23 @@ class ScheduleProfileRepository(Protocol):
     async def get(self) -> ScheduleProfile | None: ...
 
     async def replace(self, profile: ScheduleProfile) -> ScheduleProfile: ...
+
+
+class SummaryRepository(Protocol):
+    async def messages_after(
+        self, contact_id: int, cursor: SummaryCursor | None, limit: int
+    ) -> list[Message]: ...
+
+    async def count_after(self, contact_id: int, cursor: SummaryCursor | None) -> int: ...
+
+    async def store_summary(
+        self, contact_id: int, stored: StoredSummary, expected_cursor: SummaryCursor | None
+    ) -> bool: ...
+
+    async def mark_summary_failed(self, contact_id: int, at: datetime) -> None: ...
+
+    async def clear_summary(self, contact_id: int) -> bool: ...
+
+    async def contacts_due_for_summary(
+        self, *, every: int, cooldown: timedelta, now: datetime, limit: int
+    ) -> list[SummaryDue]: ...

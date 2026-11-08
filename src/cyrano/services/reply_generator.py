@@ -3,8 +3,10 @@ from __future__ import annotations
 import logging
 
 from cyrano.domain.errors import ContactNotFound, ModeNameNotFound, PersonaMissing
-from cyrano.domain.models import Mode
+from cyrano.domain.models import Contact, Mode
 from cyrano.domain.reply import BuiltPrompt, GeneratedReply
+from cyrano.domain.summary import read_stored_summary
+from cyrano.prompts.render import render_summary_layer
 from cyrano.services.contact_facts import build_contact_facts
 from cyrano.services.llm_client import LLMClient
 from cyrano.services.persona_service import PersonaService
@@ -66,7 +68,7 @@ class ReplyGenerator:
             persona=persona.text,
             mode_fragment=mode.prompt_fragment,
             facts=build_contact_facts(contact),
-            summary=summary,
+            summary=summary if summary is not None else _stored_summary_text(contact),
             messages=history,
             examples=examples,
         )
@@ -108,3 +110,8 @@ class ReplyGenerator:
         if await self._modes.get_by_name(mode_name) is None:
             raise ModeNameNotFound
         return await self._modes.resolve_by_name(mode_name)
+
+
+def _stored_summary_text(contact: Contact) -> str | None:
+    stored = read_stored_summary(contact.summary)
+    return None if stored is None else render_summary_layer(stored.data)

@@ -3,9 +3,9 @@
 State as of CYR-36: the skeleton, the storage layer, the userbot intake, the profile collection, the
 control bot with the contact card, the LLM client, the persona with the style examples, the
 layered reply prompt with the reply generator and the outbox with the one sender, its limits, its
-pause, its stop and its pre-send part exist, and so does the send time planner. Since CYR-21 a message the owner writes by hand from the second account pauses the contact, and the owner can resume it from the notice; since CYR-20 stop-triggers hand the contact over. Since CYR-17 the autopilot exists behind `AUTOPILOT_ENABLED`: the app enqueues a reply job per incoming message of an `active` contact, the Arq worker generates the reply with the LLM client, the persona, the examples and the reply generator and writes an `autopilot` row, and the app's sender sends it ([autopilot.md](autopilot.md)). The app itself still builds no LLM client. Anything else is marked **planned** with its ticket.
+pause, its stop and its pre-send part exist, and so does the send time planner. Since CYR-21 a message the owner writes by hand from the second account pauses the contact, and the owner can resume it from the notice; since CYR-20 stop-triggers hand the contact over. Since CYR-17 the autopilot exists behind `AUTOPILOT_ENABLED`: the app enqueues a reply job per incoming message of an `active` contact, the Arq worker generates the reply with the LLM client, the persona, the examples and the reply generator and writes an `autopilot` row, and the app's sender sends it ([autopilot.md](autopilot.md)). The app itself still builds no LLM client. Since CYR-25 the worker also keeps a summary of every `active` and `paused` contact, which the reply prompt shows as a layer ([summaries.md](summaries.md)). Anything else is marked **planned** with its ticket.
 
-The state marker is CYR-36, the latest ticket whose change these guides describe as existing (a reply written as several lines is sent as up to three messages, in [outbox-and-sender.md](outbox-and-sender.md#multi-part-replies) and [decisions.md](decisions.md)). It was established from the guides and the migrations, not from git: the newest migration is `0010` (CYR-36, `scheduled_messages.follows_id`). CYR-41 (the supersession of `autopilot` rows) added no migration. CYR-40 (the shared time rule of a message) and CYR-39 (the documents in sync with the code) are described here as well.
+The state marker is CYR-25, the latest ticket whose change these guides describe as existing (the contact summaries, in [summaries.md](summaries.md) and [decisions.md](decisions.md)). It was established from the guides and the migrations, not from git: the newest migration is `0011` (CYR-25, `contacts.summary_failed_at`); before it `0010` (CYR-36, `scheduled_messages.follows_id`). CYR-41 (the supersession of `autopilot` rows) added no migration. CYR-40 (the shared time rule of a message) and CYR-39 (the documents in sync with the code) are described here as well.
 Product and decisions: [CLAUDE.md](../../CLAUDE.md). Reasons: [decisions.md](decisions.md).
 
 ## Layers
@@ -16,14 +16,14 @@ Source lives in `src/cyrano/`.
 | --- | --- | --- |
 | `userbot/` | The only package that imports Telethon: client, session and login, event filters, the incoming-message handler, the outgoing-message handler (CYR-21), the listener lifecycle. Receives private messages on the second account and converts events into plain objects. Also holds the read-only adapters of the profile collection: `profile_source.py` (bio, names, photo) and `leomatch_source.py` with `leomatch_match.py` (the matching-bot chat). `adapter.py` (`TelethonAdapter`, CYR-19) wraps the Telethon client: the read Protocol, and the one Telegram send behind the sender | exists for listening and registration (CYR-10), for reading profiles (CYR-11) and for the send (CYR-19); only the adapter can send, and only `OutboxSender` calls it |
 | `bot/` | The only package that imports aiogram: the owner-only control bot. `app.py` (`ControlBot`: bot, dispatcher, polling, stop), `middleware.py` (owner-only), `handlers.py` (`/start`, the card buttons, the resume button of the manual-pause notice, the resume, keep and ignore buttons of the hand-over notice), `rendering.py` (pure card text, keyboard, decision, the hand-over notice and its keyboard), `callbacks.py` (callback data), `sender.py` (`TelegramCardSender`), `notifier.py` (`TelegramOwnerNotifier`, CYR-19, `TelegramManualPauseNotifier`, CYR-21, and `TelegramHandOverNotifier`, CYR-20), `messages.py` (every Russian text), `errors.py` (readable fatal errors). Planned: the rest of the panel (CYR-26) | exists for the card and its two buttons (CYR-12), for outbox notifications (CYR-19), for the manual-pause notice (CYR-21) and for the hand-over notice (CYR-20) |
-| `llm/` | The only package that imports httpx and the only one that knows the provider: `deepseek.py` (`DeepSeekClient`, `StepConfig`), `transport.py` (`RetryingTransport`), `factory.py` (`LLMClientFactory`), `wire.py` (the response fields it reads), `json_reply.py` (JSON extraction and validation problems), `prompts.py` (the texts it adds for JSON), `constants.py` (every number and string). See [LLM client](#llm-client-cyr-13) | exists (CYR-13); built by the `llm-check` and `reply-preview` commands and, since CYR-17, by the worker for the reply job; the app process does not build it; summaries are CYR-25 |
+| `llm/` | The only package that imports httpx and the only one that knows the provider: `deepseek.py` (`DeepSeekClient`, `StepConfig`), `transport.py` (`RetryingTransport`), `factory.py` (`LLMClientFactory`), `wire.py` (the response fields it reads), `json_reply.py` (JSON extraction and validation problems), `prompts.py` (the texts it adds for JSON), `constants.py` (every number and string). See [LLM client](#llm-client-cyr-13) | exists (CYR-13); built by the `llm-check` and `reply-preview` commands and, since CYR-17, by the worker for the reply job and, since CYR-25, for the summary job (the `summary` step); the app process does not build it |
 | `db/` | SQLAlchemy models (`models.py`), engine and session factory (`session.py`), repositories (`repositories.py`; CYR-14 added `SqlPersonaRepository` and `SqlStyleExampleRepository`; CYR-19 added `SqlOutboxRepository`; CYR-22 added `SqlSenderStateRepository`; CYR-21 added `pause_reason` on the contact row, `MessageRepository.exists` and `OutboxRepository.has_sending_row`) | exists; called by the intake (CYR-10), by the import commands (CYR-14) and by the sender (CYR-19) |
-| `services/` | Business logic shared by userbot, bot and worker: contact lifecycle, sender, reply pipeline. CYR-18 added `humanization.py` (the pure planner functions, `ScheduleService`, `HumanizationPlanner`) and `schedule_files.py` (`parse_schedule`, `ScheduleImporter`). `repositories.py` holds the repository Protocols, `intake.py` the `IntakeService`, `sanitize.py` the NUL-byte removal, `contact_events.py` the generic `ContactEventPublisher[T]` and `ContactEventSubscriber[T]` Protocols and the in-memory queue; CYR-11 added `profile_source.py` (the `ProfileSource` and `LeomatchSource` Protocols and `ProfileSourceError`), `leomatch.py` (the card parser) and `profile_collector.py` (`ProfileCollector`); CYR-12 added `card_sender.py` (the `CardSender` Protocol), `card_builder.py` (assembles the `ContactCard`), `card_announcer.py` (`CardAnnouncer`) and `card_actions.py` (`CardActions`); CYR-13 added `llm_client.py` (the `LLMClient` Protocol) and `llm_check.py` (`check_llm`, the request behind `llm-check`); CYR-14 added `style_files.py` (reading and validating the two import files), `style_import.py` (`PersonaImporter`, `ExamplesImporter`), `persona_service.py` (`PersonaService`) and `style_examples.py` (`ExampleSelector`, `collect_example_stats`), and the `PersonaRepository` and `StyleExampleRepository` Protocols in `repositories.py`; CYR-16 added `contact_facts.py` (`build_contact_facts`), `prompt_builder.py` (`PromptBuilder`), `reply_postprocess.py` (`clean_reply`) and `reply_generator.py` (`ReplyGenerator`); see [Reply generation](#reply-generation-cyr-16); CYR-19 added `send_guard.py` (`check`, `SendGuard`), `outbox_service.py` (`OutboxService`), `outbox_sender.py` (`OutboxSender`), `message_transport.py` (the `MessageTransport` Protocol), `owner_notifier.py` (the `OwnerNotifier` Protocol) and the `OutboxRepository` Protocol in `repositories.py`; CYR-22 added `send_limiter.py` (`SendLimiter` and its pure rules) and the `SenderStateRepository` Protocol; CYR-21 added `manual_intervention.py` (`ManualMessageDetector`), `manual_pause_notifier.py` (the one-method `ManualPauseNotifier` Protocol) and `pause_actions.py` (`PauseActions`, resume of a paused contact; `ignore` since CYR-20); see [Manual intervention](#manual-intervention-cyr-21); CYR-20 added `stop_triggers.py` (the pure detector), `hand_over.py` (`HandOverService`) and `hand_over_notifier.py` (the one-method `HandOverNotifier` Protocol), and the gate in `intake.py`; see [Stop-triggers](#stop-triggers-cyr-20); CYR-17 added `reply_job.py` (`ReplyJobRunner`, `AutopilotNotices`), `autopilot.py` (`AutopilotScheduler`, `AutopilotSweeper`), `reply_job_queue.py` (the one-method `ReplyJobQueue` Protocol) and the `AutopilotStateRepository` and `ReplyBacklogRepository` Protocols; see [Autopilot](#autopilot-cyr-17); CYR-40 added `message_time.py` (`message_time`, the one time rule of a message, called by the intake and by the manual-message detector); see [Outbox and sender](#outbox-and-sender-cyr-19) | Protocols, intake, sanitization, events (CYR-10), the profile collector (CYR-11), the card announcer and actions (CYR-12), the LLM Protocol (CYR-13) and the persona and example services (CYR-14) the prompt builder and reply generator (CYR-16) and the outbox with the sender (CYR-19) exist, and so do the humanization (CYR-18), the manual-message pause (CYR-21), the stop-triggers (CYR-20), the autopilot (CYR-17), the shared time rule (CYR-40) and the split of a reply into parts (`reply_split.py`, CYR-36); the modes (CYR-15), proactive messages (CYR-23) and summaries (CYR-25) are planned |
-| `worker/` | The Arq worker and the only package that imports `arq` (CYR-17): `settings.py` (`WorkerSettings`, `startup`, `shutdown`), `jobs.py` (`reply_to_contact`), `composition.py` (`build_worker_resources`, `WorkerResources`, the worker's composition root), `queue.py` (`ArqReplyJobQueue`, the `ReplyJobQueue` implementation the app uses). It imports neither Telethon nor `userbot` | exists (CYR-17); the only job is `reply_to_contact`. Background jobs CYR-23, CYR-24, CYR-25 |
+| `services/` | Business logic shared by userbot, bot and worker: contact lifecycle, sender, reply pipeline. CYR-18 added `humanization.py` (the pure planner functions, `ScheduleService`, `HumanizationPlanner`) and `schedule_files.py` (`parse_schedule`, `ScheduleImporter`). `repositories.py` holds the repository Protocols, `intake.py` the `IntakeService`, `sanitize.py` the NUL-byte removal, `contact_events.py` the generic `ContactEventPublisher[T]` and `ContactEventSubscriber[T]` Protocols and the in-memory queue; CYR-11 added `profile_source.py` (the `ProfileSource` and `LeomatchSource` Protocols and `ProfileSourceError`), `leomatch.py` (the card parser) and `profile_collector.py` (`ProfileCollector`); CYR-12 added `card_sender.py` (the `CardSender` Protocol), `card_builder.py` (assembles the `ContactCard`), `card_announcer.py` (`CardAnnouncer`) and `card_actions.py` (`CardActions`); CYR-13 added `llm_client.py` (the `LLMClient` Protocol) and `llm_check.py` (`check_llm`, the request behind `llm-check`); CYR-14 added `style_files.py` (reading and validating the two import files), `style_import.py` (`PersonaImporter`, `ExamplesImporter`), `persona_service.py` (`PersonaService`) and `style_examples.py` (`ExampleSelector`, `collect_example_stats`), and the `PersonaRepository` and `StyleExampleRepository` Protocols in `repositories.py`; CYR-16 added `contact_facts.py` (`build_contact_facts`), `prompt_builder.py` (`PromptBuilder`), `reply_postprocess.py` (`clean_reply`) and `reply_generator.py` (`ReplyGenerator`); see [Reply generation](#reply-generation-cyr-16); CYR-19 added `send_guard.py` (`check`, `SendGuard`), `outbox_service.py` (`OutboxService`), `outbox_sender.py` (`OutboxSender`), `message_transport.py` (the `MessageTransport` Protocol), `owner_notifier.py` (the `OwnerNotifier` Protocol) and the `OutboxRepository` Protocol in `repositories.py`; CYR-22 added `send_limiter.py` (`SendLimiter` and its pure rules) and the `SenderStateRepository` Protocol; CYR-21 added `manual_intervention.py` (`ManualMessageDetector`), `manual_pause_notifier.py` (the one-method `ManualPauseNotifier` Protocol) and `pause_actions.py` (`PauseActions`, resume of a paused contact; `ignore` since CYR-20); see [Manual intervention](#manual-intervention-cyr-21); CYR-20 added `stop_triggers.py` (the pure detector), `hand_over.py` (`HandOverService`) and `hand_over_notifier.py` (the one-method `HandOverNotifier` Protocol), and the gate in `intake.py`; see [Stop-triggers](#stop-triggers-cyr-20); CYR-17 added `reply_job.py` (`ReplyJobRunner`, `AutopilotNotices`), `autopilot.py` (`AutopilotScheduler`, `AutopilotSweeper`), `reply_job_queue.py` (the one-method `ReplyJobQueue` Protocol) and the `AutopilotStateRepository` and `ReplyBacklogRepository` Protocols; see [Autopilot](#autopilot-cyr-17); CYR-40 added `message_time.py` (`message_time`, the one time rule of a message, called by the intake and by the manual-message detector); see [Outbox and sender](#outbox-and-sender-cyr-19); CYR-25 added `summary_sanitizer.py` (`sanitize_summary`), `summary_updater.py` (`SummaryUpdater`, `build_summary_prompt`), `summary_sweeper.py` (`SummarySweeper`), `summary_job_queue.py` (the one-method `SummaryJobQueue` Protocol) and the `SummaryRepository` Protocol; see [Contact summaries](#contact-summaries-cyr-25) | Protocols, intake, sanitization, events (CYR-10), the profile collector (CYR-11), the card announcer and actions (CYR-12), the LLM Protocol (CYR-13) and the persona and example services (CYR-14) the prompt builder and reply generator (CYR-16) and the outbox with the sender (CYR-19) exist, and so do the humanization (CYR-18), the manual-message pause (CYR-21), the stop-triggers (CYR-20), the autopilot (CYR-17), the shared time rule (CYR-40) and the split of a reply into parts (`reply_split.py`, CYR-36); and so do the summaries (CYR-25); the modes (CYR-15) and proactive messages (CYR-23) are planned |
+| `worker/` | The Arq worker and the only package that imports `arq` (CYR-17): `settings.py` (`WorkerSettings`, `startup`, `shutdown`), `jobs.py` (`reply_to_contact`; `update_contact_summary` since CYR-25), `composition.py` (`build_worker_resources`, `WorkerResources`, the worker's composition root), `queue.py` (`ArqReplyJobQueue`, the `ReplyJobQueue` implementation the app uses; `ArqSummaryJobQueue`, the `SummaryJobQueue` implementation, on the same Redis pool, since CYR-25). It imports neither Telethon nor `userbot` | exists (CYR-17); the jobs are `reply_to_contact` and, since CYR-25, `update_contact_summary`. Background jobs CYR-23, CYR-24 |
 | `config.py` | `Settings` (pydantic-settings), `load_settings`, `ConfigError` | exists |
 | `logging.py` | JSON-lines formatter, `build_log_config`, `configure_logging` | exists |
 | `health.py` | Heartbeat file, `is_alive`, `python -m cyrano.health` | exists |
-| `main.py`, `__main__.py` | App entrypoint (composition root), the subcommands `login`, `llm-check`, `persona` (`import`, `show`), `examples` (`import`, `stats`, `convert`), `reply-preview`, `outbox` (`enqueue`, `list`, `cancel`, `retry`, `status`, `resume`), `schedule` (`import`, `show`, `check`, `plan`), `stop-check` and `autopilot` (`status`, `resume`), signal handling, heartbeat task | exists; the userbot is plugged in (CYR-10), the collector (CYR-11), the control bot and the announcer (CYR-12); `llm-check` builds the LLM factory (CYR-13); the persona and examples commands build the two repositories and the importers (CYR-14); `reply-preview` builds the repositories, the selector, the `PromptBuilder`, the `reply` client and the `ReplyGenerator` (CYR-16); the `outbox` command builds the service and the repositories, and `run` builds the sender (CYR-19), with the state repository and the limiter (CYR-22); `run` builds the `HandOverService` with the control bot's notifier and passes it to the intake (CYR-20); `run` builds the `ArqReplyJobQueue`, the `AutopilotScheduler` (passed to the intake) and the `AutopilotSweeper`, and the `autopilot` command its repositories (CYR-17); `run` builds neither the LLM client nor the persona, example and reply services: the worker does |
+| `main.py`, `__main__.py` | App entrypoint (composition root), the subcommands `login`, `llm-check`, `persona` (`import`, `show`), `examples` (`import`, `stats`, `convert`), `reply-preview`, `outbox` (`enqueue`, `list`, `cancel`, `retry`, `status`, `resume`), `schedule` (`import`, `show`, `check`, `plan`), `stop-check`, `autopilot` (`status`, `resume`) and `summary` (`update`, `show`, `clear`), signal handling, heartbeat task | exists; the userbot is plugged in (CYR-10), the collector (CYR-11), the control bot and the announcer (CYR-12); `llm-check` builds the LLM factory (CYR-13); the persona and examples commands build the two repositories and the importers (CYR-14); `reply-preview` builds the repositories, the selector, the `PromptBuilder`, the `reply` client and the `ReplyGenerator` (CYR-16); the `outbox` command builds the service and the repositories, and `run` builds the sender (CYR-19), with the state repository and the limiter (CYR-22); `run` builds the `HandOverService` with the control bot's notifier and passes it to the intake (CYR-20); `run` builds the `ArqReplyJobQueue`, the `AutopilotScheduler` (passed to the intake) and the `AutopilotSweeper`, and the `autopilot` command its repositories (CYR-17); `run` builds neither the LLM client nor the persona, example and reply services: the worker does; `run` builds the `SummarySweeper` with the `ArqSummaryJobQueue`, and the `summary` command its repositories, the `summary` client and the `SummaryUpdater` (CYR-25) |
 | `style_cli.py` | The `persona` and `examples` commands: the argparse definitions, `StyleRequest` and `StyleCommands`, which receive their importers, service and repository by injection and print counts only. `main.py` builds the concrete objects | exists (CYR-14); see [Persona and style examples](#persona-and-style-examples-cyr-14) |
 | `convert_cli.py` | The `examples convert` command (CYR-34): the argparse definition, `ConvertRequest`, the report printing. `main.py` dispatches it **before** `load_settings`, so it needs no `Settings`, `.env`, database or network | exists (CYR-34); see [Chat export converter](#chat-export-converter-cyr-34) |
 | `reply_cli.py` | The `reply-preview` command (CYR-16): the argparse definition, `ReplyPreviewRequest`, `ReplyPreviewCommand`, which receives the `ReplyGenerator` by injection and prints the reply, one stats line and one-line errors. `main.py` builds the concrete objects | exists (CYR-16); see [Reply generation](#reply-generation-cyr-16) |
@@ -31,13 +31,14 @@ Source lives in `src/cyrano/`.
 | `stop_check_cli.py` | The `stop-check` command (CYR-20): the strict argument parser, `StopCheckRequest`, `run_text_check` and `StopCheckCommands`, which receive the repositories by injection and print class names only. `main.py` dispatches `--text` **before** `load_settings`, so it needs no `.env` or database | exists (CYR-20); see [Stop-triggers](#stop-triggers-cyr-20) |
 | `stop_trigger_patterns.py` | Pattern data of the stop-triggers (CYR-20): the phrases per class, the messenger and verb lists, the digit, handle, currency and link rules. Constants only; imports only `domain` | exists (CYR-20) |
 | `autopilot_cli.py` | The `autopilot` commands (CYR-17): the strict argument parser, `AutopilotRequest`, `AutopilotCommands`, which receive the state, outbox and backlog repositories by injection and print states, reasons and counters only | exists (CYR-17); see [Autopilot](#autopilot-cyr-17) |
+| `summary_cli.py` | The `summary` commands (CYR-25): the strict argument parser, `SummaryRequest`, `SummaryCommands`, which receive the updater and the repositories by injection; `update` prints the outcome and counters, `show` prints the stored summary after a warning (the only output of summary content), `clear` needs `--yes` | exists (CYR-25); see [Contact summaries](#contact-summaries-cyr-25) |
 | `schedule_cli.py` | The `schedule` commands (CYR-18): the strict argument parser, `ScheduleRequest`, `ScheduleCommands`, which receive the importer, the services and the repository by injection and print times, kinds and reasons only | exists (CYR-18); see [Humanization](#humanization-cyr-18) |
-| `domain/` | Leaf package, imports only pydantic and the standard library: enums, status transition rules, domain errors (the LLM errors, the import validation errors and the reply errors among them), Pydantic models the layers exchange (`schedule.py`: `ScheduleProfile`, `Block`, `SendPlan` and the profile limits; `reply.py`: `ContactFacts`, `BuiltPrompt`, `GeneratedReply` and the reply limits; `llm.py`: `LLMMessage`, `LLMUsage`, `LLMResult`; `style.py`: `Persona`, `Turn`, `StyleExample`, `StyleExampleCreate`, the persona and example limits, the content hash; `chat_export.py`: the converter's limits, `SkipReason`, `RedactionKind`, `ConvertOptions`, `ConvertReport`; `ChatExportError`; `outbox.py`: `ScheduledMessage`, `SentMessage`, `GuardDecision`, `SenderState`, `SendLimit`, `OutgoingPeak`, the text limit, the reason constants, the window lengths and the stale age; `stop_triggers.py`: `StopDecision`, `DialogueLine`, `HandOverNotice` and the hand-over limits; `autopilot.py`: `AutopilotState`, `ReplyJobRequest`, `ReplyJobResult` and every autopilot constant) | exists |
+| `domain/` | Leaf package, imports only pydantic and the standard library: enums, status transition rules, domain errors (the LLM errors, the import validation errors and the reply errors among them), Pydantic models the layers exchange (`schedule.py`: `ScheduleProfile`, `Block`, `SendPlan` and the profile limits; `reply.py`: `ContactFacts`, `BuiltPrompt`, `GeneratedReply` and the reply limits; `llm.py`: `LLMMessage`, `LLMUsage`, `LLMResult`; `style.py`: `Persona`, `Turn`, `StyleExample`, `StyleExampleCreate`, the persona and example limits, the content hash; `chat_export.py`: the converter's limits, `SkipReason`, `RedactionKind`, `ConvertOptions`, `ConvertReport`; `ChatExportError`; `outbox.py`: `ScheduledMessage`, `SentMessage`, `GuardDecision`, `SenderState`, `SendLimit`, `OutgoingPeak`, the text limit, the reason constants, the window lengths and the stale age; `stop_triggers.py`: `StopDecision`, `DialogueLine`, `HandOverNotice` and the hand-over limits; `autopilot.py`: `AutopilotState`, `ReplyJobRequest`, `ReplyJobResult` and every autopilot constant; `summary.py`: `ContactSummary`, `SummaryCursor`, `StoredSummary`, `read_stored_summary`, `SummaryPrompt`, `SummaryDue`, `SummaryJobRequest`, `SummaryUpdateResult` and every summary constant, CYR-25) | exists |
 | `prompts/` | Prompt text only: `texts.py` (headers, instructions, labels, the dialogue boundary token, the `NEEDS_OWNER` signal) and `render.py` (pure functions that render the system and the user message). No calls, no IO; imports only `domain` | exists (CYR-16). The builder itself, with its budget logic, lives in `services/prompt_builder.py`. The trigger lists live in `stop_trigger_patterns.py` (CYR-20) |
 
 `tests/` mirrors the packages (`tests/userbot`, `tests/bot`, `tests/llm`, `tests/domain`,
 `tests/db`, `tests/prompts`, `tests/services`, `tests/worker`, and `tests/cli` for `style_cli.py`,
-`convert_cli.py`, `reply_cli.py`, `outbox_cli.py`, `schedule_cli.py`, `stop_check_cli.py` and `autopilot_cli.py`); the skeleton packages have empty test packages.
+`convert_cli.py`, `reply_cli.py`, `outbox_cli.py`, `schedule_cli.py`, `stop_check_cli.py`, `autopilot_cli.py` and `summary_cli.py`); the skeleton packages have empty test packages.
 `tests/userbot/fakes.py` holds the fake Telethon client, event and sender; `tests/llm/fakes.py` the scripted `httpx.MockTransport` handlers.
 
 ## Import direction
@@ -81,8 +82,8 @@ and only `cyrano.worker.queue`.
 
 10. The worker is a composition root of its own (CYR-17): `worker/composition.py` builds `db`,
     `llm`, `services` and, for the owner notices, `bot` objects (`NoticeBot` and the existing notifier
-    classes). The app reaches the worker only through the `ReplyJobQueue` Protocol in `services`,
-    implemented by `worker/queue.py`.
+    classes). The app reaches the worker only through the `ReplyJobQueue` and, since CYR-25, the
+    `SummaryJobQueue` Protocols in `services`, both implemented by `worker/queue.py`.
 
 Never import upward. `worker` may import `bot` (decided in CYR-17, [decisions.md](decisions.md));
 whether `bot` and `userbot` may import each other stays an open question.
@@ -102,6 +103,7 @@ whether `bot` and `userbot` may import each other stays an open question.
 | A repository interface | `services/repositories.py` |
 | Arq job functions, worker settings, the Arq queue implementation | `worker` |
 | What a reply job does, step by step | `services/reply_job.py`; when it is enqueued: `services/autopilot.py` |
+| What a summary update does | `services/summary_updater.py`; when it is enqueued: `services/summary_sweeper.py`; what is removed from it: `services/summary_sanitizer.py` |
 | A data type or rule used by several layers | `domain` |
 | Prompt text and the pure functions that render it | `prompts` |
 | Assembling a prompt from stored data, trimming it to a budget, cleaning a model reply | `services` (`prompt_builder.py`, `reply_postprocess.py`, `reply_generator.py`) |
@@ -120,7 +122,8 @@ Two Python processes, two stores, one external API each for Telegram and the LLM
 ```
  Telegram <--> app process (python -m cyrano)       worker process (arq)
                userbot + control bot                 reply_to_contact job (CYR-17)
-               heartbeat, sender, sweeper            send-only notice bot
+               heartbeat, sender, sweepers           update_contact_summary job (CYR-25)
+                                                     send-only notice bot
                   |        |                            |        |
                   v        v                            v        v
               PostgreSQL  Redis  <---- Arq jobs ----->  Redis  PostgreSQL
@@ -133,8 +136,8 @@ Two Python processes, two stores, one external API each for Telegram and the LLM
   (see [Userbot](#userbot-cyr-10)). Then it builds the database engine (which opens no connection
   until something uses it), the repositories, the `IntakeService` and the two in-memory event queues,
   touches the heartbeat file, connects the userbot, registers the two handlers, catches up, then starts the
-  profile collector, the card announcer, the control bot's polling, the outbox sender and the
-  autopilot sweeper as background tasks (only once the userbot is connected, because the collector
+  profile collector, the card announcer, the control bot's polling, the outbox sender, the
+  autopilot sweeper and the summary sweeper (CYR-25) as background tasks (only once the userbot is connected, because the collector
   reads through the same client and the announcer would otherwise show cards before the intake runs)
   and waits for SIGTERM or SIGINT; the Arq pool is created before the userbot starts, so messages of
   the catch-up can be enqueued (a Redis that cannot be reached is one ERROR line, and every enqueue
@@ -143,7 +146,7 @@ Two Python processes, two stores, one external API each for Telegram and the LLM
   [Userbot](#userbot-cyr-10)). A lost connection that Telethon cannot restore ends the process with an
   error, and the restart policy starts it again; so does a control bot that stops polling (see
   [Control bot](#control-bot-cyr-12)). A sender that crashes is logged once with the class name and
-  does not stop the intake. On shutdown it cancels the sweeper first, then the sender, then the card
+  does not stop the intake. On shutdown it cancels the summary sweeper and then the autopilot sweeper first, then the sender, then the card
   announcer, stops polling and closes the bot session, cancels the collector, removes the two handlers,
   disconnects the userbot, closes the Arq pool (after the handlers are gone, so no intake call can use
   it), stops the heartbeat, removes the file and disposes the engine.
@@ -153,10 +156,10 @@ Two Python processes, two stores, one external API each for Telegram and the LLM
   database.
 - **worker**: `arq cyrano.worker.settings.WorkerSettings`. Arq imports `settings.py` itself, so a
   missing or invalid configuration ends the import with `SystemExit` and the readable `ConfigError`
-  text instead of a traceback chain. It runs the reply job (CYR-17, [autopilot.md](autopilot.md));
-  background jobs are CYR-23, CYR-24, CYR-25. `startup` builds the engine, the repositories, the LLM
-  factory, the generator, the planner, the hand-over, the outbox service, a send-only `NoticeBot` and
-  the `ReplyJobRunner`; `shutdown` closes the bot session, the HTTP client and the engine. It has the
+  text instead of a traceback chain. It runs the reply job (CYR-17, [autopilot.md](autopilot.md)) and the
+  summary job (CYR-25, [summaries.md](summaries.md)); background jobs CYR-23 and CYR-24 are planned. `startup` builds the engine, the repositories, the LLM
+  factory, the generator, the planner, the hand-over, the outbox service, a send-only `NoticeBot`,
+  the `ReplyJobRunner` and the `SummaryUpdater` with the `summary` client (CYR-25); `shutdown` closes the bot session, the HTTP client and the engine. It has the
   `media` volume but not the session volume, and it never sends to a contact: it writes replies to the
   outbox, and the app's sender sends the due rows (CYR-19). Its only Telegram traffic is the owner
   notices through the control bot's token.
@@ -661,6 +664,34 @@ the reader: [autopilot.md](autopilot.md). This section is the code map.
 - **Database use.** The sweeper runs one query every 60 s while the autopilot runs (the latest message
   of every `active` contact, `DISTINCT ON`); the scheduler reads the state and the contact per message.
 
+## Contact summaries (CYR-25)
+
+Rules, the schema, the cursor, the sanitising and the commands for the reader:
+[summaries.md](summaries.md). This section is the code map.
+
+| Where | What |
+| --- | --- |
+| `domain/summary.py`, `domain/enums.py`, `domain/errors.py` | The models, the tolerant reader, the constants; `SummaryOutcome`, `SummaryReason`; `SummaryPromptTooLarge` |
+| `db/models.py`, `db/repositories.py`, migration `0011` | `ContactRow.summary_failed_at`, `SqlSummaryRepository` |
+| `services/repositories.py` | The `SummaryRepository` Protocol: `messages_after`, `count_after`, `store_summary` (the compare-and-set), `mark_summary_failed`, `clear_summary`, `contacts_due_for_summary` |
+| `prompts/texts.py`, `prompts/render.py` | The extraction instructions and boundary, the reply layer's labels and notes; the pure rendering of both |
+| `services/summary_sanitizer.py` | `sanitize_summary`, `contains_contact_detail`; imports the detector's patterns from `services/stop_triggers.py` |
+| `services/summary_updater.py` | `SummaryUpdater.update`, `build_summary_prompt` |
+| `services/summary_sweeper.py`, `services/summary_job_queue.py` | `SummarySweeper`; the one-method `SummaryJobQueue` Protocol |
+| `services/reply_generator.py` | Reads the stored summary for the summary layer |
+| `worker/queue.py`, `worker/jobs.py`, `worker/composition.py`, `worker/settings.py` | `ArqSummaryJobQueue`, `update_contact_summary`, the updater in `WorkerResources`, the function list |
+| `summary_cli.py`, `main.py` | The `summary` commands and the wiring |
+
+- **Dependencies.** The updater depends on the `ContactRepository` and `SummaryRepository`
+  Protocols, the `LLMClient` Protocol (the client bound to `LLMStep.SUMMARY`) and a clock; the
+  sweeper on `SummaryRepository`, `SummaryJobQueue`, a clock and an injected sleep. Neither knows the
+  autopilot, the sender or the transport; `tests/test_summary_writers.py` pins that only the updater
+  writes and marks a summary, only `summary_cli.py` clears it, and no module writes it through the
+  generic `ContactRepository.update`.
+- **Database use.** The sweeper reads the `active` and `paused` contacts and counts their messages
+  after the cursors in one query per scan (the cursors are parsed in Python with the tolerant reader
+  and passed as arrays to `unnest`), every 60 s while `SUMMARY_ENABLED` is on.
+
 ## Persistence
 
 - **Tables**: `contacts`, `messages`, `modes`; native enums `contact_status` and
@@ -674,7 +705,8 @@ the reader: [autopilot.md](autopilot.md). This section is the code map.
   `stop_trigger`, the last one added by migration `0008`, no backfill). Since CYR-17 `contacts.reply_after` and `autopilot_state` (migration `0009`, one row, `id`
   fixed to 1 by a check constraint, seeded idempotently); see [autopilot.md](autopilot.md). Since CYR-18 also `schedule_profile` (at most one row,
   `id` fixed to 1 by a check constraint, JSONB `data`, no seed: no row means the default profile); see
-  [humanization.md](humanization.md).
+  [humanization.md](humanization.md). Since CYR-25 the structured summary in `contacts.summary` and
+  `contacts.summary_failed_at` (migration `0011`, nullable); see [summaries.md](summaries.md).
 - **Names**: table names and enum type names live in `db/models.py`, enum values in
   `domain/enums.py`. `Base.metadata` has a naming convention, so constraint and index names are
   stable and need no spelling out. The migration repeats these strings on purpose: a revision is a
@@ -742,6 +774,8 @@ the raw input. `load_settings(env_file=None)` ignores any `.env`.
 | `AUTOPILOT_DEBOUNCE_SECONDS` | no | `12` | 0 to 300; delay of a reply job after an incoming message when the conversation is not ongoing; the sweeper waits twice as long; not in the startup log line |
 | `AUTOPILOT_DEBOUNCE_ONGOING_SECONDS` | no | `4` | 0 to 300, at most `AUTOPILOT_DEBOUNCE_SECONDS`; delay of a reply job in an ongoing conversation (CYR-43); not in the startup log line |
 | `AUTOPILOT_MAX_BURST_WAIT_SECONDS` | no | `30` | 1 to 300, at least `AUTOPILOT_DEBOUNCE_SECONDS`; burst age from which a reply job answers the newest message instead of skipping (CYR-43); not in the startup log line |
+| `SUMMARY_ENABLED` | no | `true` | boolean; the app's sweeper enqueues summary jobs only when it is `true` (CYR-25); not in the startup log line |
+| `SUMMARY_EVERY_MESSAGES` | no | `12` | 4 to 200; messages after the summary cursor that make a contact due (CYR-25); not in the startup log line |
 | `SEND_LIMIT_MINUTE`, `SEND_LIMIT_HOUR`, `SEND_LIMIT_DAY` | no | `4`, `40`, `200` | integers from 1; most outgoing messages per window, all contacts together; minute <= hour <= day; not in the startup log line |
 | `SEND_LIMIT_CONTACT_MINUTE`, `SEND_LIMIT_CONTACT_HOUR`, `SEND_LIMIT_CONTACT_DAY` | no | `2`, `15`, `60` | integers from 1; most outgoing messages per window to one contact; minute <= hour <= day, each not above the global value of its window; not in the startup log line |
 | `HEARTBEAT_PATH` | no | `<tmpdir>/cyrano-heartbeat` | liveness file; also read straight from `os.environ` by `cyrano.health`, the one exception to hard rule 3 ([decisions.md](decisions.md)) |
@@ -782,7 +816,9 @@ the raw input. `load_settings(env_file=None)` ignores any `.env`.
 `cyrano.services.reply_generator` (INFO: counters and token counts only, never a prompt or a reply),
 the sender `cyrano.services.outbox_sender` (internal ids, reasons, counters and class names only),
 and the autopilot `cyrano.services.reply_job`, `cyrano.services.autopilot` and `cyrano.worker.queue`
-(internal ids, outcomes, reasons, counters and class names only, CYR-17).
+(internal ids, outcomes, reasons, counters and class names only, CYR-17), and the summaries
+`cyrano.services.summary_updater`, `cyrano.services.summary_sweeper` and `cyrano.worker.jobs` (the
+same, never a summary value, CYR-25).
 - Library loggers (`telethon`, `aiogram`, `httpx`, `httpcore`) have their own levels
   (`*_LOG_LEVEL`, default `WARNING`), independent of `LOG_LEVEL`. `httpcore` follows
   `HTTPX_LOG_LEVEL` because it is httpx's transport.
@@ -972,6 +1008,18 @@ and the autopilot `cyrano.services.reply_job`, `cyrano.services.autopilot` and `
   `tests/services/test_autopilot_lively.py` (a contact writing every 10 s for 3 minutes, and a short
   burst, through the real scheduler, job, sweeper and sender with a fake clock, a seeded generator, the
   default limits and real PostgreSQL); the two settings in `tests/test_config.py`.
+- **CYR-25 added**: migration `0011` (up, down, the rows kept); `tests/domain/test_summary_models.py`
+  (the caps, the trimming, empty and repeated items, the age range, the tolerant reader);
+  `tests/services/test_summary_sanitizer.py`; `tests/prompts/test_summary_render.py`;
+  `tests/db/test_summary_repository.py` (the cursor order with equal times, the count, the
+  compare-and-set, the failure marker, the due contacts by status, threshold, cooldown, order and
+  limit, on real PostgreSQL); `tests/services/test_summary_updater.py` (first and later updates, the
+  chunks, a concurrent update, every failure, the statuses, the boundary token and an injection, the
+  size guard, the privacy of the logs); `tests/services/test_reply_generator_summary.py` and the
+  snapshot; `tests/services/test_summary_sweeper.py` (with `CappedLoop`);
+  `tests/services/test_summary_end_to_end.py`; `tests/worker/test_summary_job.py`;
+  `tests/cli/test_summary_cli.py`; the settings in `tests/test_config.py`; the wiring in
+  `tests/test_main.py`; `tests/test_summary_writers.py`, the structural scans.
 - Failure cases to cover for new behaviour:
   empty input, malformed Telegram event, invalid LLM JSON, status changed between scheduling and
   sending, FloodWait.

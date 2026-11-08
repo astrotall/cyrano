@@ -1,11 +1,25 @@
 from __future__ import annotations
 
 from collections.abc import Sequence
-from datetime import datetime
+from datetime import datetime, timedelta
 
 from pydantic import ValidationError
-from sqlalchemy import delete, exists, func, or_, select, tuple_, update
-from sqlalchemy.dialects.postgresql import distinct_on, insert
+from sqlalchemy import (
+    BigInteger,
+    ColumnElement,
+    DateTime,
+    and_,
+    bindparam,
+    delete,
+    exists,
+    func,
+    literal,
+    or_,
+    select,
+    tuple_,
+    update,
+)
+from sqlalchemy.dialects.postgresql import ARRAY, distinct_on, insert
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import aliased
@@ -70,6 +84,13 @@ from cyrano.domain.outbox import (
 )
 from cyrano.domain.schedule import ScheduleProfile
 from cyrano.domain.style import ExamplesAddResult, Persona, StyleExample, StyleExampleCreate
+from cyrano.domain.summary import (
+    SUMMARY_ELIGIBLE_STATUSES,
+    StoredSummary,
+    SummaryCursor,
+    SummaryDue,
+    read_stored_summary,
+)
 from cyrano.domain.transitions import transition_needed
 
 
@@ -1034,3 +1055,130 @@ class SqlReplyBacklogRepository:
         )
         async with self._session_factory() as session:
             return await session.scalar(statement) or 0
+
+
+def _newer_than(cursor: SummaryCursor) -> ColumnElement[bool]:
+    return tuple_(MessageRow.created_at, MessageRow.id) > tuple_(
+        literal(cursor.created_at, DateTime(timezone=True)), literal(cursor.message_id, BigInteger)
+    )
+
+
+def _cursor_of(summary: dict[str, object]) -> SummaryCursor | None:
+    stored = read_stored_summary(summary)
+    return None if stored is None else stored.cursor
+
+
+class SqlSummaryRepository:
+    def __init__(self, session_factory: SessionFactory) -> None:
+        self._session_factory = session_factory
+
+    async def messages_after(
+        self, contact_id: int, cursor: SummaryCursor | None, limit: int
+    ) -> list[Message]:
+        if limit <= 0:
+            return []
+        statement = select(MessageRow).where(MessageRow.contact_id == contact_id)
+        if cursor is not None:
+            statement = statement.where(_newer_than(cursor))
+        statement = statement.order_by(MessageRow.created_at, MessageRow.id).limit(limit)
+        async with self._session_factory() as session:
+            return [Message.model_validate(row) for row in await session.scalars(statement)]
+
+    async def count_after(self, contact_id: int, cursor: SummaryCursor | None) -> int:
+        statement = select(func.count()).where(MessageRow.contact_id == contact_id)
+        if cursor is not None:
+            statement = statement.where(_newer_than(cursor))
+        async with self._session_factory() as session:
+            return await session.scalar(statement) or 0
+
+    async def store_summary(
+        self, contact_id: int, stored: StoredSummary, expected_cursor: SummaryCursor | None
+    ) -> bool:
+        async with self._session_factory.begin() as session:
+            row = await _locked_contact(session, contact_id)
+            if _cursor_of(row.summary) != expected_cursor:
+                return False
+            row.summary = stored.model_dump(mode="json")
+            row.summary_failed_at = None
+            await session.flush()
+            return True
+
+    async def mark_summary_failed(self, contact_id: int, at: datetime) -> None:
+        _require_aware(at)
+        async with self._session_factory.begin() as session:
+            row = await _locked_contact(session, contact_id)
+            row.summary_failed_at = at
+            await session.flush()
+
+    async def clear_summary(self, contact_id: int) -> bool:
+        async with self._session_factory.begin() as session:
+            row = await _locked_contact(session, contact_id)
+            had_anything = bool(row.summary) or row.summary_failed_at is not None
+            if had_anything:
+                row.summary = {}
+                row.summary_failed_at = None
+                await session.flush()
+            return had_anything
+
+    async def contacts_due_for_summary(
+        self, *, every: int, cooldown: timedelta, now: datetime, limit: int
+    ) -> list[SummaryDue]:
+        _require_aware(now)
+        candidates = (
+            select(ContactRow.id, ContactRow.summary)
+            .where(
+                ContactRow.status.in_(SUMMARY_ELIGIBLE_STATUSES),
+                or_(
+                    ContactRow.summary_failed_at.is_(None),
+                    ContactRow.summary_failed_at <= now - cooldown,
+                ),
+            )
+            .order_by(ContactRow.id)
+        )
+        async with self._session_factory() as session:
+            found = (await session.execute(candidates)).all()
+            if not found or limit <= 0:
+                return []
+            cursors = [(contact_id, _cursor_of(summary)) for contact_id, summary in found]
+            table = (
+                func.unnest(
+                    bindparam("ids", [item[0] for item in cursors], ARRAY(BigInteger)),
+                    bindparam(
+                        "times",
+                        [None if c is None else c.created_at for _, c in cursors],
+                        ARRAY(DateTime(timezone=True)),
+                    ),
+                    bindparam(
+                        "message_ids",
+                        [None if c is None else c.message_id for _, c in cursors],
+                        ARRAY(BigInteger),
+                    ),
+                )
+                .table_valued("contact_id", "created_at", "message_id")
+                .render_derived(with_types=False)
+            )
+            waiting = func.count(MessageRow.id)
+            statement = (
+                select(table.c.contact_id, waiting, func.max(MessageRow.id))
+                .select_from(table)
+                .join(
+                    MessageRow,
+                    and_(
+                        MessageRow.contact_id == table.c.contact_id,
+                        or_(
+                            table.c.created_at.is_(None),
+                            tuple_(MessageRow.created_at, MessageRow.id)
+                            > tuple_(table.c.created_at, table.c.message_id),
+                        ),
+                    ),
+                )
+                .group_by(table.c.contact_id)
+                .having(waiting >= every)
+                .order_by(waiting.desc(), table.c.contact_id)
+                .limit(limit)
+            )
+            rows = (await session.execute(statement)).all()
+            return [
+                SummaryDue(contact_id=row[0], waiting=row[1], up_to_message_id=row[2])
+                for row in rows
+            ]

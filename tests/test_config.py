@@ -223,6 +223,8 @@ def test_every_setting_is_either_logged_or_deliberately_withheld() -> None:
         "autopilot_debounce_seconds",
         "autopilot_debounce_ongoing_seconds",
         "autopilot_max_burst_wait_seconds",
+        "summary_enabled",
+        "summary_every_messages",
         "send_limit_minute",
         "send_limit_hour",
         "send_limit_day",
@@ -695,3 +697,58 @@ def test_equal_values_at_every_boundary_are_accepted(
     settings = load_settings(env_file=None)
 
     assert settings.send_limit_contact_day == int(values["SEND_LIMIT_CONTACT_DAY"])
+
+
+SUMMARY_ENABLED_VARIABLE = "SUMMARY_ENABLED"
+SUMMARY_EVERY_VARIABLE = "SUMMARY_EVERY_MESSAGES"
+
+
+def test_the_summary_settings_have_their_defaults_and_stay_unlogged(
+    full_env: dict[str, str],
+) -> None:
+    settings = load_settings(env_file=None)
+
+    assert settings.summary_enabled is True
+    assert settings.summary_every_messages == 12
+    assert "summary_enabled" not in settings.safe_summary()
+    assert "summary_every_messages" not in settings.safe_summary()
+
+
+@pytest.mark.parametrize(("value", "expected"), [("false", False), ("0", False), ("true", True)])
+def test_the_summary_switch_reads_a_boolean(
+    full_env: dict[str, str], monkeypatch: pytest.MonkeyPatch, value: str, expected: bool
+) -> None:
+    monkeypatch.setenv(SUMMARY_ENABLED_VARIABLE, value)
+
+    assert load_settings(env_file=None).summary_enabled is expected
+
+
+@pytest.mark.parametrize("value", ["4", "200"])
+def test_the_summary_threshold_accepts_its_bounds(
+    full_env: dict[str, str], monkeypatch: pytest.MonkeyPatch, value: str
+) -> None:
+    monkeypatch.setenv(SUMMARY_EVERY_VARIABLE, value)
+
+    assert load_settings(env_file=None).summary_every_messages == int(value)
+
+
+@pytest.mark.parametrize(
+    ("name", "value"),
+    [
+        (SUMMARY_EVERY_VARIABLE, "3"),
+        (SUMMARY_EVERY_VARIABLE, "201"),
+        (SUMMARY_EVERY_VARIABLE, "12.5"),
+        (SUMMARY_EVERY_VARIABLE, "every-marker-zq"),
+        (SUMMARY_ENABLED_VARIABLE, "switch-marker-zq"),
+    ],
+)
+def test_a_summary_setting_out_of_range_is_readable_without_the_value(
+    full_env: dict[str, str], monkeypatch: pytest.MonkeyPatch, name: str, value: str
+) -> None:
+    monkeypatch.setenv(name, value)
+
+    with pytest.raises(ConfigError) as raised:
+        load_settings(env_file=None)
+
+    assert name in str(raised.value)
+    assert value not in str(raised.value)

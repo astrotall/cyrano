@@ -15,8 +15,9 @@ bot with the contact card, the outbox with the one guarded sender, its limits, p
 humanization (send time planner, read mark, typing, quiet hours, a reply written as several lines sent
 as up to three messages), the pause on a manual message of the
 owner, the stop-triggers with the hand-over, the persona and style examples, the layered reply prompt
-with `reply-preview`, and the autopilot (the Arq worker generates the replies) behind
-`AUTOPILOT_ENABLED`, which is off by default. Planned and not built: proactive messages (CYR-23), contact summaries (CYR-25), conversation modes beyond
+with `reply-preview`, the autopilot (the Arq worker generates the replies) behind
+`AUTOPILOT_ENABLED`, which is off by default, and the contact summaries (the worker keeps a short
+memory of each conversation for the reply prompt). Planned and not built: proactive messages (CYR-23), conversation modes beyond
 the default one (CYR-15), the rest of the control panel (CYR-26) and a contact catalog.
 
 ## About the project
@@ -385,8 +386,28 @@ make autopilot-resume YES=1    # also clears a stop; fix the cause first
    processes locally).
 
 Not covered: the contact's age, languages other than Russian and a little English in the stop-trigger
-check, voice and other media (the reply is written without them), contact summaries (CYR-25). Details:
+check, voice and other media (the reply is written without them). Details:
 [.claude/docs/autopilot.md](.claude/docs/autopilot.md).
+
+### Contact summaries
+
+The worker keeps a short memory of every `active` and `paused` contact: name, age, city, occupation,
+interests, mood, agreements and plans, open questions, notes, and what you (the assistant speaking for
+you) have already told the contact about yourself. The reply prompt shows it as a layer, so a reply does
+not forget what was said 50 messages ago or contradict what you said about yourself. A sweep in the app
+puts one job on the queue for every contact with 12 new messages (`SUMMARY_EVERY_MESSAGES`), whether the
+autopilot is on or not; `SUMMARY_ENABLED=false` switches it off. The model is told never to store health,
+politics, religion, sexuality, addresses or document numbers, and the code removes phone numbers, e-mail
+addresses, links and @usernames from every answer. A failed update keeps the old summary and is tried again
+10 minutes later; you get no notice.
+
+```sh
+make summary-update CONTACT=12        # update now, without waiting for 12 messages; prints counts only
+make summary-show CONTACT=12          # print the stored summary (personal data: a warning goes to stderr)
+make summary-clear CONTACT=12 YES=1   # remove it
+```
+
+Details: [.claude/docs/summaries.md](.claude/docs/summaries.md).
 
 ### Code layers
 
@@ -444,7 +465,7 @@ What exists now:
 ├── pyproject.toml                # dependencies, Ruff, mypy, pytest config
 ├── uv.lock
 ├── .python-version               # 3.14
-├── Makefile                      # install, check, test, fmt, up, down, logs, migrate, revision, db-up, login, login-docker, llm-check, persona-import, examples-import, examples-stats, examples-convert, reply-preview, outbox-enqueue, outbox-list, outbox-cancel, outbox-retry, outbox-status, outbox-resume, schedule-import, schedule-show, schedule-check, schedule-plan, stop-check, autopilot-status, autopilot-resume, setup-hooks
+├── Makefile                      # install, check, test, fmt, up, down, logs, migrate, revision, db-up, login, login-docker, llm-check, persona-import, examples-import, examples-stats, examples-convert, reply-preview, outbox-enqueue, outbox-list, outbox-cancel, outbox-retry, outbox-status, outbox-resume, schedule-import, schedule-show, schedule-check, schedule-plan, stop-check, autopilot-status, autopilot-resume, summary-update, summary-show, summary-clear, setup-hooks
 ├── Dockerfile                    # multi-stage, non-root runtime
 ├── docker-compose.yml            # app, worker, one-shot migrate, postgres, redis
 ├── docker-compose.override.yml   # dev: Postgres and Redis on 127.0.0.1, media in ./data/media
@@ -452,7 +473,7 @@ What exists now:
 ├── alembic.ini                   # points at migrations/; no URL, it comes from Settings
 ├── migrations/
 │   ├── env.py                    # async environment, URL from Settings
-│   └── versions/                 # 0001 creates the contacts, messages and modes tables and seeds the default mode; 0002 creates persona and style_examples; 0003 creates scheduled_messages (the outbox); 0004 creates sender_state and the index of the send limits; 0005 adds due_at to scheduled_messages; 0006 creates schedule_profile; 0007 adds contacts.pause_reason; 0008 allows stop_trigger as a pause reason; 0009 adds contacts.reply_after and creates autopilot_state; 0010 adds scheduled_messages.follows_id (the parts of a reply)
+│   └── versions/                 # 0001 creates the contacts, messages and modes tables and seeds the default mode; 0002 creates persona and style_examples; 0003 creates scheduled_messages (the outbox); 0004 creates sender_state and the index of the send limits; 0005 adds due_at to scheduled_messages; 0006 creates schedule_profile; 0007 adds contacts.pause_reason; 0008 allows stop_trigger as a pause reason; 0009 adds contacts.reply_after and creates autopilot_state; 0010 adds scheduled_messages.follows_id (the parts of a reply); 0011 adds contacts.summary_failed_at
 ├── examples/                     # invented sample persona, style examples and schedule (the real files go to data/, never to git)
 ├── .dockerignore
 ├── .gitignore
@@ -464,6 +485,7 @@ What exists now:
 │   ├── autopilot.md              # the reply job, the sweeper, reply_after, outcomes, the switch-on checklist, commands
 │   ├── reply-generation.md       # the layered prompt, the budget, the reply cleaning, reply-preview
 │   ├── stop-triggers.md          # stop-trigger classes, patterns, the hand-over, the notice, stop-check
+│   ├── summaries.md              # contact summaries: schema, cursor, sanitising, sweeper, the layer, commands
 │   ├── outbox-and-sender.md      # the outbox, the one sender, the guard, limits, pause and stop, errors, owner commands
 │   ├── safety-rules.md           # S1..S10
 │   └── decisions.md              # decided and open
@@ -472,8 +494,8 @@ What exists now:
 │   ├── dependabot.yml            # weekly: Actions, Docker, Compose, uv
 │   └── workflows/ci.yml
 ├── src/cyrano/
-│   ├── __main__.py               # python -m cyrano [login | llm-check | persona ... | examples ... | reply-preview ... | outbox ... | schedule ... | stop-check ... | autopilot ...]
-│   ├── main.py                   # app entrypoint, signals, heartbeat, subcommands login, llm-check, persona (import, show), examples (import, stats, convert), reply-preview, outbox (enqueue, list, cancel, retry, status, resume), schedule (import, show, check, plan), stop-check, autopilot (status, resume)
+│   ├── __main__.py               # python -m cyrano [login | llm-check | persona ... | examples ... | reply-preview ... | outbox ... | schedule ... | stop-check ... | autopilot ... | summary ...]
+│   ├── main.py                   # app entrypoint, signals, heartbeat, subcommands login, llm-check, persona (import, show), examples (import, stats, convert), reply-preview, outbox (enqueue, list, cancel, retry, status, resume), schedule (import, show, check, plan), stop-check, autopilot (status, resume), summary (update, show, clear)
 │   ├── style_cli.py              # the persona and examples commands
 │   ├── convert_cli.py            # examples convert: Telegram Desktop export to a draft examples file
 │   ├── reply_cli.py              # reply-preview: generate one reply for a stored conversation
@@ -481,6 +503,7 @@ What exists now:
 │   ├── schedule_cli.py           # schedule import, show, check, plan: the owner's commands
 │   ├── stop_check_cli.py         # stop-check: the stop-trigger classes of a phrase or a contact, a dry run
 │   ├── autopilot_cli.py          # autopilot status, resume: the owner's commands
+│   ├── summary_cli.py            # summary update, show, clear: the owner's commands
 │   ├── stop_trigger_patterns.py  # the stop-trigger pattern data
 │   ├── config.py                 # Settings, load_settings, ConfigError
 │   ├── logging.py                # JSON-lines logging
@@ -534,12 +557,16 @@ What exists now:
 │   │   ├── hand_over_notifier.py # HandOverNotifier Protocol: notify_hand_over
 │   │   ├── reply_job.py          # ReplyJobRunner: one generated reply per burst into the outbox
 │   │   ├── autopilot.py          # AutopilotScheduler and AutopilotSweeper: put reply jobs on the queue
-│   │   └── reply_job_queue.py    # ReplyJobQueue Protocol: enqueue
+│   │   ├── reply_job_queue.py    # ReplyJobQueue Protocol: enqueue
+│   │   ├── summary_sanitizer.py  # removes contact details from a model summary
+│   │   ├── summary_updater.py    # SummaryUpdater: one chunk of messages into the stored summary
+│   │   ├── summary_sweeper.py    # SummarySweeper: puts summary jobs on the queue
+│   │   └── summary_job_queue.py  # SummaryJobQueue Protocol: enqueue
 │   └── worker/                   # the only package that imports arq; never imports Telethon
 │       ├── settings.py           # Arq WorkerSettings, startup, shutdown
-│       ├── jobs.py               # reply_to_contact, the job function
+│       ├── jobs.py               # reply_to_contact and update_contact_summary, the job functions
 │       ├── composition.py        # builds and closes what the job needs
-│       └── queue.py              # ArqReplyJobQueue, used by the app
+│       └── queue.py              # ArqReplyJobQueue and ArqSummaryJobQueue, used by the app
 └── tests/                        # mirrors src/cyrano; database tests need a real PostgreSQL; test_docs_in_sync.py checks the documents against the code
 ```
 
@@ -722,6 +749,7 @@ to Redis, Postgres, the LLM provider and the Bot API for the owner notices; the 
 | `make schedule-import FILE=...`, `make schedule-show`, `make schedule-check [AT="YYYY-MM-DD HH:MM"]`, `make schedule-plan CONTACT=...` | The owner's commands for the schedule profile (see [Humanization and the schedule](#humanization-and-the-schedule)) |
 | `make stop-check TEXT="..."` or `make stop-check CONTACT=...` | Print the stop-trigger classes of a phrase (no `.env` needed) or of the contact's last 3 incoming messages; changes nothing, prints no text (see [When a contact touches a sensitive topic](#when-a-contact-touches-a-sensitive-topic)) |
 | `make autopilot-status`, `make autopilot-resume [YES=1]` | The state of the autopilot, and clearing its pause or, with `YES=1`, its stop (see [The autopilot](#the-autopilot)) |
+| `make summary-update CONTACT=...`, `make summary-show CONTACT=...`, `make summary-clear CONTACT=... YES=1` | Update one contact's summary now, print it, or remove it (see [Contact summaries](#contact-summaries)) |
 | `make llm-check` | Send one tiny request to DeepSeek with the `reply` settings and print the result (see [Checking the LLM key](#checking-the-llm-key)) |
 
 ### Checking the LLM key
@@ -793,7 +821,7 @@ readable message on an error. `STYLE_EXAMPLES_MAX` limits how many examples one 
 `make reply-preview CONTACT=<contact id> [MODE=<mode name>]` (or
 `uv run python -m cyrano reply-preview ID [--mode NAME] [--show-prompt]`) builds the layered prompt
 from the persona, the mode, the contact's profile facts, the examples and the last messages of a
-stored conversation, asks the LLM for the owner's next message and prints it, followed by one stats
+stored conversation (and the contact's summary, when there is one), asks the LLM for the owner's next message and prints it, followed by one stats
 line (model, tokens, examples and messages kept of offered, prompt characters). It lets the owner
 judge the style before the autopilot is switched on. It needs a complete `.env` with `DEEPSEEK_API_KEY`, the
 database up and an imported persona. It sends nothing to Telegram and writes nothing to the
@@ -853,6 +881,8 @@ the default applies.
 | `AUTOPILOT_DEBOUNCE_SECONDS` | no | `12` | Delay of a reply job after an incoming message when the conversation is not ongoing, from 0 to 300; the sweep waits twice as long before it enqueues a lost job |
 | `AUTOPILOT_DEBOUNCE_ONGOING_SECONDS` | no | `4` | Delay of a reply job in an ongoing conversation (the last activity before the burst is less than the schedule profile's `ongoing_window_minutes` old), from 0 to 300 and not above `AUTOPILOT_DEBOUNCE_SECONDS` |
 | `AUTOPILOT_MAX_BURST_WAIT_SECONDS` | no | `30` | How long a burst of messages may go unanswered before a reply job answers its newest message instead of waiting for the contact to stop, from 1 to 300 and not below `AUTOPILOT_DEBOUNCE_SECONDS` |
+| `SUMMARY_ENABLED` | no | `true` | `false` stops the app's sweep from putting summary jobs on the queue; `summary update` still works. Restart the app after a change |
+| `SUMMARY_EVERY_MESSAGES` | no | `12` | How many new messages (both directions) after the last summary make a contact due for the next one, from 4 to 200 |
 | `SEND_LIMIT_MINUTE` | no | `4` | Most outgoing messages per minute, all contacts together; at least 1, not above `SEND_LIMIT_HOUR` |
 | `SEND_LIMIT_HOUR` | no | `40` | Most outgoing messages per hour, all contacts together; at least 1, not above `SEND_LIMIT_DAY` |
 | `SEND_LIMIT_DAY` | no | `200` | Most outgoing messages per day, all contacts together; at least 1 |

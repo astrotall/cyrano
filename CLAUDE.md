@@ -127,7 +127,8 @@ Changing any of these is a large change (see Workflow expectations). Reasons:
 ├── examples/                     invented sample persona, style examples and schedule (real files go to data/)
 ├── .claude/docs/                 architecture, contact-lifecycle, safety-rules, decisions, persona-and-examples, reply-generation, outbox-and-sender, humanization, stop-triggers, autopilot, summaries, proactive
 ├── .githooks/                    pre-commit (runs make check and make test; enabled by make setup-hooks)
-├── .github/                      dependabot.yml, workflows/ci.yml
+├── .github/                      dependabot.yml, workflows/ci.yml, workflows/deploy.yml
+├── scripts/                      deploy.sh (run on the server by the deploy workflow)
 ├── src/cyrano/
 │   ├── __main__.py, main.py      entrypoint (composition root), signals, heartbeat, subcommands login, llm-check, persona (import, show), examples (import, stats, convert), reply-preview, outbox (enqueue, list, cancel, retry, status, resume), schedule (import, show, check, plan), stop-check, autopilot (status, resume), summary (update, show, clear)
 │   ├── style_cli.py              the persona and examples commands
@@ -401,6 +402,12 @@ clamp `plan_wrapup_time` in `services/humanization.py`, the wrap-up line and par
 `SKIP` accepted from a reply only inside that context (`ReplyJobReason.MODEL_SKIP`,
 `ContactRepository.set_reply_after`), the proactive reason `unavailable_soon`, `reply-preview --at` with its
 `wrap-up:` line, and the tests, with the scans in `tests/test_wrapup_structure.py`.
+
+CYR-45 added the deployment to a VPS over SSH after every merge to `main` that passed CI: `scripts/deploy.sh`
+(run on the server: a validated sha, a lock, a commit reachable from `origin/main`, `docker compose up -d --build`
+with only `docker-compose.yml`, a bounded health wait, one rollback of the code), `.github/workflows/deploy.yml`
+(no checkout, no third-party action, the environment `production`), the short README section and `tests/test_deploy.py`.
+The repository holds no server runbook, by the owner's decision.
 
 ## Detailed guides
 

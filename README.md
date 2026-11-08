@@ -548,6 +548,8 @@ What exists now:
 ├── examples/                     # invented sample persona, style examples and schedule (the real files go to data/, never to git)
 ├── .dockerignore
 ├── .gitignore
+├── scripts/
+│   └── deploy.sh                 # run on the server by the deploy workflow: lock, checkout, compose up, health wait, rollback
 ├── .claude/docs/
 │   ├── architecture.md           # layers, import rules, processes, config, logging
 │   ├── contact-lifecycle.md      # statuses, transitions, message flow
@@ -564,7 +566,7 @@ What exists now:
 ├── .githooks/                    # pre-commit: runs make check and make test (enabled by make setup-hooks)
 ├── .github/
 │   ├── dependabot.yml            # weekly: Actions, Docker, Compose, uv
-│   └── workflows/ci.yml
+│   └── workflows/                # ci.yml; deploy.yml (SSH deploy after a green push to main)
 ├── src/cyrano/
 │   ├── __main__.py               # python -m cyrano [login | llm-check | persona ... | examples ... | reply-preview ... | outbox ... | schedule ... | stop-check ... | autopilot ... | summary ... | contact ...]
 │   ├── main.py                   # app entrypoint, signals, heartbeat, subcommands login, llm-check, persona (import, show), examples (import, stats, convert), reply-preview, outbox (enqueue, list, cancel, retry, status, resume), schedule (import, show, check, plan), stop-check, autopilot (status, resume), summary (update, show, clear), contact (gender)
@@ -999,6 +1001,21 @@ containers compose sets both to absolute paths.
 
 Logs are JSON lines on stdout for the app, the worker and Arq's own lines. Timestamps in log lines
 are UTC.
+
+## Deployment
+
+A merge to `main` runs CI; when it passes, `.github/workflows/deploy.yml` connects to the server over SSH and
+runs `scripts/deploy.sh <sha>` there. The job checks out no code and runs in the GitHub environment
+`production`; its secrets are `DEPLOY_SSH_KEY`, `DEPLOY_HOST`, `DEPLOY_USER`, `DEPLOY_KNOWN_HOSTS` and the
+optional `DEPLOY_PORT`. A deploy, or a return to an older commit, can also be started by hand with a sha.
+
+- The repository is in `/opt/cyrano` on the server, which uses only `docker-compose.yml`, never the override file.
+- The script takes a lock, accepts only a commit reachable from `origin/main`, checks it out and runs
+  `docker compose up -d --build --remove-orphans`. It waits up to 240 s until `app`, `worker`, `postgres` and
+  `redis` are healthy and `migrate` has exited with 0; otherwise it starts the previous commit once (code only, so migrations stay backwards compatible).
+- The Telethon session is created on the server (`make login-docker`) and never copied.
+- Exit codes: `0` deployed, `1` failed (a rollback was tried), `2` bad argument, `3` another deploy is running,
+  `4` commit not on `main`, `5` precondition failed (no `flock`, fetch or checkout failed, bad wait settings).
 
 ## Testing
 

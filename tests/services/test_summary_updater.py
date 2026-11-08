@@ -12,6 +12,7 @@ from cyrano.db.repositories import (
 )
 from cyrano.db.session import SessionFactory
 from cyrano.domain.enums import (
+    ContactGender,
     ContactStatus,
     MessageDirection,
     PauseReason,
@@ -481,3 +482,39 @@ async def test_the_logs_carry_no_text_name_or_summary_value(
     assert "summary update finished" in output
     for marker in (TEXT_MARKER, VALUE_MARKER, NAME_MARKER, FAKE_TELEGRAM_ID):
         assert_absent(marker, output)
+
+
+async def test_the_gender_from_the_model_is_stored_and_sent_back_as_previous_memory(
+    rig: Rig,
+) -> None:
+    contact_id = await rig.contact()
+    await rig.conversation(contact_id, 2, "old")
+    client = ScriptedJsonClient(
+        ContactSummary(name="Оля", gender=ContactGender.FEMALE),
+        ContactSummary(name="Оля", gender=ContactGender.FEMALE, city="Казань"),
+    )
+    updater = rig.updater(client)
+    await updater.update(contact_id)
+    await rig.conversation(contact_id, 2, "new")
+
+    await updater.update(contact_id)
+
+    stored = await rig.stored(contact_id)
+    assert stored is not None
+    assert stored.data.gender is ContactGender.FEMALE
+    memory, _ = client.user(1).split(SUMMARY_MESSAGES_BEGIN)
+    assert '"gender":"female"' in memory
+
+
+async def test_a_result_with_only_a_gender_is_stored(rig: Rig) -> None:
+    contact_id = await rig.contact()
+    await rig.conversation(contact_id, 2)
+
+    result = await rig.updater(
+        ScriptedJsonClient(ContactSummary(gender=ContactGender.MALE))
+    ).update(contact_id)
+
+    assert result.outcome is SummaryOutcome.UPDATED
+    stored = await rig.stored(contact_id)
+    assert stored is not None
+    assert stored.data.gender is ContactGender.MALE

@@ -12,6 +12,7 @@ from cyrano import main as main_module
 from cyrano.config import Settings
 from cyrano.db.repositories import SqlSummaryRepository
 from cyrano.db.session import SessionFactory
+from cyrano.domain.enums import ContactGender
 from cyrano.domain.errors import LLMAuthError, LLMUnavailableError
 from cyrano.domain.models import ModeCreate
 from cyrano.domain.summary import SUMMARY_VERSION, ContactSummary, StoredSummary, SummaryCursor
@@ -24,11 +25,14 @@ from cyrano.reply_cli import (
     ReplyPreviewCommand,
     ReplyPreviewRequest,
 )
+from cyrano.services.gender import GenderResolver
 from tests.db.conftest import execute
 from tests.llm.fakes import Script, completion_response, error_response
 from tests.privacy import FAKE_TELEGRAM_ID, assert_absent
+from tests.reply_data import BIG_BUDGET
 from tests.reply_db import (
     BIO_MARKER,
+    HISTORY_LIMIT,
     MESSAGE_MARKER,
     PERSONA_MARKER,
     REPLY_MARKER,
@@ -40,14 +44,26 @@ from tests.reply_db import (
 from tests.services.fakes import ScriptedLLMClient
 
 MODEL = "fake-model"
+GENDER_LINE_UNKNOWN = "gender: unknown (unknown)"
 STATS_PATTERN = (
     "model=fake-model input_tokens=321 output_tokens=17 examples=0/0 messages=3/3 "
     "prompt_characters="
 )
 
 
-def _command(repos: Repositories, client: ScriptedLLMClient, **options: int) -> ReplyPreviewCommand:
-    return ReplyPreviewCommand(repos.generator(client, **options), MODEL)
+def _command(
+    repos: Repositories,
+    client: ScriptedLLMClient,
+    *,
+    history_limit: int = HISTORY_LIMIT,
+    budget: int = BIG_BUDGET,
+) -> ReplyPreviewCommand:
+    return ReplyPreviewCommand(
+        repos.generator(client, history_limit=history_limit, budget=budget),
+        MODEL,
+        repos.contacts,
+        GenderResolver(),
+    )
 
 
 async def test_the_reply_is_printed_on_its_own_line_followed_by_one_stats_line(
@@ -63,10 +79,11 @@ async def test_the_reply_is_printed_on_its_own_line_followed_by_one_stats_line(
     lines = captured.out.splitlines()
     assert code == 0
     assert captured.err == ""
-    assert len(lines) == 2
+    assert len(lines) == 3
     assert lines[0] == REPLY_MARKER
-    assert lines[1].startswith(STATS_PATTERN)
-    assert lines[1].removeprefix(STATS_PATTERN).isdigit()
+    assert lines[1] == GENDER_LINE_UNKNOWN
+    assert lines[2].startswith(STATS_PATTERN)
+    assert lines[2].removeprefix(STATS_PATTERN).isdigit()
 
 
 async def test_the_stats_line_counts_examples_kept_of_offered(
@@ -94,7 +111,9 @@ async def test_show_prompt_prints_a_warning_then_both_messages_then_the_reply(
     assert captured.err == f"{PERSONAL_DATA_WARNING}\n"
     assert len(captured.err.splitlines()) == 1
     stats = captured.out.splitlines()[-1]
-    assert captured.out == f"[system]\n{system}\n[user]\n{user}\n{REPLY_MARKER}\n{stats}\n"
+    assert captured.out == (
+        f"[system]\n{system}\n[user]\n{user}\n{REPLY_MARKER}\n{GENDER_LINE_UNKNOWN}\n{stats}\n"
+    )
     assert stats.startswith(STATS_PATTERN)
 
 
@@ -145,8 +164,9 @@ async def test_a_multi_line_reply_prints_one_numbered_line_per_part_then_the_sta
     lines = capsys.readouterr().out.splitlines()
     assert code == 0
     assert lines[:2] == ["[1/2] one", "[2/2] two"]
-    assert lines[2].startswith(STATS_PATTERN)
-    assert len(lines) == 3
+    assert lines[2] == GENDER_LINE_UNKNOWN
+    assert lines[3].startswith(STATS_PATTERN)
+    assert len(lines) == 4
 
 
 async def test_more_lines_than_parts_print_the_merged_last_part(
@@ -160,7 +180,7 @@ async def test_more_lines_than_parts_print_the_merged_last_part(
 
     lines = capsys.readouterr().out.splitlines()
     assert lines[:3] == ["[1/3] one", "[2/3] two", "[3/3] three four"]
-    assert len(lines) == 4
+    assert len(lines) == 5
 
 
 async def test_a_one_line_reply_keeps_the_unnumbered_line(
@@ -172,7 +192,7 @@ async def test_a_one_line_reply_keeps_the_unnumbered_line(
 
     lines = capsys.readouterr().out.splitlines()
     assert lines[0] == "just one line"
-    assert len(lines) == 2
+    assert len(lines) == 3
 
 
 async def test_the_command_writes_nothing_and_changes_no_row(
@@ -460,7 +480,8 @@ async def test_main_runs_the_whole_flow_against_the_database_and_a_mocked_provid
     lines = captured.out.splitlines()
     assert code == 0
     assert captured.err == f"{PERSONAL_DATA_WARNING}\n"
-    assert lines[-2] == REPLY_MARKER
+    assert lines[-3] == REPLY_MARKER
+    assert lines[-2] == GENDER_LINE_UNKNOWN
     assert lines[-1].startswith(
         "model=deepseek-chat input_tokens=400 output_tokens=9 examples=0/0 messages=3/3 "
     )
@@ -542,6 +563,111 @@ async def test_the_model_signal_prints_the_needs_owner_line_and_the_stats_and_ex
     assert code == 0
     assert captured.err == ""
     assert lines[0] == NEEDS_OWNER_LINE == "needs owner (model signal)"
-    assert lines[1].startswith(STATS_PATTERN)
-    assert len(lines) == 2
+    assert lines[1] == GENDER_LINE_UNKNOWN
+    assert lines[2].startswith(STATS_PATTERN)
+    assert len(lines) == 3
     assert_absent(REPLY_MARKER, captured.out)
+
+
+def _summary_with_gender(moment: datetime, gender: ContactGender) -> StoredSummary:
+    return StoredSummary(
+        version=SUMMARY_VERSION,
+        updated_at=moment,
+        cursor=SummaryCursor(created_at=moment, message_id=1),
+        data=ContactSummary(gender=gender),
+    )
+
+
+async def _preview_lines(
+    repos: Repositories,
+    contact_id: int,
+    capsys: pytest.CaptureFixture[str],
+    *,
+    default: ContactGender | None = None,
+) -> tuple[list[str], str]:
+    client = ScriptedLLMClient(REPLY_MARKER)
+    command = ReplyPreviewCommand(
+        repos.generator(client, default_gender=default),
+        MODEL,
+        repos.contacts,
+        GenderResolver(default),
+    )
+
+    code = await command.run(ReplyPreviewRequest(contact_id))
+
+    assert code == 0
+    system = client.calls[0][0][0].content
+    return capsys.readouterr().out.splitlines(), system
+
+
+async def test_the_preview_line_and_the_prompt_agree_for_an_owner_choice(
+    repos: Repositories, capsys: pytest.CaptureFixture[str]
+) -> None:
+    contact = await ready_contact(repos)
+    await repos.contacts.set_gender(contact.id, ContactGender.MALE)
+
+    lines, system = await _preview_lines(repos, contact.id, capsys)
+
+    assert lines[1] == "gender: male (owner)"
+    assert "- Grammatical gender: male" in system
+
+
+async def test_the_preview_line_and_the_prompt_agree_for_a_summary_gender(
+    repos: Repositories, session_factory: SessionFactory, capsys: pytest.CaptureFixture[str]
+) -> None:
+    contact = await ready_contact(repos)
+    moment = datetime(2026, 11, 8, 12, 0, tzinfo=UTC)
+    await SqlSummaryRepository(session_factory).store_summary(
+        contact.id, _summary_with_gender(moment, ContactGender.FEMALE), None
+    )
+
+    lines, system = await _preview_lines(repos, contact.id, capsys)
+
+    assert lines[1] == "gender: female (summary)"
+    assert "- Grammatical gender: female" in system
+
+
+async def test_the_preview_line_and_the_prompt_agree_for_a_name_guess(
+    repos: Repositories, capsys: pytest.CaptureFixture[str]
+) -> None:
+    contact = await ready_contact(repos)
+    await repos.contacts.update_identity(contact.id, USERNAME_MARKER, "Анна")
+
+    lines, system = await _preview_lines(repos, contact.id, capsys)
+
+    assert lines[1] == "gender: female (name)"
+    assert "- Grammatical gender: female" in system
+
+
+async def test_the_preview_line_and_the_prompt_agree_for_the_default_setting(
+    repos: Repositories, capsys: pytest.CaptureFixture[str]
+) -> None:
+    contact = await ready_contact(repos)
+
+    lines, system = await _preview_lines(repos, contact.id, capsys, default=ContactGender.MALE)
+
+    assert lines[1] == "gender: male (default)"
+    assert "- Grammatical gender: male" in system
+
+
+async def test_the_preview_line_and_the_prompt_agree_when_nothing_is_known(
+    repos: Repositories, capsys: pytest.CaptureFixture[str]
+) -> None:
+    contact = await ready_contact(repos)
+
+    lines, system = await _preview_lines(repos, contact.id, capsys)
+
+    assert lines[1] == "gender: unknown (unknown)"
+    assert "- Grammatical gender: unknown" in system
+
+
+async def test_the_gender_line_never_carries_a_name_or_a_message(
+    repos: Repositories, capsys: pytest.CaptureFixture[str]
+) -> None:
+    contact = await ready_contact(repos)
+
+    lines, _ = await _preview_lines(repos, contact.id, capsys)
+
+    assert_absent(USERNAME_MARKER, lines[1])
+    assert_absent(MESSAGE_MARKER, lines[1])
+    assert_absent("Contactfirst", lines[1])

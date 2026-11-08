@@ -59,6 +59,8 @@ select = [
 "src/cyrano/bot/messages.py" = ["RUF001"]  # the owner-facing texts are Russian
 "src/cyrano/services/reply_postprocess.py" = ["RUF001"]  # the speaker prefixes and quotes are not ASCII
 "src/cyrano/stop_trigger_patterns.py" = ["RUF001"]  # the stop-trigger patterns are Russian
+"src/cyrano/gender_name_data.py" = ["RUF001"]  # the name data is Russian
+"src/cyrano/prompts/texts.py" = ["RUF001"]  # the grammar examples in the instructions are Russian
 
 [tool.mypy]
 python_version = "3.14"

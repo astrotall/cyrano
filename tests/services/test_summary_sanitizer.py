@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import pytest
 
+from cyrano.domain.enums import ContactGender
 from cyrano.domain.summary import ContactSummary
 from cyrano.services.summary_sanitizer import contains_contact_detail, sanitize_summary
 
@@ -99,3 +100,13 @@ def test_the_sanitiser_reuses_the_stop_trigger_patterns() -> None:
 
     for name in ("EMAIL", "HANDLE", "CONTACT_LINK", "DIGIT_RUN"):
         assert getattr(summary_sanitizer, name) is getattr(stop_triggers, name)
+
+
+def test_the_gender_survives_the_sanitiser() -> None:
+    cleaned = sanitize_summary(
+        ContactSummary(gender=ContactGender.FEMALE, name="Оля @olya_invented")
+    )
+
+    assert cleaned.summary.gender is ContactGender.FEMALE
+    assert cleaned.summary.name is None
+    assert cleaned.removed == 1

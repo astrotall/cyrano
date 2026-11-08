@@ -255,6 +255,18 @@ An unknown contact prints `summary <action> failed: no contact with this id` and
 command line prints the usage and exits 1, a storage failure prints `storage failed: <class>` and
 exits 1, an invalid configuration exits 2. No value other than the summary itself is printed.
 
+## The gender field (CYR-46)
+
+`ContactSummary.gender` is optional (`female`, `male` or none). Validation is lenient like the rest:
+the value is stripped and case-folded, and anything but `female` or `male` becomes none, so an old
+stored summary without the field and a model that answers something odd both read as none. The
+extraction prompt has one bullet for it: set it only when the contact refers to herself or himself with
+gendered forms (past-tense verbs, adjectives) or says it explicitly, otherwise null, and keep the
+previous value unless the new messages contradict it. The previous memory sent back to the model
+carries it. The reply layer does not show it as a summary line; `GenderResolver` reads it as the second
+source of the grammatical gender, after the owner's choice. `summary show` prints a `gender:` line when
+it is set.
+
 ## Privacy
 
 The summary is personal data about a real person ([S9](safety-rules.md)): it lives in the database,

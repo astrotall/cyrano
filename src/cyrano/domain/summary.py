@@ -7,7 +7,7 @@ from typing import Final, Literal
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_validator
 from pydantic.config import JsonDict
 
-from cyrano.domain.enums import ContactStatus, SummaryOutcome, SummaryReason
+from cyrano.domain.enums import ContactGender, ContactStatus, SummaryOutcome, SummaryReason
 from cyrano.domain.llm import LLMMessage
 from cyrano.domain.models import MAX_BIGINT, UtcDatetime
 
@@ -43,6 +43,7 @@ SUMMARY_LIST_CAPS: Mapping[str, int] = MappingProxyType(
     }
 )
 AGE_FIELD = "age"
+GENDER_FIELD = "gender"
 
 
 def summary_job_id(contact_id: int, up_to_message_id: int) -> str:
@@ -82,6 +83,15 @@ def _age(value: object) -> int | None:
     return number if SUMMARY_MIN_AGE <= number <= SUMMARY_MAX_AGE else None
 
 
+def _gender(value: object) -> ContactGender | None:
+    if not isinstance(value, str):
+        return None
+    try:
+        return ContactGender(value.strip().casefold())
+    except ValueError:
+        return None
+
+
 def _text_schema() -> JsonDict:
     return {"maxLength": SUMMARY_TEXT_MAX_CHARS}
 
@@ -99,6 +109,7 @@ class ContactSummary(BaseModel):
 
     name: str | None = Field(default=None, json_schema_extra=_text_schema())
     age: int | None = Field(default=None, json_schema_extra=_age_schema())
+    gender: ContactGender | None = None
     city: str | None = Field(default=None, json_schema_extra=_text_schema())
     occupation: str | None = Field(default=None, json_schema_extra=_text_schema())
     interests: list[str] = Field(
@@ -132,6 +143,7 @@ class ContactSummary(BaseModel):
             name: _text(data.get(name)) for name in SUMMARY_TEXT_FIELDS
         }
         normalized[AGE_FIELD] = _age(data.get(AGE_FIELD))
+        normalized[GENDER_FIELD] = _gender(data.get(GENDER_FIELD))
         for name, cap in SUMMARY_LIST_CAPS.items():
             normalized[name] = _items(data.get(name), cap)
         return normalized
@@ -139,7 +151,7 @@ class ContactSummary(BaseModel):
     def is_empty(self) -> bool:
         texts = (getattr(self, name) for name in SUMMARY_TEXT_FIELDS)
         lists = (getattr(self, name) for name in SUMMARY_LIST_CAPS)
-        return self.age is None and not any(texts) and not any(lists)
+        return self.age is None and self.gender is None and not any(texts) and not any(lists)
 
 
 class SummaryCursor(BaseModel):

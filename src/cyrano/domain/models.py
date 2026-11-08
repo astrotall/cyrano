@@ -15,11 +15,14 @@ from pydantic import (
 
 from cyrano.domain.enums import (
     CardOutcome,
+    ContactGender,
     ContactStatus,
+    GenderOutcome,
     LeomatchNameSource,
     MessageDirection,
     PauseReason,
 )
+from cyrano.domain.gender import UNRESOLVED_GENDER, ResolvedGender
 
 DEFAULT_MODE_NAME = "default"
 
@@ -85,6 +88,7 @@ class Contact(_Stored):
     status: ContactStatus
     pause_reason: PauseReason | None
     mode_id: int | None
+    gender: ContactGender | None = None
     profile: dict[str, object]
     summary: dict[str, object]
     summary_failed_at: UtcDatetime | None = None
@@ -227,6 +231,8 @@ class CardLeomatch(_Input):
 
 class ContactCard(_Input):
     contact_id: int
+    status: ContactStatus = ContactStatus.NEW
+    gender: ResolvedGender = UNRESOLVED_GENDER
     display_name: str | None = Field(default=None, max_length=CARD_NAME_LENGTH)
     username: str | None = Field(default=None, max_length=MAX_USERNAME_LENGTH)
     bio: str | None = Field(default=None, max_length=CARD_BIO_LENGTH)
@@ -246,3 +252,9 @@ class CardActionResult(_Input):
     outcome: CardOutcome
     status: ContactStatus | None = None
     mode_name: str | None = None
+
+
+class GenderActionResult(_Input):
+    outcome: GenderOutcome
+    gender: ResolvedGender = UNRESOLVED_GENDER
+    card: ContactCard | None = None

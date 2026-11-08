@@ -25,7 +25,7 @@ def test_the_single_message_rule_is_gone() -> None:
 def test_every_other_rule_is_kept() -> None:
     bullets = _bullets()
 
-    assert len(bullets) == 9
+    assert len(bullets) == 11
     assert any(f"Reply with exactly {NEEDS_OWNER_SIGNAL} and nothing else" in b for b in bullets)
     assert any("Plain text only" in bullet for bullet in bullets)
     assert any("Never claim to be human and never deny being an AI." in b for b in bullets)

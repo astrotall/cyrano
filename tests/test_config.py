@@ -7,6 +7,7 @@ import pytest
 from pydantic import SecretStr
 
 from cyrano.config import LOGGED_SETTINGS, ConfigError, Settings, load_settings
+from cyrano.domain.enums import ContactGender
 from tests.conftest import PERSONAL_SETTING_NAMES, PERSONAL_VALUES, REQUIRED_ENV, SECRET_VALUES
 from tests.privacy import FAKE_API_ID, FAKE_OWNER_TELEGRAM_ID, assert_absent
 
@@ -221,6 +222,7 @@ def test_every_setting_is_either_logged_or_deliberately_withheld() -> None:
         "reply_prompt_budget_chars",
         "autopilot_enabled",
         "early_read_enabled",
+        "default_contact_gender",
         "autopilot_debounce_seconds",
         "autopilot_debounce_ongoing_seconds",
         "autopilot_max_burst_wait_seconds",
@@ -792,3 +794,68 @@ def test_a_nonsense_early_read_value_is_a_readable_error_without_the_value(
 
     assert EARLY_READ_VARIABLE in str(raised.value)
     assert "sometimes-marker-zq" not in str(raised.value)
+
+
+def test_the_default_contact_gender_is_unknown_when_unset(full_env: dict[str, str]) -> None:
+    settings = load_settings(env_file=None)
+
+    assert settings.default_contact_gender == "unknown"
+    assert settings.default_gender is None
+
+
+@pytest.mark.parametrize(
+    ("raw", "expected"),
+    [
+        ("unknown", None),
+        ("female", ContactGender.FEMALE),
+        ("male", ContactGender.MALE),
+        (" Female ", ContactGender.FEMALE),
+        ("MALE", ContactGender.MALE),
+        ("Unknown", None),
+    ],
+)
+def test_the_default_contact_gender_accepts_its_three_values(
+    full_env: dict[str, str],
+    monkeypatch: pytest.MonkeyPatch,
+    raw: str,
+    expected: ContactGender | None,
+) -> None:
+    monkeypatch.setenv("DEFAULT_CONTACT_GENDER", raw)
+
+    assert load_settings(env_file=None).default_gender is expected
+
+
+def test_an_empty_default_contact_gender_counts_as_unset(
+    full_env: dict[str, str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("DEFAULT_CONTACT_GENDER", "")
+
+    assert load_settings(env_file=None).default_gender is None
+
+
+@pytest.mark.parametrize("raw", ["other-zq", "boy", "девушка", "x1y", "female,male", "nonsense-zq"])
+def test_a_nonsense_default_contact_gender_is_a_readable_error_without_the_value(
+    full_env: dict[str, str], monkeypatch: pytest.MonkeyPatch, raw: str
+) -> None:
+    monkeypatch.setenv("DEFAULT_CONTACT_GENDER", raw)
+
+    with pytest.raises(ConfigError) as excinfo:
+        load_settings(env_file=None)
+
+    message = str(excinfo.value)
+    assert "DEFAULT_CONTACT_GENDER" in message
+    assert raw not in message
+    assert "Traceback" not in message
+    assert "ValidationError" not in message
+
+
+def test_the_default_contact_gender_is_withheld_from_the_startup_summary(
+    full_env: dict[str, str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("DEFAULT_CONTACT_GENDER", "female")
+
+    settings = load_settings(env_file=None)
+
+    assert "default_contact_gender" not in LOGGED_SETTINGS
+    assert "default_contact_gender" not in settings.safe_summary()
+    assert "female" not in json.dumps(settings.safe_summary())

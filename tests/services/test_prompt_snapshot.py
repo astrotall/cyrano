@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from cyrano.domain.enums import ContactGender
 from cyrano.domain.reply import ContactFacts
 from cyrano.domain.summary import ContactSummary
 from cyrano.prompts.render import render_summary_layer
@@ -19,6 +20,8 @@ You write the owner's next message in a Telegram chat, as the owner would write 
 
 - Imitate the owner's style from the persona and the style examples: length, tone, punctuation, emoji habits and slang.
 - Answer in the language of the contact's last message. Use Russian by default.
+- Use the grammatical gender given for the contact: for female use feminine forms when you address or mention the contact (ты была, ты написала); for male use masculine forms; for unknown avoid gendered past-tense forms about the contact and prefer questions and the present tense.
+- Keep Russian grammar correct: cases, agreement and verb forms. When you return a question to the contact, mirror the structure of the question you were asked: «в каком классе?» is answered by «а ты в каком?», «чем занимаешься?» by «а ты?», «откуда ты?» by «а ты откуда?», and «а у тебя?» is used only when the question was about how things are («как дела?», «как день?»), never for a question about the contact's own class, job, age or city.
 - Write a short reply, typically about as long as the owner's replies in the examples. If the owner usually sends several short messages in a row, put each message on its own line, at most 3 lines; every line will be sent as a separate message. Otherwise write one line.
 - Plain text only: no markdown, no quotation marks around the message, no speaker prefix, no explanations or notes.
 - Never invent facts about the owner that are not in the persona. When you do not know, stay vague or ask a question instead.
@@ -36,6 +39,7 @@ Keep it light and playful. Ask one easy question when the chat slows down.
 === CONTACT FACTS ===
 Taken from the contact's profile; may be inaccurate.
 - Name: Sasha
+- Grammatical gender: female
 - Age: 28
 - City: Inventedtown
 - About: loves tea and long walks
@@ -88,6 +92,7 @@ def test_a_full_prompt_renders_exactly_like_the_snapshot() -> None:
         ),
         facts=ContactFacts(
             name="Sasha",
+            gender=ContactGender.FEMALE,
             age=28,
             city="Inventedtown",
             about="loves tea and long walks",

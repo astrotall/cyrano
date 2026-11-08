@@ -25,6 +25,7 @@ from cyrano.services.card_announcer import (
     CardAnnouncer,
 )
 from cyrano.services.contact_events import InMemoryContactEvents
+from cyrano.services.gender import GenderResolver
 from tests.services.fakes import FakeCardSender, InMemoryModes
 from tests.userbot.fakes import InMemoryContacts, InMemoryMessages
 
@@ -68,6 +69,7 @@ async def _rig(
         modes,
         sender,
         ready,
+        GenderResolver(),
         clock=lambda: NOW,
         sweep_interval=sweep_interval,
     )

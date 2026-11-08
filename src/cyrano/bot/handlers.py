@@ -9,11 +9,25 @@ from aiogram.filters import CommandStart
 from aiogram.types import CallbackQuery, Message
 
 from cyrano.bot import messages
-from cyrano.bot.callbacks import CardAction, CardCallback, PauseAction, PauseCallback
-from cyrano.bot.rendering import alert_text, append_decision
-from cyrano.domain.enums import CardOutcome, ContactStatus, IgnoreOutcome, ResumeOutcome
-from cyrano.domain.models import CardActionResult
+from cyrano.bot.callbacks import (
+    CardAction,
+    CardCallback,
+    GenderCallback,
+    PauseAction,
+    PauseCallback,
+)
+from cyrano.bot.rendering import alert_text, append_decision, card_keyboard, render_card
+from cyrano.domain.enums import (
+    CardOutcome,
+    ContactGender,
+    ContactStatus,
+    GenderOutcome,
+    IgnoreOutcome,
+    ResumeOutcome,
+)
+from cyrano.domain.models import CardActionResult, ContactCard
 from cyrano.services.card_actions import CardActions
+from cyrano.services.gender_actions import GenderActions
 from cyrano.services.pause_actions import PauseActions
 
 logger = logging.getLogger("cyrano.bot.handlers")
@@ -66,6 +80,15 @@ async def _show_decision(query: CallbackQuery, text: str) -> None:
         logger.debug("pause notice was not edited", extra={"error": type(exc).__name__})
 
 
+async def _show_card(message: Message, card: ContactCard) -> None:
+    if message.text is None:
+        return
+    try:
+        await message.edit_text(text=render_card(card), reply_markup=card_keyboard(card))
+    except TelegramAPIError as exc:
+        logger.debug("gender card was not edited", extra={"error": type(exc).__name__})
+
+
 def _resume_alert(outcome: ResumeOutcome) -> str | None:
     if outcome in RESUMED_OUTCOMES:
         return None
@@ -102,7 +125,9 @@ async def _apply_pause_action(
             return KEPT_OUTCOME, None
 
 
-def build_router(actions: CardActions, pause_actions: PauseActions) -> Router:
+def build_router(
+    actions: CardActions, pause_actions: PauseActions, gender_actions: GenderActions
+) -> Router:
     router = Router(name="control")
 
     @router.message(CommandStart(), F.chat.type == ChatType.PRIVATE)
@@ -126,6 +151,28 @@ def build_router(actions: CardActions, pause_actions: PauseActions) -> Router:
                     "action": callback_data.action.value,
                     "outcome": result.outcome.value,
                 },
+            )
+        await _answer(query, alert)
+
+    @router.callback_query(GenderCallback.filter())
+    async def on_gender_button(query: CallbackQuery, callback_data: GenderCallback) -> None:
+        alert: str | None
+        try:
+            result = await gender_actions.set_gender(
+                callback_data.contact_id, ContactGender(callback_data.action.value)
+            )
+            alert = None
+            if result.outcome is GenderOutcome.NOT_FOUND:
+                alert = messages.ALERT_NOT_FOUND
+            elif result.card is not None and isinstance(query.message, Message):
+                await _show_card(query.message, result.card)
+        except Exception as exc:
+            logger.warning("gender button failed", extra={"error": type(exc).__name__})
+            alert = messages.ALERT_FAILED
+        else:
+            logger.info(
+                "gender button handled",
+                extra={"contact_id": callback_data.contact_id, "outcome": result.outcome.value},
             )
         await _answer(query, alert)
 

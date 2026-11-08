@@ -1,6 +1,13 @@
 from __future__ import annotations
 
-from cyrano.domain.enums import AutopilotPauseReason, AutopilotStopReason, TriggerClass
+from cyrano.domain.enums import (
+    AutopilotPauseReason,
+    AutopilotStopReason,
+    ContactGender,
+    ContactStatus,
+    GenderSource,
+    TriggerClass,
+)
 
 START_TEXT = (
     "Привет! Я пульт управления Cyrano. Когда в аккаунт придёт новый контакт, "
@@ -22,6 +29,29 @@ LABEL_MESSAGES = "Сообщения"
 PROFILE_NOT_COLLECTED = "Профиль собрать не удалось, показано только то, что известно."
 NO_MODES_NOTICE = "Нет включённых режимов, ответить нельзя."
 
+LABEL_GENDER = "Пол"
+GENDER_LINE = "{label}: {value} ({source})"
+GENDER_UNKNOWN_LINE = f"{LABEL_GENDER}: не определён"
+GENDER_VALUE_NAMES = {ContactGender.FEMALE: "девушка", ContactGender.MALE: "парень"}
+GENDER_SOURCE_NAMES = {
+    GenderSource.OWNER: "выбран вами",
+    GenderSource.SUMMARY: "из переписки",
+    GenderSource.NAME: "по имени",
+    GenderSource.DEFAULT: "по умолчанию",
+}
+LABEL_STATUS = "Статус"
+STATUS_LINE = "{label}: {status}"
+STATUS_NAMES = {
+    ContactStatus.NEW: "новый",
+    ContactStatus.PENDING: "ждёт решения",
+    ContactStatus.ACTIVE: "отвечаем",
+    ContactStatus.PAUSED: "на паузе",
+    ContactStatus.IGNORED: "игнорируем",
+}
+GENDER_FEMALE_BUTTON = "Девушка"
+GENDER_MALE_BUTTON = "Парень"
+GENDER_CHECK_MARK = "✓ "
+
 REPLY_BUTTON = "Отвечать: {mode}"
 IGNORE_BUTTON = "Игнорировать"
 
@@ -34,6 +64,7 @@ DECISION_STATUS_FALLBACK = "статус контакта: {status}"
 ALERT_REFUSED = "Контакт уже не ждёт решения."
 ALERT_NOT_FOUND = "Контакт не найден."
 ALERT_MODE_UNAVAILABLE = "Этот режим недоступен, выберите другой."
+ALERT_GENDER_REQUIRED = "Сначала выберите пол контакта: «Девушка» или «Парень»."
 ALERT_FAILED = "Не получилось, попробуйте ещё раз."
 
 MANUAL_PAUSE_NOTICE = (

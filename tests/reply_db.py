@@ -10,9 +10,10 @@ from cyrano.db.repositories import (
     SqlPersonaRepository,
     SqlStyleExampleRepository,
 )
-from cyrano.domain.enums import ContactStatus, MessageDirection
+from cyrano.domain.enums import ContactGender, ContactStatus, MessageDirection
 from cyrano.domain.models import Contact, ContactCreate, MessageCreate
 from cyrano.domain.style import StyleExampleCreate
+from cyrano.services.gender import GenderResolver
 from cyrano.services.llm_client import LLMClient
 from cyrano.services.persona_service import PersonaService
 from cyrano.services.reply_generator import ReplyGenerator
@@ -58,6 +59,7 @@ class Repositories:
         *,
         history_limit: int = HISTORY_LIMIT,
         budget: int = 1_000_000,
+        default_gender: ContactGender | None = None,
     ) -> ReplyGenerator:
         return ReplyGenerator(
             contacts=self.contacts,
@@ -65,6 +67,7 @@ class Repositories:
             modes=self.modes,
             persona=PersonaService(self.personas),
             examples=ExampleSelector(self.style_examples, 8),
+            gender=GenderResolver(default_gender),
             builder=make_builder(budget),
             client=client,
             history_limit=history_limit,

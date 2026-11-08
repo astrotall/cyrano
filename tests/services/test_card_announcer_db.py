@@ -17,6 +17,7 @@ from cyrano.domain.models import (
 )
 from cyrano.services.card_announcer import CARD_WITHOUT_PROFILE_DELAY, CardAnnouncer
 from cyrano.services.contact_events import InMemoryContactEvents
+from cyrano.services.gender import GenderResolver
 from tests.services.fakes import FakeCardSender
 
 WAIT_ATTEMPTS = 300
@@ -53,7 +54,7 @@ async def test_a_ready_event_on_real_storage_sends_the_card_and_sets_pending(
         )
     sender = FakeCardSender()
     ready = InMemoryContactEvents[ContactReadyEvent]()
-    announcer = CardAnnouncer(contacts, messages, modes, sender, ready)
+    announcer = CardAnnouncer(contacts, messages, modes, sender, ready, GenderResolver())
 
     task = asyncio.create_task(announcer.run())
     try:
@@ -77,14 +78,16 @@ async def test_the_age_rule_uses_the_stored_creation_time(
     ready = InMemoryContactEvents[ContactReadyEvent]()
     later = datetime.now(UTC) + timedelta(seconds=CARD_WITHOUT_PROFILE_DELAY + 60)
 
-    young = CardAnnouncer(contacts, messages, modes, sender, ready)
+    young = CardAnnouncer(contacts, messages, modes, sender, ready, GenderResolver())
     task = asyncio.create_task(young.run())
     await asyncio.sleep(WAIT_INTERVAL_SECONDS * 10)
     task.cancel()
     await asyncio.gather(task, return_exceptions=True)
     assert sender.cards == []
 
-    aged = CardAnnouncer(contacts, messages, modes, sender, ready, clock=lambda: later)
+    aged = CardAnnouncer(
+        contacts, messages, modes, sender, ready, GenderResolver(), clock=lambda: later
+    )
     task = asyncio.create_task(aged.run())
     try:
         await _wait_for_status(contacts, contact.id, ContactStatus.PENDING)

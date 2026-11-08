@@ -3,9 +3,10 @@ from __future__ import annotations
 import asyncio
 
 from cyrano.db.repositories import SqlContactRepository, SqlModeRepository
-from cyrano.domain.enums import CardOutcome, ContactStatus
+from cyrano.domain.enums import CardOutcome, ContactGender, ContactStatus
 from cyrano.domain.models import CardActionResult, Contact, ContactCreate, Mode, ModeCreate
 from cyrano.services.card_actions import CardActions
+from cyrano.services.gender import GenderResolver
 
 MISSING_ID = 987654
 
@@ -18,13 +19,14 @@ class _Rig:
         flirt: Mode,
         retired: Mode,
         default: Mode,
+        default_gender: ContactGender | None = ContactGender.FEMALE,
     ) -> None:
         self.contacts = contacts
         self.modes = modes
         self.flirt = flirt
         self.retired = retired
         self.default = default
-        self.actions = CardActions(contacts, modes)
+        self.actions = CardActions(contacts, modes, GenderResolver(default_gender))
 
     async def contact(
         self, status: ContactStatus = ContactStatus.PENDING, tg_id: int = 1
@@ -50,12 +52,16 @@ class _Rig:
         return found
 
 
-async def _rig(contacts: SqlContactRepository, modes: SqlModeRepository) -> _Rig:
+async def _rig(
+    contacts: SqlContactRepository,
+    modes: SqlModeRepository,
+    default_gender: ContactGender | None = ContactGender.FEMALE,
+) -> _Rig:
     default = await modes.get_by_name("default")
     assert default is not None
     flirt = await modes.create(ModeCreate(name="flirt", prompt_fragment="fake"))
     retired = await modes.create(ModeCreate(name="retired", prompt_fragment="fake", enabled=False))
-    return _Rig(contacts, modes, flirt, retired, default)
+    return _Rig(contacts, modes, flirt, retired, default, default_gender)
 
 
 async def test_reply_activates_a_pending_contact_with_the_mode(
@@ -251,3 +257,94 @@ async def test_a_reply_and_an_ignore_at_the_same_time_never_ignore_an_active_con
     assert (reply.outcome is CardOutcome.APPLIED) == (stored.status is ContactStatus.ACTIVE)
     assert (ignore.outcome is CardOutcome.APPLIED) == (stored.status is ContactStatus.IGNORED)
     assert {reply.outcome, ignore.outcome} == {CardOutcome.APPLIED, CardOutcome.REFUSED}
+
+
+async def test_reply_is_refused_with_gender_required_when_the_gender_is_unknown(
+    contacts: SqlContactRepository, modes: SqlModeRepository
+) -> None:
+    rig = await _rig(contacts, modes, default_gender=None)
+    contact = await rig.contact()
+
+    result = await rig.actions.reply(contact.id, rig.flirt.id)
+
+    assert result == CardActionResult(
+        outcome=CardOutcome.GENDER_REQUIRED, status=ContactStatus.PENDING
+    )
+    stored = await rig.current(contact)
+    assert (stored.status, stored.mode_id) == (ContactStatus.PENDING, None)
+
+
+async def test_reply_works_for_every_resolved_gender_source(
+    contacts: SqlContactRepository, modes: SqlModeRepository
+) -> None:
+    rig = await _rig(contacts, modes, default_gender=None)
+    by_owner = await rig.contact(tg_id=1)
+    await contacts.set_gender(by_owner.id, ContactGender.MALE)
+    by_name = await contacts.create(ContactCreate(tg_id=2, display_name="Анна"))
+    await contacts.set_status(by_name.id, ContactStatus.PENDING)
+
+    first = await rig.actions.reply(by_owner.id, rig.default.id)
+    second = await rig.actions.reply(by_name.id, rig.default.id)
+
+    assert first.outcome is CardOutcome.APPLIED
+    assert second.outcome is CardOutcome.APPLIED
+
+
+async def test_reply_works_with_the_default_setting(
+    contacts: SqlContactRepository, modes: SqlModeRepository
+) -> None:
+    rig = await _rig(contacts, modes, default_gender=ContactGender.MALE)
+    contact = await rig.contact()
+
+    result = await rig.actions.reply(contact.id, rig.default.id)
+
+    assert result.outcome is CardOutcome.APPLIED
+
+
+async def test_the_owner_choice_unblocks_a_contact_that_was_refused(
+    contacts: SqlContactRepository, modes: SqlModeRepository
+) -> None:
+    rig = await _rig(contacts, modes, default_gender=None)
+    contact = await rig.contact()
+    refused = await rig.actions.reply(contact.id, rig.default.id)
+    await contacts.set_gender(contact.id, ContactGender.FEMALE)
+
+    allowed = await rig.actions.reply(contact.id, rig.default.id)
+
+    assert refused.outcome is CardOutcome.GENDER_REQUIRED
+    assert allowed.outcome is CardOutcome.APPLIED
+
+
+async def test_the_other_outcomes_do_not_depend_on_the_gender(
+    contacts: SqlContactRepository, modes: SqlModeRepository
+) -> None:
+    rig = await _rig(contacts, modes, default_gender=None)
+    active = await rig.contact(ContactStatus.ACTIVE, tg_id=1)
+    ignored = await rig.contact(ContactStatus.IGNORED, tg_id=2)
+    pending = await rig.contact(tg_id=3)
+
+    same_mode = await rig.actions.reply(active.id, rig.default.id)
+    other_mode = await rig.actions.reply(active.id, rig.flirt.id)
+    after_ignore = await rig.actions.reply(ignored.id, rig.default.id)
+    missing = await rig.actions.reply(MISSING_ID, rig.default.id)
+    retired = await rig.actions.reply(pending.id, rig.retired.id)
+    ignore = await rig.actions.ignore(pending.id)
+
+    assert same_mode.outcome is CardOutcome.ALREADY_APPLIED
+    assert other_mode.outcome is CardOutcome.REFUSED
+    assert after_ignore.outcome is CardOutcome.REFUSED
+    assert missing.outcome is CardOutcome.NOT_FOUND
+    assert retired.outcome is CardOutcome.MODE_UNAVAILABLE
+    assert ignore.outcome is CardOutcome.APPLIED
+
+
+async def test_ignore_needs_no_gender(
+    contacts: SqlContactRepository, modes: SqlModeRepository
+) -> None:
+    rig = await _rig(contacts, modes, default_gender=None)
+    contact = await rig.contact()
+
+    result = await rig.actions.ignore(contact.id)
+
+    assert result.outcome is CardOutcome.APPLIED
+    assert (await rig.current(contact)).status is ContactStatus.IGNORED

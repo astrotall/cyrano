@@ -8,6 +8,7 @@ from cyrano.domain.reply import BuiltPrompt, GeneratedReply
 from cyrano.domain.summary import read_stored_summary
 from cyrano.prompts.render import render_summary_layer
 from cyrano.services.contact_facts import build_contact_facts
+from cyrano.services.gender import GenderResolver
 from cyrano.services.llm_client import LLMClient
 from cyrano.services.persona_service import PersonaService
 from cyrano.services.prompt_builder import PromptBuilder
@@ -27,6 +28,7 @@ class ReplyGenerator:
         modes: ModeRepository,
         persona: PersonaService,
         examples: ExampleSelector,
+        gender: GenderResolver,
         builder: PromptBuilder,
         client: LLMClient,
         history_limit: int,
@@ -36,6 +38,7 @@ class ReplyGenerator:
         self._modes = modes
         self._persona = persona
         self._examples = examples
+        self._gender = gender
         self._builder = builder
         self._client = client
         self._history_limit = history_limit
@@ -67,7 +70,7 @@ class ReplyGenerator:
             contact_id=contact_id,
             persona=persona.text,
             mode_fragment=mode.prompt_fragment,
-            facts=build_contact_facts(contact),
+            facts=build_contact_facts(contact, self._gender.resolve(contact)),
             summary=summary if summary is not None else _stored_summary_text(contact),
             messages=history,
             examples=examples,

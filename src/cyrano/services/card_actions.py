@@ -5,13 +5,17 @@ import asyncio
 from cyrano.domain.enums import CardOutcome, ContactStatus
 from cyrano.domain.errors import InvalidStatusTransition, ModeNotFound
 from cyrano.domain.models import CardActionResult, Contact
+from cyrano.services.gender import GenderResolver
 from cyrano.services.repositories import ContactRepository, ModeRepository
 
 
 class CardActions:
-    def __init__(self, contacts: ContactRepository, modes: ModeRepository) -> None:
+    def __init__(
+        self, contacts: ContactRepository, modes: ModeRepository, gender: GenderResolver
+    ) -> None:
         self._contacts = contacts
         self._modes = modes
+        self._gender = gender
         self._lock = asyncio.Lock()
 
     async def reply(self, contact_id: int, mode_id: int) -> CardActionResult:
@@ -36,6 +40,8 @@ class CardActions:
         mode = await self._modes.get_by_id(mode_id)
         if mode is None or not mode.enabled:
             return await self._result(CardOutcome.MODE_UNAVAILABLE, contact)
+        if not self._gender.resolve(contact).is_known:
+            return await self._result(CardOutcome.GENDER_REQUIRED, contact)
         try:
             changed = await self._contacts.set_status(
                 contact.id, ContactStatus.ACTIVE, mode_id=mode.id

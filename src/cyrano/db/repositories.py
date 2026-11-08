@@ -44,6 +44,7 @@ from cyrano.domain.autopilot import AutopilotState
 from cyrano.domain.enums import (
     AutopilotPauseReason,
     AutopilotStopReason,
+    ContactGender,
     ContactStatus,
     MessageDirection,
     OutboxSource,
@@ -178,6 +179,13 @@ class SqlContactRepository:
             row = await _locked_contact(session, contact_id)
             await _ensure_mode_exists(session, mode_id)
             row.mode_id = mode_id
+            await session.flush()
+            return Contact.model_validate(row)
+
+    async def set_gender(self, contact_id: int, gender: ContactGender | None) -> Contact:
+        async with self._session_factory.begin() as session:
+            row = await _locked_contact(session, contact_id)
+            row.gender = gender
             await session.flush()
             return Contact.model_validate(row)
 

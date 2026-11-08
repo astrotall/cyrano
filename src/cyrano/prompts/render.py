@@ -5,6 +5,7 @@ from collections.abc import Sequence
 from datetime import datetime
 
 from cyrano.domain.enums import MessageDirection, TurnRole
+from cyrano.domain.gender import UNKNOWN_GENDER_LABEL
 from cyrano.domain.models import Message
 from cyrano.domain.reply import ContactFacts
 from cyrano.domain.style import StyleExample, Turn
@@ -23,6 +24,7 @@ from cyrano.prompts.texts import (
     FACT_AGE_LABEL,
     FACT_BIO_LABEL,
     FACT_CITY_LABEL,
+    FACT_GENDER_LABEL,
     FACT_NAME_LABEL,
     FACTS_HEADER,
     FACTS_NOTE,
@@ -104,6 +106,7 @@ def _layer(header: str, *parts: str) -> str:
 def _facts_lines(facts: ContactFacts) -> list[str]:
     pairs = (
         (FACT_NAME_LABEL, facts.name),
+        (FACT_GENDER_LABEL, UNKNOWN_GENDER_LABEL if facts.gender is None else facts.gender.value),
         (FACT_AGE_LABEL, None if facts.age is None else str(facts.age)),
         (FACT_CITY_LABEL, facts.city),
         (FACT_ABOUT_LABEL, facts.about),
@@ -136,9 +139,7 @@ def render_system_prompt(
     layers = [_layer(INSTRUCTIONS_HEADER, INSTRUCTIONS), _layer(PERSONA_HEADER, persona)]
     if mode_fragment.strip():
         layers.append(_layer(MODE_HEADER, mode_fragment.strip()))
-    fact_lines = _facts_lines(facts)
-    if fact_lines:
-        layers.append(_layer(FACTS_HEADER, FACTS_NOTE, *fact_lines))
+    layers.append(_layer(FACTS_HEADER, FACTS_NOTE, *_facts_lines(facts)))
     cleaned_summary = (
         None if summary is None else strip_boundary(strip_layer_headers(summary)).strip()
     )

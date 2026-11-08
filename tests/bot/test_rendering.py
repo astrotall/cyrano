@@ -203,7 +203,7 @@ def test_a_card_made_only_of_characters_that_grow_when_escaped_stays_below_the_l
 def test_the_keyboard_has_one_button_per_enabled_mode_and_an_ignore_button() -> None:
     keyboard = card_keyboard(fake_card())
 
-    buttons = [button for row in keyboard.inline_keyboard for button in row]
+    buttons = [button for row in keyboard.inline_keyboard[1:] for button in row]
     assert [b.text for b in buttons] == [
         messages.REPLY_BUTTON.format(mode="default"),
         messages.REPLY_BUTTON.format(mode="flirt"),
@@ -219,14 +219,14 @@ def test_the_keyboard_has_one_button_per_enabled_mode_and_an_ignore_button() -> 
 def test_a_disabled_mode_is_absent_because_the_card_lists_enabled_modes_only() -> None:
     keyboard = card_keyboard(fake_card(modes=[ModeChoice(id=2, name="flirt")]))
 
-    texts = [b.text for row in keyboard.inline_keyboard for b in row]
+    texts = [b.text for row in keyboard.inline_keyboard[1:] for b in row]
     assert texts == [messages.REPLY_BUTTON.format(mode="flirt"), messages.IGNORE_BUTTON]
 
 
 def test_a_card_without_modes_has_only_the_ignore_button() -> None:
     keyboard = card_keyboard(fake_card(modes=[]))
 
-    assert [b.text for row in keyboard.inline_keyboard for b in row] == [messages.IGNORE_BUTTON]
+    assert [b.text for row in keyboard.inline_keyboard[1:] for b in row] == [messages.IGNORE_BUTTON]
 
 
 def test_callback_data_stays_far_below_the_telegram_limit() -> None:

@@ -25,6 +25,7 @@ from aiogram.types import Chat, Message, PhotoSize, User
 
 from cyrano.config import Settings
 from cyrano.services.card_actions import CardActions
+from cyrano.services.gender_actions import GenderActions
 from cyrano.services.pause_actions import PauseActions
 from tests.privacy import FAKE_OWNER_TELEGRAM_ID, FAKE_STRANGER_TELEGRAM_ID
 from tests.services.fakes import FakeCardSender
@@ -223,11 +224,14 @@ def fake_control_bot_class(
     poll_error: Exception | None = None,
     poll_returns: bool = False,
     sender: FakeCardSender | None = None,
-) -> Callable[[Settings, CardActions, PauseActions], FakeControlBot]:
+) -> Callable[[Settings, CardActions, PauseActions, GenderActions], FakeControlBot]:
     recorded = calls if calls is not None else []
 
     def build(
-        settings: Settings, actions: CardActions, pause_actions: PauseActions
+        settings: Settings,
+        actions: CardActions,
+        pause_actions: PauseActions,
+        gender_actions: GenderActions,
     ) -> FakeControlBot:
         return FakeControlBot(
             recorded, poll_error=poll_error, poll_returns=poll_returns, sender=sender

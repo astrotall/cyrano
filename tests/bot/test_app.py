@@ -10,10 +10,12 @@ from cyrano.bot.app import ControlBot
 from cyrano.bot.errors import BotTokenRejected, PollingFailed
 from cyrano.config import load_settings
 from cyrano.services.card_actions import CardActions
+from cyrano.services.gender import GenderResolver
+from cyrano.services.gender_actions import GenderActions
 from cyrano.services.pause_actions import PauseActions
 from tests.bot.fakes import FAKE_BOT_TOKEN, OWNER_ID, RecordingSession
 from tests.services.fakes import InMemoryModes
-from tests.userbot.fakes import InMemoryContacts
+from tests.userbot.fakes import InMemoryContacts, InMemoryMessages
 
 WAIT_ATTEMPTS = 200
 WAIT_INTERVAL_SECONDS = 0.01
@@ -30,8 +32,14 @@ def _control_bot(
         monkeypatch.setenv(name, value)
     settings = load_settings(env_file=None)
     contacts = InMemoryContacts()
+    modes = InMemoryModes()
+    gender = GenderResolver()
     return ControlBot(
-        settings, CardActions(contacts, InMemoryModes()), PauseActions(contacts), session=session
+        settings,
+        CardActions(contacts, modes, gender),
+        PauseActions(contacts),
+        GenderActions(contacts, InMemoryMessages(), modes, gender),
+        session=session,
     )
 
 

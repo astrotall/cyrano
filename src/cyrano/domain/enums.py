@@ -11,6 +11,25 @@ class ContactStatus(StrEnum):
     IGNORED = "ignored"
 
 
+class ContactGender(StrEnum):
+    FEMALE = "female"
+    MALE = "male"
+
+
+class GenderSource(StrEnum):
+    OWNER = "owner"
+    SUMMARY = "summary"
+    NAME = "name"
+    DEFAULT = "default"
+    UNKNOWN = "unknown"
+
+
+class GenderOutcome(StrEnum):
+    APPLIED = "applied"
+    ALREADY_APPLIED = "already_applied"
+    NOT_FOUND = "not_found"
+
+
 class PauseReason(StrEnum):
     MANUAL_MESSAGE = "manual_message"
     SEND_REJECTED = "send_rejected"
@@ -34,6 +53,7 @@ class CardOutcome(StrEnum):
     REFUSED = "refused"
     NOT_FOUND = "not_found"
     MODE_UNAVAILABLE = "mode_unavailable"
+    GENDER_REQUIRED = "gender_required"
 
 
 class ResumeOutcome(StrEnum):

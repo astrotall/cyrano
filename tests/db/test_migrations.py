@@ -77,6 +77,7 @@ EXPECTED_CONSTRAINTS = {
     "pk_schedule_profile",
     "ck_schedule_profile_single_row",
     "ck_contacts_pause_reason_allowed",
+    "ck_contacts_gender_allowed",
     "pk_autopilot_state",
     "ck_autopilot_state_single_row",
 }
@@ -264,13 +265,19 @@ async def test_revision_0010_follows_0009(alembic_config: Config) -> None:
     assert revision.down_revision == "0009"
 
 
-async def test_revision_0011_is_the_head_and_follows_0010(alembic_config: Config) -> None:
-    script = ScriptDirectory.from_config(alembic_config)
-
-    assert script.get_heads() == ["0011"]
-    revision = script.get_revision("0011")
+async def test_revision_0011_follows_0010(alembic_config: Config) -> None:
+    revision = ScriptDirectory.from_config(alembic_config).get_revision("0011")
     assert revision is not None
     assert revision.down_revision == "0010"
+
+
+async def test_revision_0012_is_the_head_and_follows_0011(alembic_config: Config) -> None:
+    script = ScriptDirectory.from_config(alembic_config)
+
+    assert script.get_heads() == ["0012"]
+    revision = script.get_revision("0012")
+    assert revision is not None
+    assert revision.down_revision == "0011"
 
 
 async def _summary_failed_at_columns(url: URL) -> list[tuple[object, ...]]:
@@ -302,6 +309,56 @@ async def test_revision_0011_adds_summary_failed_at_and_downgrades_to_0010_keepi
 
     await asyncio.to_thread(command.upgrade, alembic_config, "head")
     assert await fetch_all(database_url, "SELECT summary_failed_at FROM contacts") == [(None,)]
+
+
+async def _gender_columns(url: URL) -> list[tuple[object, ...]]:
+    return await fetch_all(
+        url,
+        "SELECT is_nullable, data_type FROM information_schema.columns "
+        "WHERE table_name = 'contacts' AND column_name = 'gender'",
+    )
+
+
+async def test_revision_0012_adds_gender_and_downgrades_to_0011_keeping_the_rows(
+    database_url: URL, alembic_config: Config
+) -> None:
+    await asyncio.to_thread(command.upgrade, alembic_config, "0011")
+    await execute(
+        database_url,
+        "INSERT INTO contacts (tg_id, status) "  # noqa: S608
+        f"VALUES ({FAKE_TELEGRAM_ID}, 'active')",
+    )
+
+    await asyncio.to_thread(command.upgrade, alembic_config, "0012")
+    assert await _gender_columns(database_url) == [("YES", "character varying")]
+    assert await fetch_all(database_url, "SELECT gender FROM contacts") == [(None,)]
+    await execute(database_url, "UPDATE contacts SET gender = 'female'")
+
+    await asyncio.to_thread(command.downgrade, alembic_config, "0011")
+    assert await _gender_columns(database_url) == []
+    assert await fetch_all(database_url, "SELECT status FROM contacts") == [("active",)]
+
+    await asyncio.to_thread(command.upgrade, alembic_config, "head")
+    assert await fetch_all(database_url, "SELECT gender FROM contacts") == [(None,)]
+
+
+async def test_the_gender_check_accepts_female_male_and_null_and_nothing_else(
+    migrated_url: URL,
+) -> None:
+    for number, value in enumerate(("'female'", "'male'", "NULL")):
+        await execute(
+            migrated_url,
+            "INSERT INTO contacts (tg_id, status, gender) "  # noqa: S608
+            f"VALUES ({FAKE_TELEGRAM_ID + number}, 'new', {value})",
+        )
+
+    for bad in ("'other'", "'Female'", "''", "'unknown'"):
+        with pytest.raises(DBAPIError, match="ck_contacts_gender_allowed"):
+            await execute(
+                migrated_url,
+                "INSERT INTO contacts (tg_id, status, gender) "  # noqa: S608
+                f"VALUES ({FAKE_TELEGRAM_ID + 10}, 'new', {bad})",
+            )
 
 
 async def _follows_id_columns(url: URL) -> list[tuple[object, ...]]:

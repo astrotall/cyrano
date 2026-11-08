@@ -10,7 +10,13 @@ from pathlib import Path
 
 from telethon.errors import SessionPasswordNeededError
 
-from cyrano.domain.enums import ContactStatus, ManualMessageOutcome, MessageDirection, PauseReason
+from cyrano.domain.enums import (
+    ContactGender,
+    ContactStatus,
+    ManualMessageOutcome,
+    MessageDirection,
+    PauseReason,
+)
 from cyrano.domain.errors import ContactNotFound, ReplyAfterRefused
 from cyrano.domain.models import (
     Contact,
@@ -363,6 +369,14 @@ class InMemoryContacts:
     async def set_mode(self, contact_id: int, mode_id: int) -> Contact:
         raise NotImplementedError
 
+    async def set_gender(self, contact_id: int, gender: ContactGender | None) -> Contact:
+        contact = await self.get_by_id(contact_id)
+        if contact is None:
+            raise ContactNotFound(contact_id)
+        changed = contact.model_copy(update={"gender": gender})
+        self.stored[contact.tg_id] = changed
+        return changed
+
     async def update(self, contact_id: int, data: ContactUpdate) -> Contact:
         contact = await self.get_by_id(contact_id)
         assert contact is not None
@@ -395,6 +409,8 @@ class InMemoryContacts:
         created_at: datetime = FAKE_SENT_AT,
         mode_id: int | None = None,
         pause_reason: PauseReason | None = None,
+        gender: ContactGender | None = None,
+        summary: dict[str, object] | None = None,
     ) -> Contact:
         created = await self.create(
             ContactCreate(
@@ -407,6 +423,8 @@ class InMemoryContacts:
                 "created_at": created_at,
                 "mode_id": mode_id,
                 "pause_reason": pause_reason,
+                "gender": gender,
+                "summary": summary or {},
             }
         )
         self.stored[tg_id] = seeded

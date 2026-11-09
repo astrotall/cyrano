@@ -12,7 +12,7 @@ dependencies = [
     # IANA tz database: python:slim has no system tzdata, and TIMEZONE is validated at startup.
     "tzdata>=2024.2",
     # Async ORM, its PostgreSQL driver and schema migrations.
-    "sqlalchemy[asyncio]>=2.0,<3",
+    "sqlalchemy[asyncio]>=2.1.8,<3",
     "asyncpg>=0.30",
     "alembic>=1.14",
     # MTProto client for the userbot on the second account; untyped, so mypy has an override.

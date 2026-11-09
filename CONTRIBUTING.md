@@ -225,7 +225,8 @@ through uv from `.python-version`:
 
 | Job | Steps |
 | --- | --- |
-| `check` | a Postgres service container, `make install`, `make check`, `make test` with `TEST_DATABASE_URL` |
+| `static` | `make install`, `make check` |
+| `test` | a Postgres service container, `make install`, `make test` with `TEST_DATABASE_URL` and the 25 slowest tests printed; runs in parallel with `static` |
 | `docker` | `cp .env.example .env`, `docker compose config --quiet` with and without the override file and for `migrate`, `docker compose build`, `alembic heads` in a throwaway `migrate` container |
 
 Red CI is never merged.

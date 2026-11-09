@@ -1044,9 +1044,13 @@ modules must appear in this README, in `architecture.md` and in `CLAUDE.md`). Te
 Database tests run against real PostgreSQL, never SQLite, because JSONB and native enums must be
 tested for real. `TEST_DATABASE_URL` (from the environment or `.env`; the template value targets
 the compose Postgres on `127.0.0.1:5432`) points at a server and a database to connect to for
-admin statements. It is not an application setting. Each
-test creates a database with a random name there, applies the Alembic migrations to it, and drops
-it afterwards, so the role needs `CREATEDB`; the compose `POSTGRES_USER` has it. If the host port is
+admin statements. It is not an application setting. A
+session-scoped template database (`cyrano_tpl_<epoch>_<pid>`) is migrated once; each test creates its
+own database from it (`CREATE DATABASE ... TEMPLATE`) and drops it afterwards, so the role needs
+`CREATEDB`; the compose `POSTGRES_USER` has it. Only the migration tests migrate a database
+themselves. If a run is killed, templates older than six hours are dropped at the next start; a
+database left behind by a killed run (`cyrano_test_*` or `cyrano_tpl_*`) can be dropped with
+`DROP DATABASE ... WITH (FORCE)`. If the host port is
 not 5432, use the same port as `POSTGRES_HOST_PORT`. If Postgres is unreachable or the variable is
 missing, the tests fail with a message that names `make db-up`; they never skip.
 
@@ -1073,7 +1077,8 @@ cancels the older one.
 
 | Job | What it does |
 | --- | --- |
-| `check` | a `postgres:16.15-alpine` service container, installs uv and the Python from `.python-version`, `make install`, `make check`, `make test` with `TEST_DATABASE_URL` set |
+| `static` | installs uv and the Python from `.python-version`, `make install`, `make check` |
+| `test` | a `postgres:16.15-alpine` service container, installs uv and the Python, `make install`, `make test` with `TEST_DATABASE_URL` set and the 25 slowest tests printed; runs in parallel with `static` |
 | `docker` | `cp .env.example .env`, `docker compose config --quiet` with and without the override file and for the `migrate` service, `docker compose build`, `alembic heads` in a throwaway `migrate` container to prove the image holds the migrations; nothing is pushed and no long-running service is started |
 
 ## More

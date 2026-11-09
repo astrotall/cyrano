@@ -200,7 +200,7 @@ async def test_a_chat_lookup_that_fails_is_retried_then_counted_without_reaching
 
 async def test_a_malformed_event_does_not_propagate() -> None:
     detector = FakeDetector()
-    handler = OutgoingHandler(detector)
+    handler = OutgoingHandler(detector, sleep=RecordingSleep())
 
     await handler.handle(_outgoing(id=0))
     await handler.handle(_outgoing(chat=FakeSender(id=-5)))
@@ -211,7 +211,7 @@ async def test_a_malformed_event_does_not_propagate() -> None:
 
 async def test_one_failure_does_not_stop_later_messages() -> None:
     detector = FakeDetector()
-    handler = OutgoingHandler(detector)
+    handler = OutgoingHandler(detector, sleep=RecordingSleep())
 
     await handler.handle(_outgoing(id=0))
     await handler.handle(_outgoing(id=79))

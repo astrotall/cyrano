@@ -102,6 +102,7 @@ from tests.services.outbox_fakes import (
     free_schedule,
     stored_contact,
 )
+from tests.userbot.fakes import RecordingSleep
 
 TEXT = "safety-text-marker-zq that must never leak"
 USERNAME = "safety_username_marker_zq"
@@ -1410,7 +1411,7 @@ async def test_a_contact_missing_from_a_cold_cache_is_sent_to_after_one_refresh(
     row = await rig.row()
     raw = _ColdCache()
 
-    await rig.sender(TelethonAdapter(raw, clock=rig.clock)).send_next()
+    await rig.sender(TelethonAdapter(raw, sleep=RecordingSleep(), clock=rig.clock)).send_next()
 
     assert (await rig.stored(row.id)).state is OutboxState.SENT
     assert await rig.status() is ContactStatus.ACTIVE
@@ -1451,7 +1452,7 @@ async def test_a_refresh_that_fails_does_not_fail_a_row_whose_second_attempt_wor
     row = await rig.row()
     raw = _LateCache(refresh_error=ConnectionError("fake"))
 
-    await rig.sender(TelethonAdapter(raw, clock=rig.clock)).send_next()
+    await rig.sender(TelethonAdapter(raw, sleep=RecordingSleep(), clock=rig.clock)).send_next()
 
     assert (await rig.stored(row.id)).state is OutboxState.SENT
     assert (raw.refreshes, raw.send_calls) == (1, 1)

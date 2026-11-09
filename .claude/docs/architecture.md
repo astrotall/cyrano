@@ -963,12 +963,16 @@ same, never a summary value, CYR-25).
 - **No real Telegram in tests.** Nothing in the test suite connects to Telegram. The fakes in
   `tests/userbot/fakes.py` implement the Protocols; their write methods record the attempt and
   raise, so a test can prove that none was made.
-- **Test database**: real PostgreSQL, never SQLite. The fixture in `tests/db/conftest.py` reads
-  `TEST_DATABASE_URL` from the environment or `.env`, creates a database with a random name through
-  an admin connection, applies the Alembic migrations to it, so every database test also runs the
-  migration, yields a session factory built by the production code, and drops the database with
-  `WITH (FORCE)`, also after a failure. One database per test keeps tests isolated without
-  truncation. Unreachable Postgres or a missing variable fails the test with a message naming
+- **Test database**: real PostgreSQL, never SQLite. Since CYR-56 a session-scoped fixture in
+  `tests/db/conftest.py` reads `TEST_DATABASE_URL` from the environment or `.env`, creates the
+  template database `cyrano_tpl_<epoch>_<pid>[_<worker>]` through an admin connection (after dropping
+  templates of that prefix that are older than six hours), applies the Alembic migrations to it once,
+  waits until it has no connection and drops it in a finalizer, also after a failure. Each database
+  test gets its own database made with `CREATE DATABASE ... TEMPLATE`, yields a session factory built
+  by the production code, and drops the database with `WITH (FORCE)`, also after a failure. One
+  database per test keeps tests isolated without truncation. Only `tests/db/test_migrations.py` and
+  `tests/db/test_proactive_migration.py` (and the fixtures) run Alembic themselves, on their own
+  empty database; `tests/db/test_template_usage.py` pins that list. Unreachable Postgres or a missing variable fails the test with a message naming
   `make db-up`; it never skips. CI runs a Postgres service container on the same tag as compose.
   CYR-12 added: card rendering (escaping, truncation, keyboard, callback size), the card sender
   with a recording `BaseSession` that returns real aiogram objects (photos, retry, forbidden,

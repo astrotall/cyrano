@@ -27,6 +27,7 @@ from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 from cyrano.domain.enums import (
     ContactGender,
     ContactStatus,
+    MediaKind,
     MessageDirection,
     OutboxSource,
     OutboxState,
@@ -36,6 +37,7 @@ from cyrano.domain.enums import (
 OUTBOX_VOCABULARY_LENGTH = 32
 PAUSE_REASON_LENGTH = 32
 GENDER_LENGTH = 16
+MEDIA_KIND_LENGTH = 16
 
 NAMING_CONVENTION = {
     "ix": "ix_%(table_name)s_%(column_0_N_name)s",
@@ -130,6 +132,7 @@ class MessageRow(Base):
         UniqueConstraint("contact_id", "tg_message_id"),
         Index(None, "contact_id", "created_at"),
         Index(None, "direction", "created_at"),
+        CheckConstraint(_allowed_values("media_kind", MediaKind), name="media_kind_allowed"),
     )
 
     id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
@@ -140,6 +143,14 @@ class MessageRow(Base):
     text: Mapped[str] = mapped_column(Text)
     tg_message_id: Mapped[int] = mapped_column(BigInteger)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    media_kind: Mapped[MediaKind | None] = mapped_column(
+        Enum(
+            MediaKind,
+            native_enum=False,
+            length=MEDIA_KIND_LENGTH,
+            values_callable=_enum_values,
+        )
+    )
 
 
 PERSONA_ROW_ID = 1

@@ -6,6 +6,7 @@ from cyrano.domain.enums import (
     ContactGender,
     ContactStatus,
     GenderSource,
+    MediaKind,
     TriggerClass,
 )
 
@@ -85,6 +86,20 @@ HAND_OVER_REASON = "Причина: {classes}."
 HAND_OVER_SOURCE_TEXT = "Сработало по тексту сообщения контакта."
 HAND_OVER_SOURCE_MODEL = "Сработало при подготовке ответа моделью."
 HAND_OVER_NO_CLASSES = "ассистент не может ответить сам, нужно ваше решение"
+HAND_OVER_MEDIA_TITLE = "Контакт #{contact_id} прислал {what}"
+HAND_OVER_MEDIA_PAUSED = (
+    "Автоответы для контакта приостановлены, запланированные ответы отменены. "
+    "Контакту ничего не отправлено. Ассистент не видит вложение: посмотрите его в чате "
+    "второго аккаунта."
+)
+HAND_OVER_MEDIA_KINDS = {
+    MediaKind.VOICE: "голосовое сообщение",
+    MediaKind.VIDEO_NOTE: "кружок",
+    MediaKind.PHOTO: "фото",
+    MediaKind.VIDEO: "видео",
+    MediaKind.STICKER: "стикер",
+    MediaKind.OTHER: "вложение",
+}
 HAND_OVER_LINES_TITLE = "Последние сообщения:"
 HAND_OVER_NO_LINES = "Сообщения недоступны."
 HAND_OVER_LINE = "{number}. {speaker}: {text}"
@@ -100,6 +115,7 @@ TRIGGER_CLASS_NAMES = {
     TriggerClass.BOT_QUESTION: "вопрос, бот ли это",
     TriggerClass.EXES: "бывшие и прошлые отношения",
     TriggerClass.CRISIS: "кризисная тема (самоповреждение, суицид)",
+    TriggerClass.MEDIA: "вложение, которое ассистент не видит",
 }
 TRIGGER_CLASS_SEPARATOR = ", "
 KEEP_BUTTON = "Оставить на паузе"

@@ -11,7 +11,7 @@ from sqlalchemy.exc import IntegrityError
 from cyrano.db.models import MessageRow
 from cyrano.db.repositories import SqlContactRepository, SqlMessageRepository
 from cyrano.db.session import SessionFactory
-from cyrano.domain.enums import MessageDirection
+from cyrano.domain.enums import MediaKind, MessageDirection
 from cyrano.domain.errors import ContactNotFound
 from cyrano.domain.models import MAX_BIGINT, Contact, ContactCreate, Message, MessageCreate
 
@@ -428,3 +428,53 @@ async def test_storing_a_message_does_not_move_the_last_message_time(
     stored = await contacts.get_by_id(contact.id)
     assert stored is not None
     assert stored.last_message_at is None
+
+
+async def test_a_message_without_media_has_no_kind(
+    messages: SqlMessageRepository, contact: Contact
+) -> None:
+    stored = await messages.append(_input(contact.id, 1))
+
+    assert stored.media_kind is None
+    [read] = await messages.list_last(contact.id, 10)
+    assert read.media_kind is None
+
+
+@pytest.mark.parametrize("kind", list(MediaKind))
+async def test_the_media_kind_is_stored_and_read_back_by_every_read(
+    messages: SqlMessageRepository, contact: Contact, kind: MediaKind
+) -> None:
+    created = MessageCreate(
+        contact_id=contact.id,
+        direction=MessageDirection.INCOMING,
+        text="",
+        tg_message_id=7,
+        media_kind=kind,
+    )
+
+    stored = await messages.append(created)
+
+    assert stored.media_kind is kind
+    fetched = await messages.get(stored.id)
+    assert fetched is not None
+    assert fetched.media_kind is kind
+    [read] = await messages.list_last(contact.id, 10)
+    assert read.media_kind is kind
+
+
+async def test_appending_the_same_message_again_keeps_the_first_media_kind(
+    messages: SqlMessageRepository, contact: Contact
+) -> None:
+    first = MessageCreate(
+        contact_id=contact.id,
+        direction=MessageDirection.INCOMING,
+        text="",
+        tg_message_id=7,
+        media_kind=MediaKind.PHOTO,
+    )
+    await messages.append(first)
+
+    again = await messages.append(first.model_copy(update={"media_kind": MediaKind.VOICE}))
+
+    assert again.media_kind is MediaKind.PHOTO
+    assert len(await messages.list_last(contact.id, 10)) == 1

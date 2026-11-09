@@ -161,11 +161,22 @@ class TriggerClass(StrEnum):
     BOT_QUESTION = "bot_question"
     EXES = "exes"
     CRISIS = "crisis"
+    MEDIA = "media"
 
 
 class TriggerSource(StrEnum):
     TEXT = "text"
     MODEL = "model"
+    MEDIA = "media"
+
+
+class MediaKind(StrEnum):
+    VOICE = "voice"
+    VIDEO_NOTE = "video_note"
+    PHOTO = "photo"
+    VIDEO = "video"
+    STICKER = "sticker"
+    OTHER = "other"
 
 
 class HandOverOutcome(StrEnum):

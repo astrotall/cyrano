@@ -78,9 +78,11 @@ only.
 
 - **Rule:** meeting or date proposals, phone and contact exchange, money, photo requests, a direct
   question whether it is a bot or AI (see S10), the owner's exes or past relationships, self-harm
-  or suicide, and a message the model cannot answer without inventing facts stop the conversation:
-  the contact becomes `paused` with `pause_reason = stop_trigger` and the owner is notified. The
-  assistant does not answer these itself.
+  or suicide, a message the model cannot answer without inventing facts, and (since CYR-58, interim)
+  a message the assistant cannot see (a voice message, a circle, a photo, a video or another
+  attachment; a sticker is text) stop the conversation: the contact becomes `paused` with
+  `pause_reason = stop_trigger` and the owner is notified. The assistant does not answer these itself,
+  and never answers a media message it cannot see.
 - **Why:** these are the points where a wrong answer costs the owner something real.
 - **Enforced where:** exists (CYR-20). `IntakeService` runs the pure detector
   (`services/stop_triggers.py`, pattern data in `stop_trigger_patterns.py`, hard rule 4) on every
@@ -94,7 +96,10 @@ only.
   embedded) into `needs_owner` with an empty text, so no text of such a reply can be sent. Low model
   confidence has no numeric threshold; it is this signal. Since CYR-17 the autopilot job hands over on
   the signal (source `model`, no classes) and writes no row, and runs the detector again on the whole
-  burst before it calls the model. Details: [stop-triggers.md](stop-triggers.md),
+  burst before it calls the model. Since CYR-58 the media gate of the intake (after the text gate,
+  before the autopilot scheduler and the early read) hands over with the class and the source `media`
+  through the same service, so the same rules apply: one notice, the rows cancelled, nothing sent, no
+  raise into the intake. Details: [stop-triggers.md](stop-triggers.md),
   [autopilot.md](autopilot.md).
 - **How it is tested:** exists. `tests/services/test_stop_triggers.py` with
   `tests/services/stop_trigger_phrases.py`: at least 15 positive and 15 close but harmless phrases
@@ -109,9 +114,16 @@ only.
   history steps, and the privacy of the logs at DEBUG. `tests/services/test_intake_stop_triggers.py`:
   the gate for each status, only the new message checked, a replay handed over once, a failing
   hand-over or detector without a raise or a retry of the userbot handler.
+  `tests/services/test_intake_media.py` (CYR-58): each media kind pauses an `active` contact with its
+  rows cancelled and one notice naming the kind, nothing reaching a transport that fails on any call,
+  a sticker left alone, other statuses untouched, a second or redelivered media message notifying
+  once, a caption trigger handing over once, a failing gate without a raise or a retry, and the gate
+  running before the schedulers (no job, no early read). `tests/userbot/test_media_kind.py`: the
+  detection for every kind and the precedence on real Telethon messages and fakes.
   `tests/services/test_reply_needs_owner.py` and `tests/cli/test_reply_cli.py`: the signal in every
   case and wrapping, embedded, a normal reply untouched, the usage kept, the log flags.
-  `tests/bot/test_hand_over_notice.py` and `tests/bot/test_handlers.py`: the notice to the owner only,
+  `tests/bot/test_hand_over_notice.py`, `tests/bot/test_media_hand_over_notice.py` and
+  `tests/bot/test_handlers.py`: the notice to the owner only,
   escaping, the line limit, the three buttons, keep and ignore, double clicks, strangers.
   `tests/test_one_sender.py` proves that `HandOverNotifier` has one method, is implemented only in
   `bot/`, is called only by `services/hand_over.py` behind the deadline, that the hand-over, the

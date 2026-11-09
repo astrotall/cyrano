@@ -2,13 +2,22 @@ from __future__ import annotations
 
 from pydantic import BaseModel, ConfigDict, Field
 
-from cyrano.domain.enums import MessageDirection, TriggerClass, TriggerSource
+from cyrano.domain.enums import MediaKind, MessageDirection, TriggerClass, TriggerSource
 
 DETECTOR_MAX_TEXT_CHARS = 4096
 HAND_OVER_HISTORY_LINES = 5
 HAND_OVER_LINE_MAX_CHARS = 200
 HAND_OVER_NAME_MAX_CHARS = 60
 TRUNCATION_MARK = "…"
+MEDIA_HAND_OVER_KINDS = frozenset(
+    {
+        MediaKind.VOICE,
+        MediaKind.VIDEO_NOTE,
+        MediaKind.PHOTO,
+        MediaKind.VIDEO,
+        MediaKind.OTHER,
+    }
+)
 
 
 class _Frozen(BaseModel):
@@ -36,6 +45,7 @@ class HandOverNotice(_Frozen):
     name: str | None = Field(default=None, repr=False, max_length=HAND_OVER_NAME_MAX_CHARS)
     classes: tuple[TriggerClass, ...] = ()
     source: TriggerSource
+    media_kind: MediaKind | None = None
     lines: tuple[DialogueLine, ...] = Field(default=(), max_length=HAND_OVER_HISTORY_LINES)
 
 

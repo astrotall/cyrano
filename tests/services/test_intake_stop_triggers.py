@@ -16,6 +16,7 @@ from cyrano.db.repositories import (
 from cyrano.domain.enums import (
     ContactStatus,
     HandOverOutcome,
+    MediaKind,
     MessageDirection,
     OutboxSource,
     OutboxState,
@@ -51,12 +52,16 @@ class SpyHandOver(HandOverService):
         self.calls: list[tuple[int, frozenset[TriggerClass], TriggerSource]] = []
 
     async def hand_over(
-        self, contact_id: int, classes: Iterable[TriggerClass], source: TriggerSource
+        self,
+        contact_id: int,
+        classes: Iterable[TriggerClass],
+        source: TriggerSource,
+        media_kind: MediaKind | None = None,
     ) -> HandOverOutcome:
         self.calls.append((contact_id, frozenset(classes), source))
         if self._error is not None:
             raise self._error
-        return await self._inner.hand_over(contact_id, classes, source)
+        return await self._inner.hand_over(contact_id, classes, source, media_kind)
 
 
 @dataclass

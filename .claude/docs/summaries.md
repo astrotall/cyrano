@@ -165,7 +165,11 @@ previous memory as compact JSON (only the non-empty fields, `{}` when there is n
 messages between two boundary lines built from `SUMMARY_BOUNDARY` (`<<<CYRANO-MEMORY-5R8T2W6N>>>`,
 different from the reply prompt's token), one line per message, `Contact: ...` or `Owner: ...`,
 oldest first, a multi-line message continued with a four-space indent as in the reply prompt, and
-the closing line `Return the updated memory now, as one JSON object.` Every occurrence of the
+the closing line `Return the updated memory now, as one JSON object.` A message stored with a kind of
+media (CYR-58) shows the same bracketed label as in the reply prompt before its caption (`Contact:
+[фото] смотри`, `Contact: [голосовое сообщение]`; the table is in
+[reply-generation.md](reply-generation.md#media-labels-cyr-58), the rendering function is shared), so the
+extraction sees that a photo or a voice message was sent without any of its content. Every occurrence of the
 boundary token is removed from the message texts and from the previous memory, repeatedly, so a
 contact cannot close the block or rebuild the token from pieces.
 

@@ -5,7 +5,13 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime
 
-from cyrano.domain.enums import ContactStatus, MessageDirection, TriggerSource
+from cyrano.domain.enums import (
+    ContactStatus,
+    MediaKind,
+    MessageDirection,
+    TriggerClass,
+    TriggerSource,
+)
 from cyrano.domain.errors import ContactAlreadyExists
 from cyrano.domain.models import (
     Contact,
@@ -14,6 +20,7 @@ from cyrano.domain.models import (
     MessageCreate,
     NewContactEvent,
 )
+from cyrano.domain.stop_triggers import MEDIA_HAND_OVER_KINDS
 from cyrano.services.autopilot import AutopilotScheduler
 from cyrano.services.contact_events import ContactEventPublisher
 from cyrano.services.early_read import EarlyReadScheduler
@@ -68,11 +75,13 @@ class IntakeService:
                 text=incoming.text,
                 tg_message_id=incoming.tg_message_id,
                 created_at=sent_at,
+                media_kind=incoming.media_kind,
             )
         )
         await self._contacts.touch_last_message_at(contact.id, message.created_at)
         if contact.status is ContactStatus.ACTIVE:
             await self._check_stop_triggers(contact.id, incoming.text)
+            await self._check_media(contact.id, incoming.media_kind)
             if self._scheduler is not None:
                 await self._scheduler.on_incoming(contact.id, message.id)
             if self._early_read is not None:
@@ -94,6 +103,19 @@ class IntakeService:
         except Exception as exc:
             logger.warning(
                 "stop-trigger check failed",
+                extra={"contact_id": contact_id, "error": type(exc).__name__},
+            )
+
+    async def _check_media(self, contact_id: int, media_kind: MediaKind | None) -> None:
+        if self._hand_over is None or media_kind not in MEDIA_HAND_OVER_KINDS:
+            return
+        try:
+            await self._hand_over.hand_over(
+                contact_id, (TriggerClass.MEDIA,), TriggerSource.MEDIA, media_kind
+            )
+        except Exception as exc:
+            logger.warning(
+                "media check failed",
                 extra={"contact_id": contact_id, "error": type(exc).__name__},
             )
 

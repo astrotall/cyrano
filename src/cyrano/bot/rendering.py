@@ -20,6 +20,7 @@ from cyrano.domain.enums import (
     ContactGender,
     ContactStatus,
     LeomatchNameSource,
+    MediaKind,
     MessageDirection,
     TriggerSource,
 )
@@ -49,6 +50,7 @@ HAND_OVER_SOURCES = {
     TriggerSource.TEXT: messages.HAND_OVER_SOURCE_TEXT,
     TriggerSource.MODEL: messages.HAND_OVER_SOURCE_MODEL,
 }
+UNKNOWN_MEDIA_KIND = MediaKind.OTHER
 
 
 def _escaped(value: str) -> str:
@@ -212,7 +214,21 @@ def _one_line(text: str) -> str:
     return WHITESPACE_RUN.sub(WORD_SEPARATOR, text).strip()
 
 
+def _media_hand_over_head(notice: HandOverNotice) -> str:
+    kind = notice.media_kind or UNKNOWN_MEDIA_KIND
+    title = messages.HAND_OVER_MEDIA_TITLE.format(
+        contact_id=notice.contact_id, what=messages.HAND_OVER_MEDIA_KINDS[kind]
+    )
+    lines = [f"<b>{title}</b>"]
+    if notice.name:
+        lines.append(messages.HAND_OVER_NAME.format(name=_escaped(_one_line(notice.name))))
+    lines.append(messages.HAND_OVER_MEDIA_PAUSED)
+    return LINE_SEPARATOR.join(lines)
+
+
 def _hand_over_head(notice: HandOverNotice) -> str:
+    if notice.source is TriggerSource.MEDIA:
+        return _media_hand_over_head(notice)
     title = messages.HAND_OVER_TITLE.format(contact_id=notice.contact_id)
     lines = [f"<b>{title}</b>"]
     if notice.name:

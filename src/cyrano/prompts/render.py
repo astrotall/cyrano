@@ -4,7 +4,7 @@ import json
 from collections.abc import Sequence
 from datetime import datetime
 
-from cyrano.domain.enums import BlockKind, MessageDirection, TurnRole, WrapUpPhase
+from cyrano.domain.enums import BlockKind, MediaKind, MessageDirection, TurnRole, WrapUpPhase
 from cyrano.domain.gender import UNKNOWN_GENDER_LABEL
 from cyrano.domain.models import Message
 from cyrano.domain.reply import ContactFacts
@@ -34,6 +34,8 @@ from cyrano.prompts.texts import (
     LABEL_SEPARATOR,
     LAYER_HEADERS,
     LAYER_SEPARATOR,
+    MEDIA_LABEL_SEPARATOR,
+    MEDIA_LABELS,
     MODE_HEADER,
     NEXT_MESSAGE_REQUEST,
     NO_TEXT_PLACEHOLDER,
@@ -105,6 +107,14 @@ def strip_layer_headers(text: str) -> str:
 
 def one_line(text: str) -> str:
     return " ".join(strip_boundary(text).split())
+
+
+def media_text(text: str, media_kind: MediaKind | None) -> str:
+    if media_kind is None:
+        return text
+    label = MEDIA_LABELS[media_kind]
+    caption = text.strip()
+    return f"{label}{MEDIA_LABEL_SEPARATOR}{caption}" if caption else label
 
 
 def labelled(label: str, text: str) -> str:
@@ -212,7 +222,7 @@ def render_time_line(now: datetime, timezone_name: str) -> str:
 
 def _dialogue_line(message: Message) -> str:
     label = CONTACT_LABEL if message.direction is MessageDirection.INCOMING else OWNER_LABEL
-    return labelled(label, strip_boundary(message.text))
+    return labelled(label, media_text(strip_boundary(message.text), message.media_kind))
 
 
 def render_user_prompt(
@@ -276,7 +286,7 @@ def render_previous_memory(previous: ContactSummary | None) -> str:
 
 def _summary_dialogue_line(message: Message) -> str:
     label = CONTACT_LABEL if message.direction is MessageDirection.INCOMING else SUMMARY_OWNER_LABEL
-    return labelled(label, strip_summary_boundary(message.text))
+    return labelled(label, media_text(strip_summary_boundary(message.text), message.media_kind))
 
 
 def render_summary_system_prompt() -> str:

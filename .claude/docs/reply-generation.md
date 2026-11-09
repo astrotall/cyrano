@@ -51,7 +51,31 @@ between two boundary lines, and one closing line asking for the owner's next mes
 block has one line per message, `Contact: ...` for incoming and `Me: ...` for outgoing, oldest
 first. A message with several lines keeps its line breaks, and every line after the first starts with
 a four-space indent, so a line inside a message can never look like a new speaker label. A message
-without text (a photo, a sticker) shows as `[no text]`.
+without text and without a kind of media shows as `[no text]`; a message with a kind of media shows
+a bracketed label ([Media labels](#media-labels-cyr-58)).
+
+### Media labels (CYR-58)
+
+A message stored with a `media_kind` renders its label next to its text, in the reply prompt, the
+proactive prompt and the summary extraction input alike (one function, `media_text` in `prompts/render.py`;
+the labels are `MEDIA_LABELS` in `prompts/texts.py`):
+
+| Kind | Label |
+| --- | --- |
+| `voice` | `[голосовое сообщение]` |
+| `video_note` | `[кружок]` |
+| `photo` | `[фото]` |
+| `video` | `[видео]` |
+| `sticker` | `[стикер]` |
+| `other` | `[вложение]` |
+
+A label with a caption renders the label, a space and the caption (`[фото] смотри`); a label without
+text renders the label alone, which replaces `[no text]` for such a message. A sticker's text is its
+emoji (`[стикер] 🫠`). The boundary-token removal runs on the caption before the label is added, and a
+multi-line caption keeps the four-space continuation indent. The instructions do not explain the labels;
+the owner's own messages and every older message without a kind are unchanged. In practice a media message
+of an `active` contact hands the conversation over to the owner ([stop-triggers.md](stop-triggers.md#media-messages-cyr-58)),
+so a label reaches the prompt only after a resume, or for a sticker, or for an older message in the history.
 
 A full rendering of invented data is kept as a test
 (`tests/services/test_prompt_snapshot.py`); read it to see the exact text.

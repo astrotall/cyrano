@@ -81,6 +81,40 @@ class FakeHistoryMessage:
 
 
 @dataclass
+class FakeStickerAttribute:
+    alt: str | None = None
+
+
+@dataclass
+class FakeDocument:
+    attributes: list[object] = field(default_factory=list)
+
+
+@dataclass
+class FakeMediaMessage:
+    voice: object | None = None
+    video_note: object | None = None
+    sticker: object | None = None
+    photo: object | None = None
+    video: object | None = None
+    gif: object | None = None
+    document: object | None = None
+    audio: object | None = None
+    geo: object | None = None
+    contact: object | None = None
+    poll: object | None = None
+    venue: object | None = None
+    dice: object | None = None
+    game: object | None = None
+    invoice: object | None = None
+    web_preview: object | None = None
+    media: object | None = None
+
+
+FAKE_MEDIA_OBJECT = object()
+
+
+@dataclass
 class FakeEvent:
     id: int = 77
     date: datetime | None = FAKE_SENT_AT
@@ -91,6 +125,7 @@ class FakeEvent:
     sender_id: int | None = FAKE_SENDER_ID
     chat_id: int | None = FAKE_SENDER_ID
     raw_text: str | None = FAKE_TEXT
+    message: object | None = None
     sender: SenderLike | None = field(default_factory=FakeSender)
     chat: SenderLike | None = field(default_factory=FakeSender)
     chat_error: Exception | None = None

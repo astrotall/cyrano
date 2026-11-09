@@ -408,6 +408,11 @@ CYR-45 added the deployment to a VPS over SSH after every merge to `main` that p
 with only `docker-compose.yml`, a bounded health wait, one rollback of the code), `.github/workflows/deploy.yml`
 (no checkout, no third-party action, the environment `production`), the short README section and `tests/test_deploy.py`.
 The repository holds no server runbook, by the owner's decision.
+CYR-55 warmed the entity cache of a fresh session: `UserbotClient.refresh_entities(limit)` (a read-only `iter_dialogs`),
+one shared resolution step in `TelethonAdapter` for `send_text`, `show_typing` and `mark_read` that refreshes once (a lock,
+one refresh per `ENTITY_REFRESH_MIN_INTERVAL_SECONDS`, a deadline, a failed refresh never a send failure) before it
+reports `PeerNotFound`, `Userbot.warm_up_entities` started once by `main.run` after the catch-up and cancelled first on
+shutdown, `tests/userbot/test_entity_refresh.py`, and the new scans in `tests/test_one_sender.py`.
 
 ## Detailed guides
 

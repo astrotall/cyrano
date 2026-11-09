@@ -4,6 +4,7 @@ import asyncio
 import logging
 import re
 from collections import Counter
+from collections.abc import AsyncIterator
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 
@@ -1345,6 +1346,115 @@ async def test_a_peer_that_cannot_be_resolved_pauses_the_contact(rig: Rig) -> No
     assert (await rig.stored(row.id)).error_class == PEER_NOT_FOUND
     assert await rig.status() is ContactStatus.PAUSED
     assert raw.send_calls == 0
+
+
+class _ColdCache:
+    def __init__(self, *, refresh_error: Exception | None = None, reveals: bool = True) -> None:
+        self.send_calls = 0
+        self.refreshes = 0
+        self.known: set[int] = set()
+        self._refresh_error = refresh_error
+        self._reveals = reveals
+
+    async def get_input_entity(self, peer: int) -> object:
+        if peer not in self.known:
+            raise ValueError("not in the cache")
+        return object()
+
+    async def iter_dialogs(self, limit: int) -> AsyncIterator[object]:
+        self.refreshes += 1
+        if self._refresh_error is not None:
+            raise self._refresh_error
+        if self._reveals:
+            self.known.add(FAKE_TELEGRAM_ID)
+        yield object()
+
+    async def send_message(self, peer: object, text: str, **kwargs: object) -> _ColdSent:
+        self.send_calls += 1
+        return _ColdSent()
+
+    def action(self, peer: object, action: str, **kwargs: object) -> _NoTyping:
+        return _NoTyping()
+
+    async def send_read_acknowledge(self, peer: object) -> bool:
+        return True
+
+
+@dataclass
+class _ColdSent:
+    id: int = 4242
+    date: datetime = FAKE_NOW
+
+
+class _LateCache(_ColdCache):
+    def __init__(self, *, refresh_error: Exception | None = None) -> None:
+        super().__init__(refresh_error=refresh_error, reveals=False)
+        self.lookups = 0
+
+    async def get_input_entity(self, peer: int) -> object:
+        self.lookups += 1
+        if self.lookups == 1:
+            raise ValueError("not in the cache")
+        return object()
+
+
+class _NoTyping:
+    async def __aenter__(self) -> None:
+        return None
+
+    async def __aexit__(self, *_: object) -> None:
+        return None
+
+
+async def test_a_contact_missing_from_a_cold_cache_is_sent_to_after_one_refresh(rig: Rig) -> None:
+    row = await rig.row()
+    raw = _ColdCache()
+
+    await rig.sender(TelethonAdapter(raw, clock=rig.clock)).send_next()
+
+    assert (await rig.stored(row.id)).state is OutboxState.SENT
+    assert await rig.status() is ContactStatus.ACTIVE
+    assert (raw.refreshes, raw.send_calls) == (1, 1)
+
+
+async def test_a_contact_still_unknown_after_the_refresh_is_paused_as_before(rig: Rig) -> None:
+    row = await rig.row()
+    raw = _ColdCache(reveals=False)
+
+    await rig.sender(TelethonAdapter(raw, clock=rig.clock)).send_next()
+
+    stored = await rig.stored(row.id)
+    assert (stored.state, stored.error_class) == (OutboxState.FAILED, PEER_NOT_FOUND)
+    paused = await rig.contacts.get_by_id(rig.contact.id)
+    assert paused is not None
+    assert (paused.status, paused.pause_reason) == (ContactStatus.PAUSED, PauseReason.SEND_REJECTED)
+    assert (raw.refreshes, raw.send_calls) == (1, 0)
+
+
+async def test_a_refresh_flood_wait_pauses_neither_the_sender_nor_the_account(rig: Rig) -> None:
+    row = await rig.row()
+    raw = _ColdCache(refresh_error=FloodWaitError(request=None, capture=45), reveals=False)
+
+    await rig.sender(TelethonAdapter(raw, clock=rig.clock)).send_next()
+
+    assert (await rig.stored(row.id)).error_class == PEER_NOT_FOUND
+    state = await rig.state.get()
+    assert (state.paused_until, state.stopped) == (None, False)
+    assert len(rig.notifier.texts) == 1
+    assert PEER_NOT_FOUND in rig.notifier.texts[0]
+    assert await rig.status() is ContactStatus.PAUSED
+
+
+async def test_a_refresh_that_fails_does_not_fail_a_row_whose_second_attempt_works(
+    rig: Rig,
+) -> None:
+    row = await rig.row()
+    raw = _LateCache(refresh_error=ConnectionError("fake"))
+
+    await rig.sender(TelethonAdapter(raw, clock=rig.clock)).send_next()
+
+    assert (await rig.stored(row.id)).state is OutboxState.SENT
+    assert (raw.refreshes, raw.send_calls) == (1, 1)
 
 
 async def test_a_content_rejection_fails_only_the_row(rig: Rig) -> None:

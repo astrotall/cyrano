@@ -31,6 +31,7 @@ from cyrano.main import main, run
 from cyrano.services.card_actions import CardActions
 from cyrano.services.gender_actions import GenderActions
 from cyrano.services.pause_actions import PauseActions
+from cyrano.userbot.adapter import ENTITY_WARMUP_LIMIT
 from cyrano.userbot.client import UserbotAccess
 from cyrano.userbot.errors import Disconnected, SessionMissing, SessionNotAuthorized
 from tests.bot.fakes import FakeControlBot, fake_control_bot_class
@@ -165,6 +166,7 @@ async def test_run_logs_startup_and_stops_on_event(
     assert [r["msg"] for r in records] == [
         "cyrano started",
         "userbot listening",
+        "entity warm-up finished",
         "cyrano shutting down",
         "userbot stopped",
         "cyrano stopped",
@@ -342,6 +344,7 @@ async def test_shutdown_removes_the_handler_then_disconnects_then_disposes_the_e
         "connect",
         "is_user_authorized",
         "catch_up",
+        "refresh_entities",
         "remove_event_handler",
         "remove_event_handler",
         "disconnect",
@@ -1744,3 +1747,123 @@ async def test_the_running_app_marks_a_contact_that_is_not_active_nothing(
     await asyncio.wait_for(task, timeout=2)
 
     assert transport.read_ids == []
+
+
+async def test_the_entity_cache_is_warmed_once_after_the_start(
+    session_env: dict[str, str],
+    heartbeat_file: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    configure_logging("INFO")
+    calls: list[str] = []
+    client = FakeClient(calls=calls, refresh_dialogs=3)
+    stop = asyncio.Event()
+    task = asyncio.create_task(
+        run(load_settings(env_file=None), stop, client_factory=_factory(client))
+    )
+
+    await _wait_until(lambda: _contains(calls, "refresh_entities"))
+    await asyncio.sleep(0.05)
+    stop.set()
+    await asyncio.wait_for(task, timeout=2)
+
+    assert client.refreshes == [ENTITY_WARMUP_LIMIT]
+    assert calls.index("catch_up") < calls.index("refresh_entities")
+    records = [json.loads(line) for line in capsys.readouterr().out.splitlines() if line]
+    finished = [r for r in records if r["msg"] == "entity warm-up finished"]
+    assert [r["dialogs"] for r in finished] == [3]
+    assert client.write_attempts == []
+
+
+async def test_a_warm_up_that_is_still_running_is_cancelled_before_everything_else(
+    session_env: dict[str, str],
+    heartbeat_file: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    bot_calls: list[str],
+) -> None:
+    _recording_sender(monkeypatch, bot_calls)
+    _recording_announcer(monkeypatch, bot_calls)
+    client = FakeClient(calls=bot_calls, hang_on_refresh=True)
+    stop = asyncio.Event()
+    task = asyncio.create_task(
+        run(load_settings(env_file=None), stop, client_factory=_factory(client))
+    )
+
+    await _wait_until(lambda: _contains(bot_calls, "refresh_entities"))
+    await _wait_until(lambda: _contains(bot_calls, "sender.run"))
+    stop.set()
+    await asyncio.wait_for(task, timeout=2)
+
+    order = [
+        "refresh_entities cancelled",
+        "sender cancelled",
+        "announcer cancelled",
+        "bot.stop",
+        "remove_event_handler",
+        "disconnect",
+    ]
+    assert [bot_calls.index(name) for name in order] == sorted(bot_calls.index(n) for n in order)
+
+
+async def test_a_hanging_warm_up_does_not_block_the_listener_or_the_other_tasks(
+    session_env: dict[str, str],
+    heartbeat_file: Path,
+    repositories: Repositories,
+) -> None:
+    client = _readable_client(hang_on_refresh=True)
+    stop = asyncio.Event()
+    task = asyncio.create_task(
+        run(load_settings(env_file=None), stop, client_factory=_factory(client))
+    )
+    await _wait_until(lambda: _contains(client.calls, "refresh_entities"))
+
+    await client.deliver(FakeEvent())
+    await asyncio.sleep(0.05)
+
+    assert not task.done()
+    assert len(repositories.messages.stored) == 1
+    stop.set()
+    await asyncio.wait_for(task, timeout=2)
+
+
+async def test_a_failing_warm_up_is_only_logged_and_stops_nothing(
+    session_env: dict[str, str],
+    heartbeat_file: Path,
+    repositories: Repositories,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    configure_logging("INFO")
+    client = _readable_client(refresh_error=RuntimeError("fake warm-up detail-marker-zq"))
+    stop = asyncio.Event()
+    task = asyncio.create_task(
+        run(load_settings(env_file=None), stop, client_factory=_factory(client))
+    )
+    await _wait_until(lambda: _contains(client.calls, "refresh_entities"))
+
+    await client.deliver(FakeEvent())
+    await asyncio.sleep(0.05)
+
+    assert not task.done()
+    assert len(repositories.messages.stored) == 1
+    stop.set()
+    await asyncio.wait_for(task, timeout=2)
+    out = capsys.readouterr().out
+    records = [json.loads(line) for line in out.splitlines() if line]
+    failures = [r for r in records if r["msg"] == "entity warm-up failed"]
+    assert [r["error"] for r in failures] == ["RuntimeError"]
+    assert "detail-marker-zq" not in out
+    assert "outbox sender stopped" not in out
+
+
+async def test_no_warm_up_runs_when_the_start_is_interrupted(
+    session_env: dict[str, str], heartbeat_file: Path
+) -> None:
+    client = FakeClient(hang_on_catch_up=True)
+    stop = asyncio.Event()
+    asyncio.get_running_loop().call_later(0.05, stop.set)
+
+    await asyncio.wait_for(
+        run(load_settings(env_file=None), stop, client_factory=_factory(client)), timeout=2
+    )
+
+    assert client.refreshes == []

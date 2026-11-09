@@ -5,6 +5,7 @@ import asyncio
 import pytest
 
 from cyrano.userbot import client as client_module
+from cyrano.userbot.adapter import ENTITY_WARMUP_LIMIT
 from cyrano.userbot.errors import ConnectTimedOut, Disconnected, SessionNotAuthorized
 from cyrano.userbot.runner import Userbot
 from tests.userbot.fakes import (
@@ -247,3 +248,41 @@ async def test_a_failing_detector_does_not_stop_the_intake_or_the_listener(
     await client.deliver(FakeEvent(id=24))
 
     assert [m.tg_message_id for m in intake.received] == [24]
+
+
+async def test_the_start_does_not_warm_the_cache_by_itself() -> None:
+    client = FakeClient()
+
+    await Userbot(client, FakeIntake(), FakeDetector()).start(asyncio.Event())
+
+    assert client.refreshes == []
+
+
+async def test_the_warm_up_asks_for_the_dialogs_once_with_the_named_limit() -> None:
+    client = FakeClient(refresh_dialogs=4)
+    userbot = Userbot(client, FakeIntake(), FakeDetector())
+    await userbot.start(asyncio.Event())
+
+    await userbot.warm_up_entities()
+
+    assert client.refreshes == [ENTITY_WARMUP_LIMIT]
+    assert client.write_attempts == []
+
+
+async def test_a_failing_warm_up_returns_normally() -> None:
+    client = FakeClient(refresh_error=RuntimeError("fake detail"))
+
+    await Userbot(client, FakeIntake(), FakeDetector()).warm_up_entities()
+
+    assert client.refreshes == [ENTITY_WARMUP_LIMIT]
+
+
+async def test_a_cancelled_warm_up_is_not_swallowed() -> None:
+    client = FakeClient(hang_on_refresh=True)
+    task = asyncio.create_task(Userbot(client, FakeIntake(), FakeDetector()).warm_up_entities())
+    await asyncio.sleep(0.01)
+
+    task.cancel()
+
+    with pytest.raises(asyncio.CancelledError):
+        await task

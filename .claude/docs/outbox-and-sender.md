@@ -510,7 +510,7 @@ and shown is the Telethon class name, never the base class of a subclass.
 | `SendFloodWait` | Telegram explicitly refused and said how long to wait | `FloodWaitError`, `FloodPremiumWaitError`, `FloodTestPhoneWaitError`, `SlowModeWaitError` |
 | `SendAccountBlocked(kind)` | The owner's own account is restricted or lost | `PeerFloodError`, `UserDeactivatedError`, `UserDeactivatedBanError`, `UserRestrictedError`, `AuthKeyUnregisteredError`, `AuthKeyInvalidError`, `SessionRevokedError`, `SessionExpiredError`, `FrozenMethodInvalidError`, `AuthKeyDuplicatedError`, `AuthKeyPermEmptyError`, `ActiveUserRequiredError`, `SessionPasswordNeededError`, and a bare `UnauthorizedError` (so any other `UnauthorizedError` subclass) |
 | `SendRejected(reason=content)` | Certainly not delivered, because of this text | `MessageTooLongError` |
-| `SendRejected(reason=recipient)` | Certainly not delivered, because of this contact | `ForbiddenError` and its other subclasses (for example `UserPrivacyRestrictedError`, `ChatWriteForbiddenError`; also `PremiumAccountRequiredError`, `SensitiveChangeForbiddenError` and `NotAllowedError`, which are recipient-level by default and to be revisited if seen live), `InputUserDeactivatedError`, `PeerIdInvalidError`, `PeerIdNotSupportedError`, `UserBlockedError`, `UserIdInvalidError`, `UserIsBlockedError`, `YouBlockedUserError`; a `ValueError` from the peer lookup (`PeerNotFound`) |
+| `SendRejected(reason=recipient)` | Certainly not delivered, because of this contact | `ForbiddenError` and its other subclasses (for example `UserPrivacyRestrictedError`, `ChatWriteForbiddenError`; also `PremiumAccountRequiredError`, `SensitiveChangeForbiddenError` and `NotAllowedError`, which are recipient-level by default and to be revisited if seen live), `InputUserDeactivatedError`, `PeerIdInvalidError`, `PeerIdNotSupportedError`, `UserBlockedError`, `UserIdInvalidError`, `UserIsBlockedError`, `YouBlockedUserError`; a `ValueError` from the peer lookup that is still there after one refresh of the entity cache (`PeerNotFound`, see [the peer lookup](#the-peer-lookup-and-the-entity-cache-cyr-55)) |
 | `SendUncertain` | The outcome is unknown | Everything else: timeouts, connection errors, generic RPC and server errors, a `ValueError` from `send_message`, a send that returned no message (`MissingSentMessage`) |
 
 | Result of the send | What the sender does | Stored `error_class` | Owner notified |
@@ -579,7 +579,8 @@ with the class name, and the loop goes on: one bad row never stops it. Only canc
   sleep, cancellable, with `auto_cancel=False`, because the message clears the indicator and a cancel
   would be one more write; and `send_read_acknowledge` for the whole chat. It also implements the read Protocol `UserbotClient`, whose generic
   request call was replaced by `get_full_user(tg_id)`; only the adapter imports a request class
-  (`GetFullUserRequest`). It logs nothing.
+  (`GetFullUserRequest`). It logs nothing about sends; the entity refresh logs counters and class
+  names only ([the peer lookup](#the-peer-lookup-and-the-entity-cache-cyr-55)).
 - `TelegramOwnerNotifier` (`bot/notifier.py`) sends one plain Russian message to the owner chat. The
   owner id comes from `Settings`, so no caller can address another chat. The texts are in
   `bot/messages.py` and reach the sender as templates (`SenderNotices`), because `services` cannot
@@ -589,6 +590,43 @@ with the class name, and the loop goes on: one bad row never stops it. Only canc
   with the class name only, and the sender goes on. The state decision is always made before the
   notice, so a bad notifier cannot change it. A hanging notifier delays the sequential loop by at most
   15 s per notice, and that notice is not sent again. Cancellation at shutdown is not swallowed.
+
+## The peer lookup and the entity cache (CYR-55)
+
+A Telethon session on a new server has an empty entity cache, so `get_input_entity(tg_id)` raises
+`ValueError` for every contact who has not written since the new login. Before CYR-55 the sender
+read that as `PeerNotFound`, paused the contact, and the autopilot, which answers unanswered messages
+younger than six hours, paused them all.
+
+- **One shared resolution step.** `send_text`, `show_typing` and `mark_read` all resolve the peer
+  through `TelethonAdapter._peer`. It tries `get_input_entity`; on the "not found" `ValueError` it
+  refreshes the cache once and tries a second time; only when the second attempt fails does it raise
+  the same `SendRejected(PeerNotFound, recipient)` as before, so the sender pauses the contact exactly
+  as it did. Any other failure of either attempt goes through `classify_failure`, and a failure that
+  is not a missing peer never triggers a refresh.
+- **The refresh.** `UserbotClient.refresh_entities(limit)` is a read: the adapter iterates
+  `iter_dialogs(limit)` to the end, which makes Telethon store the users and chats it sees in the
+  cache, and returns the number of dialogs seen. It never sends, never marks read and changes nothing
+  in Telegram. It is shared and bounded: one `asyncio.Lock`, so concurrent calls wait for a single
+  refresh; at most one refresh per `ENTITY_REFRESH_MIN_INTERVAL_SECONDS` (60, measured from the end
+  of the last attempt, with an injected clock); a call inside the interval returns 0 without asking
+  Telegram and goes straight to the second lookup, which may still succeed because the earlier
+  refresh just filled the cache; and a deadline of `ENTITY_REFRESH_DEADLINE_SECONDS` (60). An attempt
+  that raises anything but a cancellation, a flood wait included, is logged with the class name and
+  counted as a failed refresh. It still counts for the interval, it never becomes a send failure and
+  it never pauses or stops the sender; the second lookup runs regardless.
+- **The warm-up.** After the userbot is connected and caught up, `main.run` starts one background task,
+  `Userbot.warm_up_entities`, which calls `refresh_entities(ENTITY_WARMUP_LIMIT)` (500) once through
+  the same locked and rate limited path, so the first sends after a start rarely need a retry. It is
+  cancelled first on shutdown, before the sender and before the userbot disconnects; a failure is only
+  logged and never blocks the listener or the other tasks.
+- **Logs.** `entity refresh finished` (`refreshed`, `dialogs`, `duration_seconds`), `entity refresh
+  skipped`, `entity refresh failed` (`error` class name, `failed_refreshes`), `entity warm-up
+  finished` and `entity warm-up failed`. Never a name, a username, a Telegram id or a text.
+- **Limits.** The cache is Telethon's own; a contact who is not among the 500 most recent dialogs
+  and has never written since the login is still `PeerNotFound`.
+  Tests: `tests/userbot/test_entity_refresh.py`, `tests/userbot/test_runner.py`, `tests/test_main.py`,
+  the scans in `tests/test_one_sender.py` and `tests/userbot/test_never_sends.py`.
 
 ## Two sources and the switch
 

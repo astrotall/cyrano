@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 from collections.abc import AsyncIterator, Awaitable, Callable
+from datetime import UTC, datetime
 
 from telethon import TelegramClient
 from telethon.errors import (
@@ -87,6 +89,16 @@ RECIPIENT_REFUSALS = (
 PEER_NOT_FOUND = "PeerNotFound"
 MISSING_RESPONSE = "MissingSentMessage"
 TYPING_ACTION = "typing"
+ENTITY_REFRESH_MIN_INTERVAL_SECONDS = 60
+ENTITY_REFRESH_DEADLINE_SECONDS = 60
+ENTITY_REFRESH_LIMIT = 500
+ENTITY_WARMUP_LIMIT = 500
+
+logger = logging.getLogger("cyrano.userbot")
+
+
+def _utc_now() -> datetime:
+    return datetime.now(UTC)
 
 
 def classify_failure(error: Exception) -> SendFailure:
@@ -104,10 +116,18 @@ def classify_failure(error: Exception) -> SendFailure:
 
 class TelethonAdapter:
     def __init__(
-        self, client: TelegramClient, *, sleep: Callable[[float], Awaitable[None]] = asyncio.sleep
+        self,
+        client: TelegramClient,
+        *,
+        sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
+        clock: Callable[[], datetime] = _utc_now,
     ) -> None:
         self._client = client
         self._sleep = sleep
+        self._clock = clock
+        self._refresh_lock = asyncio.Lock()
+        self._last_refresh_at: datetime | None = None
+        self._failed_refreshes = 0
 
     @property
     def disconnected(self) -> asyncio.Future[object]:
@@ -168,14 +188,69 @@ class TelethonAdapter:
         )
         return messages
 
-    async def _peer(self, tg_id: int) -> object:
+    async def refresh_entities(self, limit: int) -> int:
+        async with self._refresh_lock:
+            if self._refresh_is_recent():
+                logger.info("entity refresh skipped", extra={"refreshed": False})
+                return 0
+            started = self._clock()
+            try:
+                async with asyncio.timeout(ENTITY_REFRESH_DEADLINE_SECONDS):
+                    seen = await self._iterate_dialogs(limit)
+            except Exception as exc:
+                self._failed_refreshes += 1
+                logger.warning(
+                    "entity refresh failed",
+                    extra={
+                        "refreshed": False,
+                        "error": type(exc).__name__,
+                        "failed_refreshes": self._failed_refreshes,
+                    },
+                )
+                return 0
+            finally:
+                self._last_refresh_at = self._clock()
+            logger.info(
+                "entity refresh finished",
+                extra={
+                    "refreshed": True,
+                    "dialogs": seen,
+                    "duration_seconds": (self._clock() - started).total_seconds(),
+                },
+            )
+            return seen
+
+    def _refresh_is_recent(self) -> bool:
+        if self._last_refresh_at is None:
+            return False
+        elapsed = (self._clock() - self._last_refresh_at).total_seconds()
+        return elapsed < ENTITY_REFRESH_MIN_INTERVAL_SECONDS
+
+    async def _iterate_dialogs(self, limit: int) -> int:
+        seen = 0
+        async for _ in self._client.iter_dialogs(limit):
+            seen += 1
+        return seen
+
+    async def _input_entity(self, tg_id: int) -> object:
         try:
             peer: object = await self._client.get_input_entity(tg_id)
         except ValueError:
-            raise SendRejected(PEER_NOT_FOUND, RejectionReason.RECIPIENT) from None
+            raise
         except Exception as exc:
             raise classify_failure(exc) from None
         return peer
+
+    async def _peer(self, tg_id: int) -> object:
+        try:
+            return await self._input_entity(tg_id)
+        except ValueError:
+            pass
+        await self.refresh_entities(ENTITY_REFRESH_LIMIT)
+        try:
+            return await self._input_entity(tg_id)
+        except ValueError:
+            raise SendRejected(PEER_NOT_FOUND, RejectionReason.RECIPIENT) from None
 
     async def send_text(self, tg_id: int, text: str) -> SentMessage:
         peer = await self._peer(tg_id)

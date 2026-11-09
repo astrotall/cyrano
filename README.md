@@ -733,6 +733,10 @@ receive a login code on.
    with "run `make login`" and does not touch the network; with a revoked session it says so too.
    Run the login before `make up`, otherwise the container keeps restarting with that message.
 
+**Moving to a new server.** Do not copy the session file; run the login again on the new server. A fresh
+session knows no contacts, so the app reads the most recent dialogs once after it starts and again, at
+most once a minute, when a send cannot find its contact.
+
 **The session file is a secret.** It is `USERBOT_SESSION_PATH` plus `.session` (for example
 `data/session/userbot.session` locally, `/data/session/userbot.session` in the `userbot_session`
 volume). Whoever has it controls the second account without a code. It is created with mode `0600`

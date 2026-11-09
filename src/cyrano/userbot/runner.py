@@ -5,6 +5,7 @@ import contextlib
 import logging
 from collections.abc import Coroutine
 
+from cyrano.userbot.adapter import ENTITY_WARMUP_LIMIT
 from cyrano.userbot.client import connect_authorized, disconnect_client
 from cyrano.userbot.errors import Disconnected
 from cyrano.userbot.handler import IncomingHandler, IncomingProcessor
@@ -55,6 +56,14 @@ class Userbot:
             logger.info("userbot start interrupted by stop signal")
             return
         logger.info("userbot listening")
+
+    async def warm_up_entities(self) -> None:
+        try:
+            dialogs = await self._client.refresh_entities(ENTITY_WARMUP_LIMIT)
+        except Exception as exc:
+            logger.warning("entity warm-up failed", extra={"error": type(exc).__name__})
+            return
+        logger.info("entity warm-up finished", extra={"dialogs": dialogs})
 
     async def run_until(self, stop: asyncio.Event) -> None:
         stopped = asyncio.create_task(stop.wait())

@@ -916,3 +916,65 @@ def test_the_intake_asks_the_early_read_scheduler_last() -> None:
         and isinstance(node.func.value, ast.Attribute)
     ]
     assert receivers == ["_scheduler", "_early_read"]
+
+
+REFRESH_METHOD = "refresh_entities"
+DIALOGS_ITERATION = "iter_dialogs"
+REFRESH_HELPERS = frozenset({REFRESH_METHOD, "_iterate_dialogs", "_refresh_is_recent"})
+RESOLUTION_STEP = "_peer"
+WARM_UP_MODULE = "userbot/runner.py"
+
+
+def _refresh_functions(tree: ast.AST, names: frozenset[str]) -> list[ast.AST]:
+    return [
+        node
+        for node in ast.walk(tree)
+        if isinstance(node, ast.AsyncFunctionDef | ast.FunctionDef) and node.name in names
+    ]
+
+
+def test_the_dialogs_iteration_is_used_only_by_the_adapter() -> None:
+    users = {name for name, tree in _modules() if DIALOGS_ITERATION in _attributes_used(tree)}
+
+    assert users == {ADAPTER_MODULE}
+
+
+def test_the_refresh_is_called_only_by_the_warm_up_and_the_adapter_resolution_step() -> None:
+    callers = {name for name, tree in _modules() if REFRESH_METHOD in _called_attributes(tree)}
+    adapter = ast.parse((SOURCE_ROOT / ADAPTER_MODULE).read_text())
+
+    assert callers == {ADAPTER_MODULE, WARM_UP_MODULE}
+    assert [
+        function.name
+        for function in ast.walk(adapter)
+        if isinstance(function, ast.AsyncFunctionDef | ast.FunctionDef)
+        and REFRESH_METHOD in _called_attributes(function)
+    ] == [RESOLUTION_STEP]
+
+
+def test_the_refresh_functions_use_no_telethon_write_method() -> None:
+    adapter = ast.parse((SOURCE_ROOT / ADAPTER_MODULE).read_text())
+    functions = _refresh_functions(adapter, REFRESH_HELPERS)
+
+    assert len(functions) == len(REFRESH_HELPERS)
+    for function in functions:
+        assert _telethon_write_uses(function) == set()
+        assert not any(
+            isinstance(node, ast.Name) and node.id.endswith(REQUEST_CLASS_SUFFIX)
+            for node in ast.walk(function)
+        )
+
+
+def test_the_resolution_step_is_the_only_adapter_code_that_resolves_a_peer() -> None:
+    adapter = ast.parse((SOURCE_ROOT / ADAPTER_MODULE).read_text())
+    resolvers = {
+        function.name
+        for function in ast.walk(adapter)
+        if isinstance(function, ast.AsyncFunctionDef | ast.FunctionDef)
+        and "get_input_entity" in _called_attributes(function)
+    }
+
+    assert resolvers == {"_input_entity"}
+    for method in TRANSPORT_METHODS:
+        [function] = _refresh_functions(adapter, frozenset({method}))
+        assert RESOLUTION_STEP in _called_attributes(function)

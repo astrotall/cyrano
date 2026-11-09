@@ -343,6 +343,7 @@ async def run(
     sweeper_task: asyncio.Task[None] | None = None
     summary_sweeper_task: asyncio.Task[None] | None = None
     proactive_sweeper_task: asyncio.Task[None] | None = None
+    warm_up_task: asyncio.Task[None] | None = None
     polling_failures: list[ControlBotError] = []
     try:
         await reply_jobs.start()
@@ -366,11 +367,15 @@ async def run(
             summary_sweeper_task.add_done_callback(_report_summary_sweeper_exit)
             proactive_sweeper_task = asyncio.create_task(proactive_sweeper.run())
             proactive_sweeper_task.add_done_callback(_report_proactive_sweeper_exit)
+            warm_up_task = asyncio.create_task(userbot.warm_up_entities())
         await userbot.run_until(stop)
         if polling_failures:
             raise polling_failures[0]
     finally:
         logger.info("cyrano shutting down", extra={"service": "app"})
+        if warm_up_task is not None:
+            warm_up_task.cancel()
+            await asyncio.gather(warm_up_task, return_exceptions=True)
         if proactive_sweeper_task is not None:
             proactive_sweeper_task.cancel()
             await asyncio.gather(proactive_sweeper_task, return_exceptions=True)

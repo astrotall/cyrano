@@ -26,6 +26,7 @@ ALLOWED_CLIENT_MEMBERS = frozenset(
         "add_event_handler",
         "remove_event_handler",
         "get_full_user",
+        "refresh_entities",
         "get_entity",
         "download_profile_photo",
         "download_media",
@@ -172,3 +173,16 @@ def test_the_scan_catches_a_send_call(tmp_path: Path) -> None:
     module.write_text("async def go(client):\n    await client.send_message(1, 'x')\n")
 
     assert {name for name in _used_names(module) if WRITE_NAME.match(name)} == {"send_message"}
+
+
+def test_the_dialogs_iteration_is_used_only_by_the_adapter_and_only_to_read() -> None:
+    users = {
+        module.name for module in USERBOT_ROOT.glob("*.py") if "iter_dialogs" in _used_names(module)
+    }
+
+    assert users == {"adapter.py"}
+
+
+def test_the_refresh_is_a_read_the_client_protocol_member_has_no_write_name() -> None:
+    assert not WRITE_NAME.match("refresh_entities")
+    assert not WRITE_NAME.match("iter_dialogs")

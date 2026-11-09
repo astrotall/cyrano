@@ -164,8 +164,15 @@ class FakeClient:
         calls: list[str] | None = None,
         hang_on_read: bool = False,
         read_error: Exception | None = None,
+        hang_on_refresh: bool = False,
+        refresh_error: Exception | None = None,
+        refresh_dialogs: int = 0,
     ) -> None:
         self.calls = calls if calls is not None else []
+        self.refreshes: list[int] = []
+        self._hang_on_refresh = hang_on_refresh
+        self._refresh_error = refresh_error
+        self._refresh_dialogs = refresh_dialogs
         self.handlers: list[tuple[EventCallback, object]] = []
         self.write_attempts: list[str] = []
         self.users: dict[int, SenderLike] = {}
@@ -243,6 +250,19 @@ class FakeClient:
         await self._read("get_full_user")
         self.full_user_requests.append(tg_id)
         return FakeFullUserResponse(FakeFullUserInfo(self.about))
+
+    async def refresh_entities(self, limit: int) -> int:
+        self.calls.append("refresh_entities")
+        self.refreshes.append(limit)
+        if self._hang_on_refresh:
+            try:
+                await asyncio.sleep(3600)
+            except asyncio.CancelledError:
+                self.calls.append("refresh_entities cancelled")
+                raise
+        if self._refresh_error is not None:
+            raise self._refresh_error
+        return self._refresh_dialogs
 
     async def get_entity(self, entity: int | str) -> SenderLike:
         await self._read("get_entity")

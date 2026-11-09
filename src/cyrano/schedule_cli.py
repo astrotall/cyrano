@@ -47,6 +47,7 @@ SHOW_LINES = (
     "postponed spread: {spread} min",
     "proactive window: {proactive_window}",
     "wrap-up: soft {wrapup_soft} min, hard {wrapup_hard} min",
+    "quote late: {quote_late} s",
     "split pause: {split_pause} s",
     "early read: {early_read} s",
 )
@@ -233,6 +234,7 @@ def _profile_lines(profile: ScheduleProfile) -> list[str]:
         "proactive_window": _time_range(profile.proactive_window),
         "wrapup_soft": profile.wrapup_soft_minutes,
         "wrapup_hard": profile.wrapup_hard_minutes,
+        "quote_late": profile.quote_late_seconds,
         "split_pause": _int_range(profile.split_pause_seconds),
         "early_read": _int_range(profile.early_read_seconds),
     }

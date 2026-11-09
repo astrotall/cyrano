@@ -81,8 +81,10 @@ def make_contact(profile: dict[str, object] | None = None, **overrides: object) 
     return Contact.model_validate({**fields, **overrides})
 
 
-def make_builder(budget: int = BIG_BUDGET) -> PromptBuilder:
-    return PromptBuilder(budget_chars=budget, timezone=MOSCOW, clock=fixed_clock)
+def make_builder(budget: int = BIG_BUDGET, *, quote_enabled: bool = False) -> PromptBuilder:
+    return PromptBuilder(
+        budget_chars=budget, timezone=MOSCOW, clock=fixed_clock, quote_enabled=quote_enabled
+    )
 
 
 def default_history() -> list[Message]:

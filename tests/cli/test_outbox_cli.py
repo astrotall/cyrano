@@ -57,6 +57,7 @@ from tests.services.outbox_fakes import (
 )
 
 TEXT = "cli-text-marker-zq must never be printed"
+QUOTED_TARGET_TG_MESSAGE_ID = 864000000042
 LIMITS = FakeLimits(
     send_limit_minute=4,
     send_limit_hour=40,
@@ -240,7 +241,7 @@ async def test_list_prints_the_fields_and_never_the_text(
     assert captured.out == (
         f"id={row.id} contact={contact.id} source=manual_test state=failed "
         f"send_at={FAKE_NOW.isoformat()} due_at={FAKE_NOW.isoformat()} "
-        "error=FakeError cancel_reason=-\n"
+        "error=FakeError cancel_reason=- quoted=no\n"
     )
     assert_absent(TEXT, captured.out + captured.err)
     assert_absent(FAKE_TELEGRAM_ID, captured.out + captured.err)
@@ -281,7 +282,7 @@ async def test_list_shows_the_due_time_next_to_a_moved_send_time(
     captured = capsys.readouterr()
     assert (
         f"state=scheduled send_at={moved_to.isoformat()} due_at={FAKE_NOW.isoformat()} "
-        f"error={ERROR_RATE_LIMITED} cancel_reason=-\n"
+        f"error={ERROR_RATE_LIMITED} cancel_reason=- quoted=no\n"
     ) in captured.out
     assert_absent(TEXT, captured.out + captured.err)
 
@@ -314,11 +315,38 @@ async def test_list_tells_every_cancel_reason_apart_and_never_prints_a_text(
 
     captured = capsys.readouterr()
     lines = {int(line.split()[0].removeprefix("id=")): line for line in captured.out.splitlines()}
-    assert lines[by_owner.id].endswith(f"cancel_reason={CANCEL_REASON_OWNER}")
-    assert lines[stale.id].endswith(f"cancel_reason={CANCEL_REASON_STALE}")
-    assert lines[refused.id].endswith(f"cancel_reason={REFUSED_CONTACT_NOT_ACTIVE}")
+    assert lines[by_owner.id].endswith(f"cancel_reason={CANCEL_REASON_OWNER} quoted=no")
+    assert lines[stale.id].endswith(f"cancel_reason={CANCEL_REASON_STALE} quoted=no")
+    assert lines[refused.id].endswith(f"cancel_reason={REFUSED_CONTACT_NOT_ACTIVE} quoted=no")
     assert_absent(TEXT, captured.out + captured.err)
     assert_absent(FAKE_TELEGRAM_ID, captured.out + captured.err)
+
+
+async def test_list_marks_a_quoted_row_and_never_prints_its_target(
+    commands: OutboxCommands,
+    contacts: SqlContactRepository,
+    modes: SqlModeRepository,
+    outbox: SqlOutboxRepository,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    contact = await stored_contact(contacts, modes, ContactStatus.ACTIVE, tg_id=FAKE_TELEGRAM_ID)
+    quoted, plain = await outbox.enqueue_sequence(
+        contact.id,
+        [TEXT, TEXT],
+        FAKE_NOW,
+        OutboxSource.AUTOPILOT,
+        FAKE_INTERNAL_ID,
+        [QUOTED_TARGET_TG_MESSAGE_ID, None],
+    )
+
+    assert await commands.run(OutboxRequest(action="list")) == 0
+
+    captured = capsys.readouterr()
+    lines = {int(line.split()[0].removeprefix("id=")): line for line in captured.out.splitlines()}
+    assert lines[quoted.id].endswith(" quoted=yes")
+    assert lines[plain.id].endswith(" quoted=no")
+    assert_absent(QUOTED_TARGET_TG_MESSAGE_ID, captured.out + captured.err)
+    assert_absent(TEXT, captured.out + captured.err)
 
 
 async def test_list_filters_by_state_and_limits(

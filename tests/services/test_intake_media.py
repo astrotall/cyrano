@@ -90,7 +90,7 @@ class ForbiddenTransport:
     def __init__(self) -> None:
         self.attempts: list[str] = []
 
-    async def send_text(self, tg_id: int, text: str) -> SentMessage:
+    async def send_text(self, tg_id: int, text: str, reply_to: int | None = None) -> SentMessage:
         self.attempts.append("send_text")
         raise AssertionError("nothing may be sent to a contact on a media message")
 

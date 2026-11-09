@@ -75,3 +75,4 @@ class ReplyJobResult(_Frozen):
     detail: str | None = None
     row_id: int | None = None
     parts: int | None = None
+    quoted: bool = False

@@ -25,5 +25,6 @@
   "early_read_seconds": [0, 1],
   "proactive_window": ["10:00", "21:30"],
   "wrapup_soft_minutes": 45,
-  "wrapup_hard_minutes": 15
+  "wrapup_hard_minutes": 15,
+  "quote_late_seconds": 240
 }

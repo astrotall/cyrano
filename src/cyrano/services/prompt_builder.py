@@ -8,7 +8,7 @@ from cyrano.domain.enums import MessageDirection, ReplyPurpose, Role
 from cyrano.domain.errors import NoMessagesToReplyTo, PromptTooLarge
 from cyrano.domain.llm import LLMMessage
 from cyrano.domain.models import Message
-from cyrano.domain.reply import MIN_HISTORY_MESSAGES, BuiltPrompt, ContactFacts
+from cyrano.domain.reply import MIN_HISTORY_MESSAGES, BuiltPrompt, ContactFacts, MessageRef
 from cyrano.domain.schedule import UnavailableSoon
 from cyrano.domain.style import StyleExample
 from cyrano.prompts.render import (
@@ -32,6 +32,13 @@ def silence_hours(now: datetime, messages: Sequence[Message]) -> int:
     return max(0, (now - messages[-1].created_at) // ONE_HOUR)
 
 
+def message_refs(messages: Sequence[Message]) -> dict[int, MessageRef]:
+    return {
+        number: MessageRef(tg_message_id=message.tg_message_id, direction=message.direction)
+        for number, message in enumerate(messages, start=1)
+    }
+
+
 class PromptBuilder:
     def __init__(
         self,
@@ -39,10 +46,12 @@ class PromptBuilder:
         budget_chars: int,
         timezone: ZoneInfo,
         clock: Callable[[], datetime],
+        quote_enabled: bool = False,
     ) -> None:
         self._budget_chars = budget_chars
         self._timezone = timezone
         self._clock = clock
+        self._quote_enabled = quote_enabled
 
     def build(
         self,
@@ -64,20 +73,23 @@ class PromptBuilder:
         proactive_hours = (
             silence_hours(moment, messages) if purpose is ReplyPurpose.PROACTIVE else None
         )
+        numbered = self._quote_enabled and purpose is ReplyPurpose.REPLY
         floor = min(MIN_HISTORY_MESSAGES, len(messages))
         examples_kept = len(examples)
         messages_kept = len(messages)
         while True:
+            shown = messages[len(messages) - messages_kept :]
             prompt = self._render(
                 now=now,
                 persona=persona,
                 mode_fragment=mode_fragment,
                 facts=facts,
                 summary=summary,
-                messages=messages[len(messages) - messages_kept :],
+                messages=shown,
                 examples=examples[:examples_kept],
                 proactive_hours=proactive_hours,
                 wrapup=wrapup,
+                numbered=numbered,
             )
             characters = sum(len(message.content) for message in prompt)
             if characters <= self._budget_chars:
@@ -90,6 +102,7 @@ class PromptBuilder:
                     characters=characters,
                     purpose=purpose,
                     wrap_up=wrapup is not None,
+                    message_refs=message_refs(shown) if numbered else {},
                 )
             if examples_kept > 0:
                 examples_kept -= 1
@@ -110,6 +123,7 @@ class PromptBuilder:
         examples: Sequence[StyleExample],
         proactive_hours: int | None,
         wrapup: UnavailableSoon | None,
+        numbered: bool,
     ) -> tuple[LLMMessage, ...]:
         system = render_system_prompt(
             persona=persona,
@@ -119,6 +133,7 @@ class PromptBuilder:
             examples=examples,
             proactive_hours=proactive_hours,
             wrapup_phase=None if wrapup is None else wrapup.phase,
+            quote_markers=numbered,
         )
         user = render_user_prompt(
             now=now,
@@ -126,6 +141,7 @@ class PromptBuilder:
             messages=messages,
             request=NEXT_MESSAGE_REQUEST if proactive_hours is None else render_proactive_request(),
             wrapup=wrapup,
+            numbered=numbered,
         )
         return (
             LLMMessage(role=Role.SYSTEM, content=system),

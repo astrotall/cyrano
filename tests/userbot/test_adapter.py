@@ -25,7 +25,10 @@ from telethon.errors import (
     ForbiddenError,
     FrozenMethodInvalidError,
     InputUserDeactivatedError,
+    MessageIdInvalidError,
+    MessageIdsEmptyError,
     MessageTooLongError,
+    MsgIdInvalidError,
     NotAllowedError,
     PeerFloodError,
     PeerIdInvalidError,
@@ -56,6 +59,7 @@ from cyrano.domain.errors import (
     SendFailure,
     SendFloodWait,
     SendRejected,
+    SendReplyTargetGone,
     SendUncertain,
 )
 from cyrano.services.message_transport import MessageTransport
@@ -66,6 +70,7 @@ from cyrano.userbot.adapter import (
     MISSING_RESPONSE,
     PEER_NOT_FOUND,
     RECIPIENT_REFUSALS,
+    REPLY_TARGET_REFUSALS,
     TelethonAdapter,
     classify_failure,
 )
@@ -766,3 +771,77 @@ async def test_the_new_writes_log_nothing(caplog: pytest.LogCaptureFixture) -> N
 
 def test_the_adapter_method_names_are_exactly_the_transport_methods() -> None:
     assert set(typing.get_protocol_members(MessageTransport)) <= set(vars(TelethonAdapter))
+
+
+REPLY_TARGET = 700555
+
+
+async def test_a_reply_target_is_passed_to_telethon_as_reply_to() -> None:
+    raw = _RawTelethon()
+
+    sent = await TelethonAdapter(raw).send_text(FAKE_TELEGRAM_ID, TEXT, REPLY_TARGET)
+
+    assert raw.send_calls == [
+        (FAKE_PEER, TEXT, {"parse_mode": None, "link_preview": False, "reply_to": REPLY_TARGET})
+    ]
+    assert sent.tg_message_id == TG_MESSAGE_ID
+
+
+async def test_without_a_target_the_call_is_exactly_the_plain_one() -> None:
+    raw = _RawTelethon()
+
+    await TelethonAdapter(raw).send_text(FAKE_TELEGRAM_ID, TEXT, None)
+
+    assert raw.send_calls == [(FAKE_PEER, TEXT, {"parse_mode": None, "link_preview": False})]
+
+
+def test_exactly_the_two_message_id_errors_mean_a_gone_target() -> None:
+    assert (MessageIdInvalidError, MsgIdInvalidError) == REPLY_TARGET_REFUSALS
+
+
+@pytest.mark.parametrize(
+    "error", [MessageIdInvalidError(request=None), MsgIdInvalidError(request=None)]
+)
+async def test_a_message_id_error_with_a_target_is_a_gone_target(error: Exception) -> None:
+    raw = _RawTelethon(send_error=error)
+
+    with pytest.raises(SendReplyTargetGone) as raised:
+        await TelethonAdapter(raw).send_text(FAKE_TELEGRAM_ID, TEXT, REPLY_TARGET)
+
+    assert raised.value.error_class == type(error).__name__
+    assert raised.value.__suppress_context__ is True
+    assert str(REPLY_TARGET) not in str(raised.value)
+
+
+@pytest.mark.parametrize(
+    "error", [MessageIdInvalidError(request=None), MsgIdInvalidError(request=None)]
+)
+async def test_the_same_error_without_a_target_keeps_its_current_mapping(error: Exception) -> None:
+    raw = _RawTelethon(send_error=error)
+
+    with pytest.raises(SendFailure) as raised:
+        await TelethonAdapter(raw).send_text(FAKE_TELEGRAM_ID, TEXT)
+
+    assert not isinstance(raised.value, SendReplyTargetGone)
+    assert type(raised.value) is type(classify_failure(error))
+    assert isinstance(raised.value, SendUncertain)
+
+
+@pytest.mark.parametrize(
+    "error",
+    [
+        MessageIdsEmptyError(request=None),
+        UserIsBlockedError(request=None),
+        FloodWaitError(request=None, capture=90),
+        MessageTooLongError(request=None),
+        RPCError(request=None, message="REPLY_MESSAGE_ID_INVALID", code=400),
+    ],
+)
+async def test_other_errors_with_a_target_keep_their_usual_mapping(error: Exception) -> None:
+    raw = _RawTelethon(send_error=error)
+
+    with pytest.raises(SendFailure) as raised:
+        await TelethonAdapter(raw).send_text(FAKE_TELEGRAM_ID, TEXT, REPLY_TARGET)
+
+    assert not isinstance(raised.value, SendReplyTargetGone)
+    assert type(raised.value) is type(classify_failure(error))

@@ -83,8 +83,8 @@ BUSY_WEDNESDAY_NOON = ScheduleProfile.model_validate(
 
 
 class _FailingSecondSend(ScriptedTransport):
-    async def send_text(self, tg_id: int, text: str) -> SentMessage:
-        sent = await super().send_text(tg_id, text)
+    async def send_text(self, tg_id: int, text: str, reply_to: int | None = None) -> SentMessage:
+        sent = await super().send_text(tg_id, text, reply_to)
         if len(self.calls) == 2:
             raise SendUncertain("FakeError")
         return sent
@@ -95,9 +95,9 @@ class _SlowSendTransport(ScriptedTransport):
         super().__init__(clock=rig.clock)
         self._rig = rig
 
-    async def send_text(self, tg_id: int, text: str) -> SentMessage:
+    async def send_text(self, tg_id: int, text: str, reply_to: int | None = None) -> SentMessage:
         self._rig.clock.advance(SEND_TAKES)
-        return await super().send_text(tg_id, text)
+        return await super().send_text(tg_id, text, reply_to)
 
 
 def _sender(

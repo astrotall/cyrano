@@ -263,6 +263,9 @@ class HumanizationPlanner:
     async def unavailable_soon(self, now: datetime) -> UnavailableSoon | None:
         return await self._schedule.unavailable_soon(now)
 
+    async def quote_late_seconds(self) -> int:
+        return (await self._schedule.get_profile()).quote_late_seconds
+
     async def conversation_ongoing(self, contact_id: int, message_id: int) -> bool:
         history = await self._messages.list_last(contact_id, PLANNER_HISTORY_MESSAGES)
         trigger = _trigger_index(history, contact_id, message_id)

@@ -87,6 +87,7 @@ def build_worker_resources(
             budget_chars=settings.reply_prompt_budget_chars,
             timezone=settings.tzinfo,
             clock=_utc_now,
+            quote_enabled=settings.reply_quote_enabled,
         ),
         client=llm.get(LLMStep.REPLY),
         history_limit=settings.reply_history_messages,
@@ -111,6 +112,7 @@ def build_worker_resources(
         max_burst_wait_seconds=settings.autopilot_max_burst_wait_seconds,
         clock=_utc_now,
         wrapup_enabled=settings.wrapup_enabled,
+        quote_enabled=settings.reply_quote_enabled,
     )
     proactive = SqlProactiveRepository(session_factory)
     proactive_runner = ProactiveJobRunner(

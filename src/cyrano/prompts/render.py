@@ -36,6 +36,7 @@ from cyrano.prompts.texts import (
     LAYER_SEPARATOR,
     MEDIA_LABEL_SEPARATOR,
     MEDIA_LABELS,
+    MESSAGE_NUMBER_PREFIX,
     MODE_HEADER,
     NEXT_MESSAGE_REQUEST,
     NO_TEXT_PLACEHOLDER,
@@ -45,6 +46,7 @@ from cyrano.prompts.texts import (
     PROACTIVE_HOURS_UNIT,
     PROACTIVE_INSTRUCTIONS,
     PROACTIVE_REQUEST,
+    QUOTE_INSTRUCTIONS,
     SKIP_SIGNAL,
     SUMMARY_AGE_LABEL,
     SUMMARY_AGREEMENTS_LABEL,
@@ -189,8 +191,11 @@ def render_system_prompt(
     examples: Sequence[StyleExample],
     proactive_hours: int | None = None,
     wrapup_phase: WrapUpPhase | None = None,
+    quote_markers: bool = False,
 ) -> str:
     paragraphs = [INSTRUCTIONS]
+    if quote_markers:
+        paragraphs.append(QUOTE_INSTRUCTIONS)
     if proactive_hours is not None:
         paragraphs.append(render_proactive_instructions(proactive_hours))
     if wrapup_phase is not None:
@@ -220,8 +225,10 @@ def render_time_line(now: datetime, timezone_name: str) -> str:
     )
 
 
-def _dialogue_line(message: Message) -> str:
+def _dialogue_line(message: Message, number: int | None = None) -> str:
     label = CONTACT_LABEL if message.direction is MessageDirection.INCOMING else OWNER_LABEL
+    if number is not None:
+        label = f"{MESSAGE_NUMBER_PREFIX.format(number=number)}{label}"
     return labelled(label, media_text(strip_boundary(message.text), message.media_kind))
 
 
@@ -232,8 +239,12 @@ def render_user_prompt(
     messages: Sequence[Message],
     request: str = NEXT_MESSAGE_REQUEST,
     wrapup: UnavailableSoon | None = None,
+    numbered: bool = False,
 ) -> str:
-    dialogue = [_dialogue_line(message) for message in messages]
+    dialogue = [
+        _dialogue_line(message, number if numbered else None)
+        for number, message in enumerate(messages, start=1)
+    ]
     block = LINE_BREAK.join([DIALOGUE_BEGIN, *dialogue, DIALOGUE_END])
     header = render_time_line(now, timezone_name)
     if wrapup is not None:

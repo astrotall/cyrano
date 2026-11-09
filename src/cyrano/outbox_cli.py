@@ -48,8 +48,10 @@ RETRY_NEEDS_YES_LINE = (
 )
 LIST_LINE = (
     "id={id} contact={contact_id} source={source} state={state} send_at={send_at} due_at={due_at} "
-    "error={error} cancel_reason={cancel_reason}"
+    "error={error} cancel_reason={cancel_reason} quoted={quoted}"
 )
+QUOTED_YES = "yes"
+QUOTED_NO = "no"
 NO_ERROR = "-"
 NO_CANCEL_REASON = "-"
 SENDER_RUNNING_LINE = "sender: running"
@@ -197,6 +199,7 @@ class OutboxCommands:
                     due_at=row.due_at.isoformat(),
                     error=row.error_class or NO_ERROR,
                     cancel_reason=row.cancel_reason or NO_CANCEL_REASON,
+                    quoted=QUOTED_NO if row.reply_to_tg_message_id is None else QUOTED_YES,
                 )
             )
         return EXIT_OK

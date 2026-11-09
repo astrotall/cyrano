@@ -69,6 +69,12 @@ What exists now:
   follow-up that has not started; no automatic pause after the maximum. CYR-53 added the upper bound,
   `PROACTIVE_MAX_SILENCE_DAYS` (default 3): a longer silence is left alone (`silence_too_long`, checked after
   `silence_too_short`, inclusive, the same silence start; the scan filters on it with `silent_not_before`).
+- The quoted replies (CYR-48), behind `REPLY_QUOTE_ENABLED` (default on): the reply prompt numbers the
+  dialogue and the model may start a line with `↩N` to answer an earlier message of the contact; the
+  marker is stripped and checked against the shown incoming messages, and that part goes out as a
+  Telegram reply (`scheduled_messages.reply_to_tg_message_id`, migration `0015`); a first part planned at
+  least the profile's `quote_late_seconds` (default 300) after its trigger quotes the trigger; at most one
+  part per reply; a gone target is resent once without the quote.
 - The owner's commands: `login`, `llm-check`, `persona`, `examples`, `reply-preview` (with
   `--proactive`), `outbox`, `schedule`, `stop-check`, `autopilot` and `summary` (the list is in the README).
 
@@ -181,7 +187,8 @@ Changing any of these is a large change (see Workflow expectations). Reasons:
 │   │                             summary_sweeper (the summary scan), summary_job_queue (its queue Protocol),
 │   │                             gender (GenderResolver), gender_guess (the name guess), gender_actions (the card button),
 │   │                             proactive_eligibility (the one proactive rule), proactive_sweeper (the proactive scan),
-│   │                             proactive_job (one follow-up after a silence), proactive_job_queue (its queue Protocol)
+│   │                             proactive_job (one follow-up after a silence), proactive_job_queue (its queue Protocol),
+│   │                             reply_quotes (the quote markers and the late-answer rule)
 │   ├── userbot/                  Telethon: protocols, filters, handler, client, adapter, login, runner, errors,
 │   │                             profile_source, leomatch_source, leomatch_match
 │   ├── bot/                      aiogram: app, middleware, handlers, rendering, callbacks, sender, notifier, messages, errors
@@ -413,6 +420,17 @@ one shared resolution step in `TelethonAdapter` for `send_text`, `show_typing` a
 one refresh per `ENTITY_REFRESH_MIN_INTERVAL_SECONDS`, a deadline, a failed refresh never a send failure) before it
 reports `PeerNotFound`, `Userbot.warm_up_entities` started once by `main.run` after the catch-up and cancelled first on
 shutdown, `tests/userbot/test_entity_refresh.py`, and the new scans in `tests/test_one_sender.py`.
+CYR-48 added the quoted replies: `MessageRef`, `ReplyPart` and the `message_refs` of `BuiltPrompt` and
+`GeneratedReply` in `domain/reply.py`, `QUOTE_MARKER`, `MESSAGE_NUMBER_PREFIX` and `QUOTE_INSTRUCTIONS` in
+`prompts/texts.py` with the numbered dialogue and the paragraph in `prompts/render.py`, the `quote_enabled` of
+`PromptBuilder` and `ReplyJobRunner`, `services/reply_quotes.py` (`split_reply_with_targets`, `with_late_target`),
+the profile field `quote_late_seconds` with its `schedule show` line and the sample,
+`HumanizationPlanner.quote_late_seconds`, migration `0015` (`scheduled_messages.reply_to_tg_message_id`),
+the optional `reply_to` of `enqueue_sequence` with its validation (`reply_target_invalid`, `reply_targets_many`),
+the optional `reply_to` of `MessageTransport.send_text` and of the adapter's `send_message`, `SendReplyTargetGone`
+for `MessageIdInvalidError` and `MsgIdInvalidError` with a target, the sender's one resend without the target,
+`ReplyJobResult.quoted`, `quoted=yes/no` in `outbox list`, the `[n/total ↩N]` lines of `reply-preview`, the
+optional `REPLY_QUOTE_ENABLED` setting, and the tests.
 CYR-56 brought the CI run time down: the database tests clone a per-session template database that Alembic
 migrated once (`tests/db/template.py`, the `template_database` fixture and `cloned_database` in `tests/db/conftest.py`,
 `tests/db/test_template_database.py`, `tests/db/test_template_usage.py`); only the two migration test modules keep their

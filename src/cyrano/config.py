@@ -163,6 +163,7 @@ class Settings(BaseSettings):
     autopilot_enabled: bool = False
     early_read_enabled: bool = True
     wrapup_enabled: bool = True
+    reply_quote_enabled: bool = True
     autopilot_debounce_seconds: int = Field(
         default=DEFAULT_AUTOPILOT_DEBOUNCE_SECONDS,
         ge=MIN_AUTOPILOT_DEBOUNCE_SECONDS,

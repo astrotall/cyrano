@@ -36,6 +36,7 @@ MAX_TYPING_SECONDS = 60
 MAX_SPREAD_MINUTES = 120
 MAX_SPLIT_PAUSE_SECONDS = 60
 MAX_EARLY_READ_SECONDS = 30
+MAX_QUOTE_LATE_SECONDS = 86400
 DEFAULT_NIGHT_START = (time(1, 0), time(2, 0))
 DEFAULT_NIGHT_END_WEEKDAY = (time(9, 0), time(9, 0))
 DEFAULT_NIGHT_END_WEEKEND = (time(11, 0), time(12, 0))
@@ -49,6 +50,7 @@ DEFAULT_TYPING_MAX_SECONDS = 25
 DEFAULT_SPREAD_MINUTES = (1, 15)
 DEFAULT_SPLIT_PAUSE_SECONDS = (3, 8)
 DEFAULT_EARLY_READ_SECONDS = (0, 1)
+DEFAULT_QUOTE_LATE_SECONDS = 300
 DEFAULT_PROACTIVE_WINDOW = (time(10, 0), time(22, 0))
 DEFAULT_WRAPUP_SOFT_MINUTES = 60
 MIN_WRAPUP_SOFT_MINUTES = 5
@@ -120,6 +122,7 @@ SplitPauseRange = Annotated[tuple[SplitPauseSeconds, SplitPauseSeconds], AfterVa
 EarlyReadSeconds = Annotated[StrictInt, Field(ge=0, le=MAX_EARLY_READ_SECONDS)]
 EarlyReadRange = Annotated[tuple[EarlyReadSeconds, EarlyReadSeconds], AfterValidator(_ordered)]
 TypingSeconds = Annotated[StrictInt, Field(ge=0, le=MAX_TYPING_SECONDS)]
+QuoteLateSeconds = Annotated[StrictInt, Field(ge=0, le=MAX_QUOTE_LATE_SECONDS)]
 TimezoneName = Annotated[str, AfterValidator(_known_timezone)]
 Days = Annotated[tuple[Weekday, ...], AfterValidator(_unique_in_week_order)]
 BusyLabel = Annotated[
@@ -199,6 +202,7 @@ class ScheduleProfile(_ProfilePart):
     proactive_window: tuple[LocalTime, LocalTime] = DEFAULT_PROACTIVE_WINDOW
     wrapup_soft_minutes: WrapUpSoftMinutes = DEFAULT_WRAPUP_SOFT_MINUTES
     wrapup_hard_minutes: WrapUpHardMinutes = DEFAULT_WRAPUP_HARD_MINUTES
+    quote_late_seconds: QuoteLateSeconds = DEFAULT_QUOTE_LATE_SECONDS
 
     @field_validator("version")
     @classmethod

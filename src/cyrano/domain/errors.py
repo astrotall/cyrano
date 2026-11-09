@@ -204,6 +204,10 @@ class SendFloodWait(SendFailure):
         self.seconds = seconds
 
 
+class SendReplyTargetGone(SendFailure):
+    pass
+
+
 class PlanNotPossible(DomainError):
     def __init__(self, contact_id: int, message_id: int) -> None:
         super().__init__(

@@ -133,7 +133,9 @@ class AutopilotRig:
         self.backlog = SqlReplyBacklogRepository(factory)
         self.schedule = free_schedule()
 
-    def generator(self, client: LLMClient, *, budget: int = 1_000_000) -> ReplyGenerator:
+    def generator(
+        self, client: LLMClient, *, budget: int = 1_000_000, quote_enabled: bool = False
+    ) -> ReplyGenerator:
         return ReplyGenerator(
             contacts=self.contacts,
             messages=self.messages,
@@ -141,7 +143,7 @@ class AutopilotRig:
             persona=PersonaService(self.personas),
             examples=ExampleSelector(self.examples, 8),
             gender=GenderResolver(),
-            builder=make_builder(budget),
+            builder=make_builder(budget, quote_enabled=quote_enabled),
             client=client,
             history_limit=20,
         )
@@ -161,13 +163,16 @@ class AutopilotRig:
         max_tokens: int = BASE_MAX_TOKENS,
         max_burst_wait_seconds: int = DEFAULT_AUTOPILOT_MAX_BURST_WAIT_SECONDS,
         wrapup_enabled: bool = False,
+        quote_enabled: bool = False,
+        prompt_quotes: bool | None = None,
     ) -> ReplyJobRunner:
+        numbered = quote_enabled if prompt_quotes is None else prompt_quotes
         return ReplyJobRunner(
             contacts=self.contacts,
             messages=self.messages,
             outbox=self.outbox,
             state=self.state,
-            generator=self.generator(client, budget=budget),
+            generator=self.generator(client, budget=budget, quote_enabled=numbered),
             hand_over=self.hand_over(),
             planner=planner or self.planner(),
             enqueuer=OutboxService(self.contacts, self.outbox, SendGuard(self.guard_switch)),
@@ -178,6 +183,7 @@ class AutopilotRig:
             max_burst_wait_seconds=max_burst_wait_seconds,
             clock=self.clock,
             wrapup_enabled=wrapup_enabled,
+            quote_enabled=quote_enabled,
         )
 
     async def contact(self, status: ContactStatus = ContactStatus.ACTIVE) -> Contact:

@@ -130,6 +130,7 @@ class OutboxRepository(Protocol):
         send_at: datetime,
         source: OutboxSource,
         trigger_message_id: int | None = None,
+        reply_to: Sequence[int | None] = (),
     ) -> list[ScheduledMessage]: ...
 
     async def get(self, row_id: int) -> ScheduledMessage | None: ...

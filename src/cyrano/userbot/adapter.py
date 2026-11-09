@@ -18,7 +18,9 @@ from telethon.errors import (
     ForbiddenError,
     FrozenMethodInvalidError,
     InputUserDeactivatedError,
+    MessageIdInvalidError,
     MessageTooLongError,
+    MsgIdInvalidError,
     PeerFloodError,
     PeerIdInvalidError,
     PeerIdNotSupportedError,
@@ -43,6 +45,7 @@ from cyrano.domain.errors import (
     SendFailure,
     SendFloodWait,
     SendRejected,
+    SendReplyTargetGone,
     SendUncertain,
 )
 from cyrano.domain.outbox import SentMessage
@@ -86,6 +89,7 @@ RECIPIENT_REFUSALS = (
     UserIsBlockedError,
     YouBlockedUserError,
 )
+REPLY_TARGET_REFUSALS = (MessageIdInvalidError, MsgIdInvalidError)
 PEER_NOT_FOUND = "PeerNotFound"
 MISSING_RESPONSE = "MissingSentMessage"
 TYPING_ACTION = "typing"
@@ -252,11 +256,20 @@ class TelethonAdapter:
         except ValueError:
             raise SendRejected(PEER_NOT_FOUND, RejectionReason.RECIPIENT) from None
 
-    async def send_text(self, tg_id: int, text: str) -> SentMessage:
+    async def send_text(self, tg_id: int, text: str, reply_to: int | None = None) -> SentMessage:
         peer = await self._peer(tg_id)
         try:
-            sent = await self._client.send_message(peer, text, parse_mode=None, link_preview=False)
+            if reply_to is None:
+                sent = await self._client.send_message(
+                    peer, text, parse_mode=None, link_preview=False
+                )
+            else:
+                sent = await self._client.send_message(
+                    peer, text, parse_mode=None, link_preview=False, reply_to=reply_to
+                )
         except Exception as exc:
+            if reply_to is not None and isinstance(exc, REPLY_TARGET_REFUSALS):
+                raise SendReplyTargetGone(type(exc).__name__) from None
             raise classify_failure(exc) from None
         if sent is None:
             raise SendUncertain(MISSING_RESPONSE)

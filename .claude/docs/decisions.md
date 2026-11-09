@@ -323,6 +323,12 @@ changing one is a large change.
 | A sticker is text: it is stored as its emoji and never hands over (CYR-58) | A sticker is a reaction the model can answer from its emoji; pausing the contact for every sticker would pause too many conversations |
 | The pause for a media message also stops text replies until the owner presses Resume or ignores the contact (CYR-58) | One status for the contact keeps the guard and the sender simple; the alternative, ignoring only the media message, would let the assistant continue a conversation that has a message nobody read |
 | The media gate runs after the text gate and before the autopilot scheduler and the early read; a caption that trips a text trigger hands over once, with its text classes (CYR-58) | The schedulers must find the contact already paused; the text gate first keeps the more specific reason, and the second hand-over finds the contact paused and sends no second notice. A structural test pins the order |
+| The model marks the reply target with a marker `↩N` over a numbered dialogue, instead of the code guessing which message a line answers (CYR-48) | Only the model knows which message a line answers; numbers are short, positions in the block shown, never ids, so nothing new about the contact reaches the provider |
+| One target per reply: the first valid marker wins, later ones are stripped (CYR-48) | People quote one message per answer; two quotes in one reply look mechanical, and one target keeps the chain, the validation and the sender's fallback simple |
+| The late-answer rule quotes the first part when it is planned at least `quote_late_seconds` (profile, default 300 s, 0 off) after the trigger, never on top of a model target, never in the wrap-up path or for proactive rows (CYR-48) | A late answer without a quote is hard to place; five minutes is when a chat has usually moved on; per-profile because it is part of the owner's habits. The wrap-up reply closes the conversation and should not point back; a proactive row has no incoming trigger |
+| The marker is always stripped and only accepted for a number of the shown block that belongs to an incoming message; anything else is dropped silently, never sent (CYR-48) | A model can hallucinate numbers or quote the owner's own message; a stray `↩12` in a chat would look like a bot. The check against the shown map is the one place that maps a number to an id |
+| `MessageTransport` keeps exactly three methods; `send_text` gains an optional `reply_to` (CYR-48) | The one-sender scans stay as they are; a fourth method would only duplicate `send_text` |
+| A target that Telegram calls invalid or deleted (`MessageIdInvalidError`, `MsgIdInvalidError`, only with `reply_to`) is retried once at once without the target, on the same row and inside the same send deadline (CYR-48) | The refusal is certain (nothing was delivered), so a resend cannot duplicate the message, and losing the quote is better than losing the reply; one try only, so it can never loop |
 
 ## Open questions
 
@@ -355,6 +361,10 @@ changing one is a large change.
 | Reacting to the contact's last seen (write when the contact is online, or not while the contact was online and did not answer). Today the userbot does not read presence | open, after CYR-23 |
 | The daily cap and two worker jobs at the same time: each job checks the cap before it writes, so two jobs that run at once may exceed it by one | open, after CYR-23 |
 | May `bot` and `userbot` import each other, or only `services`? `worker` may import `bot` since CYR-17 | open, no ticket |
+| A reply target for proactive messages (quoting what the contact said before the silence) | open, after CYR-48 |
+| Should the late-answer rule quote from another part than the first, or quote a message other than the trigger (for example the question of the burst)? | open, after CYR-48 |
+| The accuracy of the model's markers: how often it marks, and marks the right message, to be tuned on live outputs with `reply-preview` | open, after CYR-48 and live observation |
+| Telegram's `REPLY_MESSAGE_ID_INVALID` has no class in the Telethon 1.45.0 error table, so it arrives as a generic `BadRequestError` and is treated as uncertain (no resend). Map it by its message text, or wait for a Telethon class? | open, after CYR-48 and live observation |
 | Should the autopilot have a switch per contact, next to `AUTOPILOT_ENABLED`? Today every `active` contact is answered while the switch is on | open, no ticket |
 | The contact summary in the control bot's card and in a contact catalog | CYR-26 |
 | A per-contact way to switch summaries off (today `SUMMARY_ENABLED` is global and `summary clear` removes one summary) | open, no ticket |

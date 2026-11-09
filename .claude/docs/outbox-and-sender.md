@@ -1,7 +1,7 @@
 # Outbox and sender
 
 Exists since CYR-19; the limits, the pause and the stop since CYR-22; the pre-send part and the
-availability check since CYR-18; replies in several parts since CYR-36. The outbox is the table of
+availability check since CYR-18; replies in several parts since CYR-36; quoted parts since CYR-48. The outbox is the table of
 messages waiting to go out; the sender is the one piece of code that sends them to contacts. The
 Telethon session lives in the app process, so sending stays there. The Arq worker (CYR-17) only
 generates replies and writes them to the outbox ([autopilot.md](autopilot.md)).
@@ -15,7 +15,7 @@ proactive job (`proactive`), which runs only with `PROACTIVE_ENABLED=true` as we
 ## The table
 
 `scheduled_messages`, migration `0003`, `due_at` since migration `0005`, `follows_id` since migration
-`0010`:
+`0010`, `reply_to_tg_message_id` since migration `0015`:
 
 | Column | Holds |
 | --- | --- |
@@ -34,6 +34,7 @@ proactive job (`proactive`), which runs only with `PROACTIVE_ENABLED=true` as we
 | `sent_tg_message_id` | The Telegram id of the sent message |
 | `created_at`, `updated_at` | `timestamptz` |
 | `follows_id` | The part this row follows in a [multi-part reply](#multi-part-replies), or `NULL` for a first part and for every single row; foreign key to `scheduled_messages.id`, indexed |
+| `reply_to_tg_message_id` | CYR-48: the Telegram message id of the contact's message this part answers as a Telegram reply ([quoted parts](#quoted-parts)), or `NULL`; `bigint`, nullable, no foreign key. At most one part of a chain has one. Never logged or printed; `ScheduledMessage` hides it from its `repr` |
 
 Constraints: `text` not empty, `state` and `source` from the allowed values. Indexes: a partial
 unique index on `(contact_id, trigger_message_id) WHERE trigger_message_id IS NOT NULL`, so one
@@ -157,7 +158,9 @@ Each poll, in this order:
 8. The pre-send part: `mark_read`, a pause, `show_typing`; a later part of a reply only `show_typing`.
    See below.
 9. Re-read the contact and run the guard again. There is no supersession check here (CYR-43).
-10. `send_text`, then `complete_send`, then `schedule_followers` for the next part of the reply, if any.
+10. `send_text` (with the row's reply target, if any, and at most one resend without it, see
+    [quoted parts](#quoted-parts)), then `complete_send`, then `schedule_followers` for the next part of
+    the reply, if any.
 
 The startup sweep and the stale check of stuck rows keep running while the sender is paused or
 stopped. They only ever mark rows as failed; they send nothing.
@@ -262,6 +265,31 @@ line as its own message ([autopilot.md](autopilot.md#the-job)). The parts are ro
 If `schedule_followers` fails after a send (a database outage), the error is logged as a failed step and
 the next part keeps its placeholder time, so it is claimed at the next poll without the split pause; it
 still gets its typing.
+
+### Quoted parts
+
+CYR-48. A part may carry `reply_to_tg_message_id`, set by the autopilot job from the model's marker or the
+late-answer rule ([reply-generation.md](reply-generation.md#quoting-a-message),
+[humanization.md](humanization.md#the-late-answer-rule)); the proactive job, the owner's test command and
+the single-row enqueue never set one.
+
+- **Storing.** `OutboxRepository.enqueue_sequence` and `OutboxService.enqueue_sequence` take an optional
+  `reply_to`, one entry per text (`int` or `None`). A chain without targets behaves exactly as before, and
+  the idempotency on the trigger is unchanged: a retried job gets the stored chain with its stored target.
+  The service refuses, before anything is stored, a list that does not align with the texts or a target
+  that is not a positive 64-bit integer (`reply_target_invalid`), and more than one target in a chain
+  (`reply_targets_many`); the repository refuses a list of another length (`OutboxRowInvalid`).
+- **Sending.** The sender passes the row's target to `send_text(tg_id, text, reply_to)`. When the adapter
+  raises `SendReplyTargetGone` (the quoted message is invalid or deleted; certainly nothing was delivered),
+  the sender sends the **same row once more at once without the target**: the same claim, no new row,
+  inside the same send deadline, no read mark, pause or typing again. It logs one INFO line, `outbox row
+  resent without its reply target`, with the row id, the contact id and a counter. The result of that
+  second call is handled exactly like any send: a success completes the row, a failure follows the table
+  below, and a `SendReplyTargetGone` from a call without a target is an uncertain failure, so the resend
+  never repeats. The limits count the message once, when it is stored after the send.
+- **Everything else is the same.** The guard, the limits, the availability and supersession checks, the
+  stale rule, the chain rules and every other error policy treat a row with a target exactly like a row
+  without one.
 
 ### The pre-send part
 
@@ -496,7 +524,8 @@ at that moment counts from the moved time, because the original one was not reco
 ### Errors
 
 The Telethon adapter (`userbot/adapter.py`) maps every Telegram failure to one of four classes, with
-the same function for `send_text`, `show_typing` and `mark_read`.
+the same function for `send_text`, `show_typing` and `mark_read`; a `send_text` with a reply target has
+one more, `SendReplyTargetGone` (CYR-48).
 They carry a class name, and the seconds for a flood wait, never a text. The checks run in the order
 of the table. The account check comes before the refusals because `UserRestrictedError`, a
 restriction of our own account, is a subclass of `ForbiddenError`, which otherwise means the
@@ -511,6 +540,7 @@ and shown is the Telethon class name, never the base class of a subclass.
 | `SendAccountBlocked(kind)` | The owner's own account is restricted or lost | `PeerFloodError`, `UserDeactivatedError`, `UserDeactivatedBanError`, `UserRestrictedError`, `AuthKeyUnregisteredError`, `AuthKeyInvalidError`, `SessionRevokedError`, `SessionExpiredError`, `FrozenMethodInvalidError`, `AuthKeyDuplicatedError`, `AuthKeyPermEmptyError`, `ActiveUserRequiredError`, `SessionPasswordNeededError`, and a bare `UnauthorizedError` (so any other `UnauthorizedError` subclass) |
 | `SendRejected(reason=content)` | Certainly not delivered, because of this text | `MessageTooLongError` |
 | `SendRejected(reason=recipient)` | Certainly not delivered, because of this contact | `ForbiddenError` and its other subclasses (for example `UserPrivacyRestrictedError`, `ChatWriteForbiddenError`; also `PremiumAccountRequiredError`, `SensitiveChangeForbiddenError` and `NotAllowedError`, which are recipient-level by default and to be revisited if seen live), `InputUserDeactivatedError`, `PeerIdInvalidError`, `PeerIdNotSupportedError`, `UserBlockedError`, `UserIdInvalidError`, `UserIsBlockedError`, `YouBlockedUserError`; a `ValueError` from the peer lookup that is still there after one refresh of the entity cache (`PeerNotFound`, see [the peer lookup](#the-peer-lookup-and-the-entity-cache-cyr-55)) |
+| `SendReplyTargetGone` (CYR-48) | Certainly not delivered, because the quoted message is invalid or deleted; only for a call **with** `reply_to` | `MessageIdInvalidError`, `MsgIdInvalidError` (the two message-id errors of the Telethon 1.45.0 table); checked before the table above. Without `reply_to` they keep their usual mapping (`SendUncertain`) |
 | `SendUncertain` | The outcome is unknown | Everything else: timeouts, connection errors, generic RPC and server errors, a `ValueError` from `send_message`, a send that returned no message (`MissingSentMessage`) |
 
 | Result of the send | What the sender does | Stored `error_class` | Owner notified |
@@ -519,6 +549,7 @@ and shown is the Telethon class name, never the base class of a subclass.
 | `SendAccountBlocked`, also from `mark_read` or `show_typing` | Stops the sender; `failed`; other rows untouched; the contact is not paused | The kind | Once, when newly stopped; names the kind and the resume command; then a reminder every 6 h while stopped |
 | `SendRejected`, recipient | `failed`; contact `active -> paused`; the contact's other `scheduled` rows cancelled with reason `send_rejected` | The class name | Once, with the contact id and the class name |
 | `SendRejected`, content | `failed`, and nothing else | The class name | Once |
+| `SendReplyTargetGone` | The same row is sent once more at once without the target ([quoted parts](#quoted-parts)); the second result is handled by this table | Whatever the second result stores | Only as the second result requires |
 | `SendUncertain` | `failed` | `uncertain` | Once, and told to check the chat and how to retry |
 | Any other exception | Same as `SendUncertain` | `uncertain` | Once |
 | The send deadline passed | Same as `SendUncertain` | `uncertain` | Once |
@@ -530,7 +561,8 @@ and shown is the Telethon class name, never the base class of a subclass.
 **Only a flood wait, a reached limit and a closed window put a row back.** In all three, the message
 certainly did not go out: for a flood wait Telegram refused it and said when to try again, even when
 the wait came from the read mark or the typing, and for a limit or a window `send_text` was never called.
-Every other failure ends the row: `send_text` is called exactly once for it, and
+Every other failure ends the row: `send_text` is called exactly once for it (twice only after a
+`SendReplyTargetGone`, which is certain), and
 an unknown outcome is never retried by the sender, because the first attempt may have reached
 Telegram and each new call gets a new `random_id`, so the contact would receive the message twice. A
 cause of an uncertain row (a class name, or `SendDeadlinePassed`) goes to the log line; the row stores
@@ -570,12 +602,14 @@ with the class name, and the loop goes on: one bad row never stops it. Only canc
 ## The transport, the notifier and the adapter
 
 - `MessageTransport` (`services/message_transport.py`) has exactly three methods, and only the sender
-  calls them (since CYR-44 from two coroutines, the row loop and the early read, which may overlap): `send_text(tg_id, text) -> SentMessage`, `show_typing(tg_id, seconds)` and
+  calls them (since CYR-44 from two coroutines, the row loop and the early read, which may overlap): `send_text(tg_id, text, reply_to=None) -> SentMessage`
+  (`reply_to`, a Telegram message id, since CYR-48), `show_typing(tg_id, seconds)` and
   `mark_read(tg_id)`.
 - `OwnerNotifier` (`services/owner_notifier.py`) has exactly one method: `notify(text)`.
 - `TelethonAdapter` (`userbot/adapter.py`) is the only module that touches the Telethon client
   directly and the only one with a Telethon write call: `send_message` with plain text, no parse
-  mode and no link preview; `action` with `typing`, held for the given seconds through an injected
+  mode and no link preview, and `reply_to` only when the row has a target (the call without one is
+  unchanged); `action` with `typing`, held for the given seconds through an injected
   sleep, cancellable, with `auto_cancel=False`, because the message clears the indicator and a cancel
   would be one more write; and `send_read_acknowledge` for the whole chat. It also implements the read Protocol `UserbotClient`, whose generic
   request call was replaced by `get_full_user(tg_id)`; only the adapter imports a request class
@@ -650,7 +684,7 @@ database up. The sending itself is done by the running app.
 | Command | Makefile | What it does |
 | --- | --- | --- |
 | `outbox enqueue CONTACT_ID TEXT [--in-seconds N]` | `make outbox-enqueue CONTACT=... TEXT="..." [IN=...]` | Adds a `manual_test` row, due in N seconds (default 5, 0 to 86400). Prints the row id and the planned time |
-| `outbox list [--state S] [--limit N]` | `make outbox-list [STATE=...] [LIMIT=...]` | Newest first (default 50, 1 to 1000): id, contact id, source, state, `send_at`, `due_at`, error class, `cancel_reason`. An empty value prints `-`. The reason is a stored constant such as `cancelled_by_owner`, `stale`, `superseded`, `predecessor`, `send_rejected` or a guard refusal, so a stale cancel is told apart from an owner cancel. Never a text |
+| `outbox list [--state S] [--limit N]` | `make outbox-list [STATE=...] [LIMIT=...]` | Newest first (default 50, 1 to 1000): id, contact id, source, state, `send_at`, `due_at`, error class, `cancel_reason`, and since CYR-48 `quoted=yes` or `quoted=no` (whether the row has a reply target; the target's Telegram id is never printed). An empty value prints `-`. The reason is a stored constant such as `cancelled_by_owner`, `stale`, `superseded`, `predecessor`, `send_rejected` or a guard refusal, so a stale cancel is told apart from an owner cancel. Never a text |
 | `outbox cancel ID` | `make outbox-cancel ID=...` | Cancels a `scheduled` row. A row in any other state is refused with a message |
 | `outbox retry ID [--in-seconds N] [--yes]` | `make outbox-retry ID=... [IN=...] [YES=1]` | Only for a `failed` row; any other state is refused with a message. Without `--yes` it prints a reminder to check the chat first and changes nothing. With `--yes` it sets `scheduled`, `send_at` and `due_at` to now + N seconds (default 5, 0 to 86400), clears `error_class` and `cancel_reason`, and prints the row id and the planned time |
 | `outbox status` | `make outbox-status` | The sender state (running, paused with the time and reason, stopped with the reason), the six counters against their limits, and the rows per state (every source; `autopilot status` counts the `autopilot` and the `proactive` rows apart). Never a text, a name or a Telegram id |
@@ -680,6 +714,6 @@ is never printed back, not even in a usage error.
 
 Rule S9. Logs, notifications, command output and errors carry internal ids, states, counters and
 class names. They never carry a message text, a name, a username, a Telegram id or a photo path.
-`ScheduledMessage.text` is excluded from the model's `repr`. A driver error is never passed on with
+`ScheduledMessage.text` and, since CYR-48, `ScheduledMessage.reply_to_tg_message_id` are excluded from the model's `repr`. A driver error is never passed on with
 its message, because PostgreSQL can quote row values in it.
 

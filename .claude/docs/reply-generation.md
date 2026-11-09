@@ -8,7 +8,9 @@ build it. Since CYR-20 the instructions carry the hand-over rule and the generat
 `NEEDS_OWNER` signal ([stop-triggers.md](stop-triggers.md)). Since CYR-25 the generator loads the
 contact's stored summary into the summary layer ([summaries.md](summaries.md)). Since CYR-23 it has a
 second purpose, a proactive message after a long silence ([the proactive purpose](#the-proactive-purpose),
-[proactive.md](proactive.md)).
+[proactive.md](proactive.md)). Since CYR-48 the dialogue of a reply prompt is numbered and the model may mark
+a line that answers a specific earlier message; that line goes out as a Telegram reply
+([Quoting a message](#quoting-a-message)).
 
 Code map and import rules: [architecture.md](architecture.md). Reasons: [decisions.md](decisions.md).
 The persona and the examples: [persona-and-examples.md](persona-and-examples.md). The LLM client:
@@ -20,13 +22,14 @@ The persona and the examples: [persona-and-examples.md](persona-and-examples.md)
 | --- | --- |
 | `prompts/texts.py` | Every fixed text: the layer headers, the instructions, the labels, the dialogue boundary token, the weekday names, the closing request |
 | `prompts/render.py` | Pure rendering of the system message and the user message. No calls, no IO. Imports only `domain` |
-| `domain/reply.py` | `ContactFacts`, `BuiltPrompt`, `GeneratedReply`, the limits (`MIN_HISTORY_MESSAGES`, `REPLY_MAX_CHARS`, `MAX_REPLY_PARTS` with `REPLY_PART_JOINER`, the four fact limits) and the reasons a reply is refused |
+| `domain/reply.py` | `ContactFacts`, `BuiltPrompt`, `GeneratedReply`, `MessageRef` and `ReplyPart` (CYR-48), the limits (`MIN_HISTORY_MESSAGES`, `REPLY_MAX_CHARS`, `MAX_REPLY_PARTS` with `REPLY_PART_JOINER`, the four fact limits) and the reasons a reply is refused |
 | `domain/errors.py` | `PersonaMissing`, `ModeNameNotFound`, `NoMessagesToReplyTo`, `PromptTooLarge`, `ReplyInvalid`; their messages carry ids and counts, never a text |
 | `services/contact_facts.py` | `build_contact_facts`: the few profile fields that may reach the prompt, truncated |
 | `services/prompt_builder.py` | `PromptBuilder`: assembly and trimming to the budget |
 | `services/reply_postprocess.py` | `clean_reply`: pure cleaning and the refusal of a leaked prompt |
 | `services/reply_generator.py` | `ReplyGenerator`: loads, builds, calls the LLM, cleans |
-| `services/reply_split.py` | `split_reply`: the pure split of a reply into parts, one per line (CYR-36); used by the autopilot job and `reply-preview` |
+| `services/reply_split.py` | `split_reply`: the pure split of a reply into parts, one per line (CYR-36); used by the proactive job and by `split_reply_with_targets` |
+| `services/reply_quotes.py` | `split_reply_with_targets`: the marker parsing and the split into `ReplyPart`s with their optional target; `with_late_target`: the late-answer rule (CYR-48); used by the autopilot job and `reply-preview` |
 | `reply_cli.py`, `main.py` | The `reply-preview` command and its wiring |
 
 ## The two messages
@@ -208,6 +211,46 @@ generation that carries the `SKIP` signal gives `skipped = True` only then; with
 `ReplyInvalid` (`REPLY_SKIP_REASON`), so the invalid-reply policy applies (one more generation, then a
 hand-over). The proactive purpose is unchanged.
 
+### Quoting a message
+
+CYR-48, behind `REPLY_QUOTE_ENABLED` (default `true`). `PromptBuilder` takes `quote_enabled` (the setting);
+with it, and for the reply purpose only, the prompt changes in two places and nothing else:
+
+- every message line of the dialogue block gets a short number in front, counted over the messages shown
+  after the budget trimming, 1 being the oldest shown: `#3 Contact: ...`, `#4 Me: ...`
+  (`MESSAGE_NUMBER_PREFIX`). A media label is numbered like any message, and the continuation lines of a
+  multi-line message keep their four-space indent, unnumbered;
+- one English paragraph is appended to the instructions layer, after the bullets and a blank line, before a
+  wrap-up paragraph (`QUOTE_INSTRUCTIONS` in `prompts/texts.py`):
+
+  > The messages of the dialogue are numbered. When one of your lines answers a specific earlier message of
+  > the contact instead of the latest one, start that line with the marker ↩N, where N is the number of that
+  > message. Use the marker only when it helps, for example when several messages of the contact are waiting
+  > and the line answers one that is not the last; use it at most once per reply and never for a plain answer
+  > to the latest message.
+
+`BuiltPrompt.message_refs` maps each number to the Telegram message id and the direction of that message
+(`MessageRef`); `GeneratedReply` carries the same map to the caller. Neither is ever logged, and their
+`repr` hides the ids. With the setting off, the prompt is byte for byte what it was and the map is empty;
+the proactive prompt and the summary extraction input are unchanged in both cases (tests in
+`tests/services/test_reply_quote_prompt.py`).
+
+**Parsing.** `split_reply_with_targets(text, refs)` (`services/reply_quotes.py`, pure) runs on the cleaned
+reply, after the `NEEDS_OWNER` and `SKIP` detection, the cleaning and the layer-leak checks, which see the
+raw reply as before (the marker is not text and is not a leak). A marker is `↩` (also with the emoji
+variation selector) followed by optional spaces and a number of one to three digits, optionally followed by
+a colon, a dot or a dash, at the start of a line. It is stripped from the line. Its number must exist in the
+map and belong to an incoming message; otherwise the marker is dropped silently and the line is kept. Only
+the first valid marker of a reply is honoured; later markers are stripped and ignored. A `↩N` anywhere else
+in a line is stripped as noise (repeatedly, so no arrow followed by a digit survives, also where merged
+lines meet), and a line that is empty afterwards disappears together with its marker. The remaining lines
+go through `split_reply` unchanged (at most three parts, the extra lines merged into the last), and the
+part holding the marker line carries the target; for merged lines the merged part inherits it. The result
+is a list of `ReplyPart` (text, the marker's number, the target's Telegram message id). Markers are always
+stripped; with the setting off the map is empty, so no part has a target. A reply of markers only gives no
+part, and the autopilot's enqueue refuses it (`ENQUEUE_REFUSED`). The late-answer rule and the sending:
+[humanization.md](humanization.md#the-late-answer-rule), [outbox-and-sender.md](outbox-and-sender.md#quoted-parts).
+
 ## History and the budget
 
 - **History.** The last `REPLY_HISTORY_MESSAGES` messages of the contact (default 20, from 1 to
@@ -325,6 +368,17 @@ autopilot would send them, then the same stats line:
 model=deepseek-chat input_tokens=1830 output_tokens=14 examples=5/8 messages=14/20 prompt_characters=6120
 ```
 
+A part with a target (CYR-48) shows the number of the quoted message in the dialogue block next to its
+position, also for a one-line reply; a reply without a target prints exactly what it printed before:
+
+```
+[1/2] sure
+[2/2 ↩12] the walk was fun
+```
+
+The preview shows the model's targets only (the late-answer rule depends on the send time, which a preview
+does not plan) and never prints a Telegram id.
+
 `examples=5/8` is kept of offered, the same for `messages`. On the model signal the first line is
 `needs owner (model signal)` instead of the reply, and the exit code is 0. `--proactive` (CYR-23) runs
 the proactive purpose for the contact: the parts it would send, or `skip (model signal)` on the `SKIP`
@@ -354,7 +408,8 @@ The prompt is sent to the LLM provider, so everything in it leaves the machine:
 - the contact's name, age, city, about text and bio (see above);
 - the contact's stored summary (CYR-25), `told_about_owner` included;
 - the last messages of the conversation, both sides;
-- the current local time.
+- the current local time;
+- since CYR-48, with `REPLY_QUOTE_ENABLED`, the numbers of the dialogue lines (positions in the block, not ids).
 
 It never contains the username, any Telegram id, an internal id, a photo path, a raw Leomatch text,
 the API key or any other setting. `--show-prompt` prints to the terminal only; nothing is logged or
@@ -366,6 +421,7 @@ stored.
 | --- | --- | --- | --- |
 | `REPLY_HISTORY_MESSAGES` | `20` | 1 to 100 | how many last messages of the contact are loaded |
 | `REPLY_PROMPT_BUDGET_CHARS` | `24000` | 4000 to 200000 | character budget of the whole prompt |
+| `REPLY_QUOTE_ENABLED` | `true` | `true` or `false` | numbers the dialogue, adds the marker paragraph and lets a part carry a reply target (CYR-48); not in the startup line |
 
 The constants `MIN_HISTORY_MESSAGES` (4), `REPLY_MAX_CHARS` (600) and the four fact limits are in
 `domain/reply.py`. The step's model, temperature and `max_tokens` come from the existing `LLM_REPLY_*`

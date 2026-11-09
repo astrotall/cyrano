@@ -60,6 +60,7 @@ class Repositories:
         history_limit: int = HISTORY_LIMIT,
         budget: int = 1_000_000,
         default_gender: ContactGender | None = None,
+        quote_enabled: bool = False,
     ) -> ReplyGenerator:
         return ReplyGenerator(
             contacts=self.contacts,
@@ -68,7 +69,7 @@ class Repositories:
             persona=PersonaService(self.personas),
             examples=ExampleSelector(self.style_examples, 8),
             gender=GenderResolver(default_gender),
-            builder=make_builder(budget),
+            builder=make_builder(budget, quote_enabled=quote_enabled),
             client=client,
             history_limit=history_limit,
         )

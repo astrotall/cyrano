@@ -46,6 +46,7 @@ HumanizationPlanner.plan (send time) ----> split_reply ----> OutboxService.enque
 | `domain/errors.py` | `RetryJob(defer_seconds, error_class)`, `ReplyAfterRefused`, `AutopilotStateMissing` |
 | `services/reply_job.py` | `ReplyJobRunner`, `GenerationPolicy` (the generation with its retry, hand-over, stop and pause rules, shared with the proactive job since CYR-23), `AutopilotNotices`, `burst_messages`, `burst_texts`. No Arq import |
 | `services/reply_split.py` | `split_reply`: the pure split of a reply into at most `MAX_REPLY_PARTS` parts (CYR-36) |
+| `services/reply_quotes.py` | `split_reply_with_targets` and `with_late_target` (CYR-48): the quote markers and the late-answer rule around the split |
 | `services/autopilot.py` | `AutopilotScheduler` (the debounce is chosen with `HumanizationPlanner.conversation_ongoing`, CYR-43), `AutopilotSweeper`, `autopilot_running` |
 | `services/reply_job_queue.py` | The one-method `ReplyJobQueue` Protocol |
 | `services/repositories.py` | `AutopilotStateRepository` (`get`, `stop`, `pause_until`, `resume`) and `ReplyBacklogRepository` (`awaiting_reply`, `count_unanswered_active`) |
@@ -213,7 +214,8 @@ many hours ago is old by its own time however recently it was stored.
 ## The job
 
 `ReplyJobRunner.run(contact_id, trigger_message_id, *, attempt)` returns a `ReplyJobResult` (outcome,
-reason, an optional detail, the row id of the first part and the number of parts) or raises `RetryJob(defer_seconds)` for a transient failure.
+reason, an optional detail, the row id of the first part, the number of parts and, since CYR-48, `quoted`:
+whether a part has a reply target) or raises `RetryJob(defer_seconds)` for a transient failure.
 `attempt` is Arq's `job_try`. Every check reads fresh data; nothing is cached between jobs.
 
 1. The switch is off, the autopilot is stopped, or a cooldown pause lasts beyond now: skip.
@@ -257,11 +259,16 @@ reason, an optional detail, the row id of the first part and the number of parts
    uses the short reaction and is clamped before the window, or postponed after it when the reply cannot
    finish in time ([the clamp](humanization.md#wrapping-up-before-a-window)).
 10. Before the enqueue, the contact's older `autopilot` replies that have not started are cancelled as `superseded`
-    ([One reply per burst](#one-reply-per-burst)). Then the reply is split (`split_reply`, CYR-36): at
+    ([One reply per burst](#one-reply-per-burst)). The reply is split before the plan (the plan needs the
+    first part's text) with `split_reply_with_targets` (CYR-48, around `split_reply`, CYR-36): the quote
+    markers are parsed and stripped ([quoting a message](reply-generation.md#quoting-a-message)), then at
     every run of line breaks, each part stripped, empty parts dropped, the order kept, at most
-    `MAX_REPLY_PARTS` (3) parts, and any further lines merged into the last part with one space. Then
-    `OutboxService.enqueue_sequence(contact_id, parts, send_at, autopilot, trigger_message_id)` stores one
-    chain ([multi-part replies](outbox-and-sender.md#multi-part-replies)): every part validated, the guard
+    `MAX_REPLY_PARTS` (3) parts, and any further lines merged into the last part with one space. After the
+    plan, without a wrap-up context and while `REPLY_QUOTE_ENABLED` is on, the late-answer rule may give the
+    first part the effective trigger as its target
+    ([the late-answer rule](humanization.md#the-late-answer-rule)). Then
+    `OutboxService.enqueue_sequence(contact_id, parts, send_at, autopilot, trigger_message_id, reply_to=...)`
+    stores one chain, at most one part with a target ([multi-part replies](outbox-and-sender.md#multi-part-replies)): every part validated, the guard
     once, one transaction. An `EnqueueRefused` (one bad part refuses the whole reply) is a skip with its
     reason as the detail. A duplicate enqueue returns the stored chain and creates no part.
 
@@ -313,7 +320,8 @@ written and the sender checks the guard again. The notices go through the 15 s d
 
 Logger `cyrano.services.reply_job`: one INFO line `reply job finished` per run with the contact id, the
 trigger message id, the attempt, the outcome, the reason, the detail, the row id and `parts` (the
-number of parts of a queued reply, otherwise empty); the detail `adopted_newest` marks a run that
+number of parts of a queued reply, otherwise empty) and `quoted` (CYR-48, a flag, never the target);
+the detail `adopted_newest` marks a run that
 adopted the newest message; one INFO line
 `reply job will be retried` with the error class and the delay instead when the job is retried;
 WARNING `autopilot notice was not sent` with the class name. Logger `cyrano.services.autopilot`: INFO

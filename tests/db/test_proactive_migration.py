@@ -67,18 +67,18 @@ async def test_revision_0013_adds_the_column_and_lets_the_check_accept_proactive
     assert "'proactive'" in await _source_check(database_url)
 
 
-async def test_the_check_matches_the_sources_of_the_domain(migrated_url: URL) -> None:
-    definition = await _source_check(migrated_url)
+async def test_the_check_matches_the_sources_of_the_domain(fresh_migrated_url: URL) -> None:
+    definition = await _source_check(fresh_migrated_url)
 
     for source in OutboxSource:
         assert f"'{source.value}'" in definition
 
 
-async def test_the_check_still_refuses_an_unknown_source(migrated_url: URL) -> None:
-    await _contact(migrated_url)
+async def test_the_check_still_refuses_an_unknown_source(fresh_migrated_url: URL) -> None:
+    await _contact(fresh_migrated_url)
 
     with pytest.raises(DBAPIError, match=SOURCE_CHECK):
-        await _row(migrated_url, 1, "invented_source", "scheduled")
+        await _row(fresh_migrated_url, 1, "invented_source", "scheduled")
 
 
 async def test_the_downgrade_cancels_waiting_proactive_rows_and_keeps_every_row(

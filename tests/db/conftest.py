@@ -1,8 +1,13 @@
 from __future__ import annotations
 
 import asyncio
-from collections.abc import AsyncIterator
+import os
+import time
+from collections.abc import AsyncIterator, Callable
+from contextlib import asynccontextmanager
+from dataclasses import dataclass
 from pathlib import Path
+from typing import Protocol
 from uuid import uuid4
 
 import pytest
@@ -26,11 +31,22 @@ from cyrano.db.repositories import (
     SqlStyleExampleRepository,
 )
 from cyrano.db.session import SessionFactory, build_engine, build_session_factory
+from tests.conftest import OPTIONAL_ENV, REQUIRED_ENV
+from tests.db.template import (
+    UNUSED_POLL_ATTEMPTS,
+    UNUSED_POLL_SECONDS,
+    WORKER_ENV,
+    clone_name,
+    preserved_loggers,
+    stale_templates,
+    template_name,
+)
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 ENV_FILE = REPO_ROOT / ".env"
 ALEMBIC_INI = REPO_ROOT / "alembic.ini"
 CONNECT_TIMEOUT_SECONDS = 5
+HEAD_REVISION = "head"
 MISSING_URL_HINT = (
     "TEST_DATABASE_URL is not set: database tests need a real PostgreSQL. "
     "Set it as described in the Testing section of README.md "
@@ -40,6 +56,17 @@ UNREACHABLE_HINT = (
     "Cannot create a test database through TEST_DATABASE_URL ({error}). "
     "Is PostgreSQL running? Start it with `make db-up`."
 )
+TEMPLATE_BUSY_HINT = "The template database {name} still has open connections after migrating."
+
+
+class FinalizerRegistry(Protocol):
+    def addfinalizer(self, finalizer: Callable[[], object]) -> None: ...
+
+
+@dataclass(frozen=True)
+class TemplateDatabase:
+    admin_url: URL
+    name: str
 
 
 class DatabaseTestSettings(BaseSettings):
@@ -70,9 +97,12 @@ async def _execute_as_admin(admin_url: URL, statement: str) -> None:
         await engine.dispose()
 
 
-async def create_database(admin_url: URL, name: str) -> None:
+async def create_database(admin_url: URL, name: str, template: str | None = None) -> None:
+    statement = f'CREATE DATABASE "{name}"'
+    if template is not None:
+        statement += f' TEMPLATE "{template}"'
     try:
-        await _execute_as_admin(admin_url, f'CREATE DATABASE "{name}"')
+        await _execute_as_admin(admin_url, statement)
     except Exception as exc:
         error = type(exc).__name__
     else:
@@ -82,6 +112,33 @@ async def create_database(admin_url: URL, name: str) -> None:
 
 async def drop_database(admin_url: URL, name: str) -> None:
     await _execute_as_admin(admin_url, f'DROP DATABASE IF EXISTS "{name}" WITH (FORCE)')
+
+
+async def list_database_names(admin_url: URL) -> list[str]:
+    rows = await fetch_all(admin_url, "SELECT datname FROM pg_database")
+    return [str(row[0]) for row in rows]
+
+
+async def drop_stale_templates(admin_url: URL, now: int) -> None:
+    for name in stale_templates(await list_database_names(admin_url), now):
+        await drop_database(admin_url, name)
+
+
+async def wait_until_unused(admin_url: URL, name: str) -> None:
+    for _ in range(UNUSED_POLL_ATTEMPTS):
+        [(connections,)] = await fetch_all(
+            admin_url,
+            "SELECT count(*) FROM pg_stat_activity WHERE datname = :name",
+            {"name": name},
+        )
+        if connections == 0:
+            return
+        await asyncio.sleep(UNUSED_POLL_SECONDS)
+    pytest.fail(TEMPLATE_BUSY_HINT.format(name=name), pytrace=False)
+
+
+def migrate_to_head(config: Config) -> None:
+    command.upgrade(config, HEAD_REVISION)
 
 
 async def fetch_all(
@@ -125,9 +182,51 @@ async def database_url(
         await drop_database(admin_url, name)
 
 
+def build_template(request: FinalizerRegistry, now: int) -> TemplateDatabase:
+    admin_url = read_admin_url()
+    asyncio.run(drop_stale_templates(admin_url, now))
+    name = template_name(now, os.getpid(), os.environ.get(WORKER_ENV))
+    asyncio.run(create_database(admin_url, name))
+    request.addfinalizer(lambda: asyncio.run(drop_database(admin_url, name)))
+    url = admin_url.set(database=name)
+    with pytest.MonkeyPatch.context() as patch, preserved_loggers():
+        for variable in OPTIONAL_ENV:
+            patch.delenv(variable, raising=False)
+        for variable, value in REQUIRED_ENV.items():
+            patch.setenv(variable, value)
+        patch.setenv("DATABASE_URL", url.render_as_string(hide_password=False))
+        migrate_to_head(Config(ALEMBIC_INI))
+    asyncio.run(wait_until_unused(admin_url, name))
+    return TemplateDatabase(admin_url=admin_url, name=name)
+
+
+@pytest.fixture(scope="session")
+def template_database(request: pytest.FixtureRequest) -> TemplateDatabase:
+    return build_template(request, int(time.time()))
+
+
+@asynccontextmanager
+async def cloned_database(template: TemplateDatabase) -> AsyncIterator[URL]:
+    name = clone_name(int(time.time()), os.getpid(), os.environ.get(WORKER_ENV))
+    await create_database(template.admin_url, name, template=template.name)
+    try:
+        yield template.admin_url.set(database=name)
+    finally:
+        await drop_database(template.admin_url, name)
+
+
 @pytest.fixture
-async def migrated_url(database_url: URL, alembic_config: Config) -> URL:
-    await asyncio.to_thread(command.upgrade, alembic_config, "head")
+async def migrated_url(
+    template_database: TemplateDatabase, full_env: dict[str, str], monkeypatch: pytest.MonkeyPatch
+) -> AsyncIterator[URL]:
+    async with cloned_database(template_database) as url:
+        monkeypatch.setenv("DATABASE_URL", url.render_as_string(hide_password=False))
+        yield url
+
+
+@pytest.fixture
+async def fresh_migrated_url(database_url: URL, alembic_config: Config) -> URL:
+    await asyncio.to_thread(migrate_to_head, alembic_config)
     return database_url
 
 

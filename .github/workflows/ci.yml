@@ -12,11 +12,31 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  check:
+  static:
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v10.3.3
+        with:
+          enable-cache: true
+          cache-dependency-glob: uv.lock
+
+      - name: Install Python
+        run: uv python install "$(cat .python-version)"
+
+      - name: Install dependencies
+        run: make install
+
+      - name: Lint, format check, type check
+        run: make check
+
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
     services:
-      # Same tag as docker-compose.yml: database tests run against real PostgreSQL.
       postgres:
         image: postgres:16.15-alpine
         env:
@@ -39,22 +59,18 @@ jobs:
           enable-cache: true
           cache-dependency-glob: uv.lock
 
-      # Explicit, not implicit: the interpreter version comes from .python-version.
       - name: Install Python
         run: uv python install "$(cat .python-version)"
 
       - name: Install dependencies
         run: make install
 
-      - name: Lint, format check, type check
-        run: make check
-
       - name: Tests
         run: make test
         env:
           TEST_DATABASE_URL: postgresql+asyncpg://cyrano:change-me@127.0.0.1:5432/postgres
+          PYTEST_ADDOPTS: --durations=25
 
-  # Validates the Docker setup only: no push, no registry, no long-running service is started.
   docker:
     runs-on: ubuntu-latest
     timeout-minutes: 15

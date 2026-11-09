@@ -1,7 +1,5 @@
 from tests.db.conftest import (
-    alembic_config,
     contacts,
-    database_url,
     messages,
     migrated_url,
     modes,
@@ -11,15 +9,14 @@ from tests.db.conftest import (
     sender_state,
     session_factory,
     style_examples,
+    template_database,
 )
 from tests.reply_db import repos
 from tests.services.autopilot_rig import rig
 from tests.services.proactive_rig import prig
 
 __all__ = [
-    "alembic_config",
     "contacts",
-    "database_url",
     "messages",
     "migrated_url",
     "modes",
@@ -32,4 +29,5 @@ __all__ = [
     "sender_state",
     "session_factory",
     "style_examples",
+    "template_database",
 ]

@@ -344,11 +344,11 @@ async def test_revision_0012_adds_gender_and_downgrades_to_0011_keeping_the_rows
 
 
 async def test_the_gender_check_accepts_female_male_and_null_and_nothing_else(
-    migrated_url: URL,
+    fresh_migrated_url: URL,
 ) -> None:
     for number, value in enumerate(("'female'", "'male'", "NULL")):
         await execute(
-            migrated_url,
+            fresh_migrated_url,
             "INSERT INTO contacts (tg_id, status, gender) "  # noqa: S608
             f"VALUES ({FAKE_TELEGRAM_ID + number}, 'new', {value})",
         )
@@ -356,7 +356,7 @@ async def test_the_gender_check_accepts_female_male_and_null_and_nothing_else(
     for bad in ("'other'", "'Female'", "''", "'unknown'"):
         with pytest.raises(DBAPIError, match="ck_contacts_gender_allowed"):
             await execute(
-                migrated_url,
+                fresh_migrated_url,
                 "INSERT INTO contacts (tg_id, status, gender) "  # noqa: S608
                 f"VALUES ({FAKE_TELEGRAM_ID + 10}, 'new', {bad})",
             )
@@ -411,16 +411,16 @@ async def test_revision_0010_adds_follows_id_and_downgrades_to_0009_keeping_the_
     assert await _follows_id_columns(database_url) == [("YES", "bigint")]
 
 
-async def test_follows_id_refuses_a_row_that_does_not_exist(migrated_url: URL) -> None:
+async def test_follows_id_refuses_a_row_that_does_not_exist(fresh_migrated_url: URL) -> None:
     await execute(
-        migrated_url,
+        fresh_migrated_url,
         "INSERT INTO contacts (tg_id, status) "  # noqa: S608
         f"VALUES ({FAKE_TELEGRAM_ID}, 'active')",
     )
 
     with pytest.raises(DBAPIError):
         await execute(
-            migrated_url,
+            fresh_migrated_url,
             "INSERT INTO scheduled_messages "
             "(contact_id, text, source, send_at, due_at, follows_id) "
             "SELECT id, 'invented part', 'autopilot', now(), now(), 987654 FROM contacts",
@@ -468,23 +468,23 @@ async def test_revision_0009_adds_reply_after_and_the_seeded_state_and_downgrade
 
 
 async def test_the_autopilot_state_row_is_seeded_once_and_idempotently(
-    migrated_url: URL, alembic_config: Config
+    fresh_migrated_url: URL, alembic_config: Config
 ) -> None:
     revision = ScriptDirectory.from_config(alembic_config).get_revision("0009")
     assert revision is not None
     seed: str = revision.module.SEED_AUTOPILOT_STATE
 
-    await execute(migrated_url, seed)
-    await execute(migrated_url, seed)
+    await execute(fresh_migrated_url, seed)
+    await execute(fresh_migrated_url, seed)
 
-    assert await _autopilot_state_rows(migrated_url) == [(1, False, None, None, None)]
+    assert await _autopilot_state_rows(fresh_migrated_url) == [(1, False, None, None, None)]
 
 
 async def test_the_single_row_check_refuses_a_second_autopilot_state_row(
-    migrated_url: URL,
+    fresh_migrated_url: URL,
 ) -> None:
     with pytest.raises(DBAPIError, match="ck_autopilot_state_single_row"):
-        await execute(migrated_url, "INSERT INTO autopilot_state (id) VALUES (2)")
+        await execute(fresh_migrated_url, "INSERT INTO autopilot_state (id) VALUES (2)")
 
 
 async def _check_definition(url: URL) -> str:
@@ -558,8 +558,8 @@ async def test_revision_0008_downgrade_turns_stop_trigger_into_owner_and_restore
     assert "stop_trigger" in await _check_definition(database_url)
 
 
-async def test_the_check_matches_the_pause_reasons_of_the_domain(migrated_url: URL) -> None:
-    definition = await _check_definition(migrated_url)
+async def test_the_check_matches_the_pause_reasons_of_the_domain(fresh_migrated_url: URL) -> None:
+    definition = await _check_definition(fresh_migrated_url)
 
     for reason in PauseReason:
         assert f"'{reason.value}'" in definition
@@ -608,40 +608,40 @@ async def test_revision_0007_downgrades_to_0006_and_upgrades_again(
 
 @pytest.mark.parametrize("reason", [reason.value for reason in PauseReason])
 async def test_the_check_accepts_every_pause_reason_and_null(
-    migrated_url: URL, reason: str
+    fresh_migrated_url: URL, reason: str
 ) -> None:
     await execute(
-        migrated_url,
+        fresh_migrated_url,
         "INSERT INTO contacts (tg_id, status, pause_reason) "  # noqa: S608
         f"VALUES ({FAKE_TELEGRAM_ID}, 'paused', '{reason}')",
     )
     await execute(
-        migrated_url,
+        fresh_migrated_url,
         f"INSERT INTO contacts (tg_id) VALUES ({FAKE_TELEGRAM_ID + 1})",  # noqa: S608
     )
 
 
-async def test_the_check_refuses_an_unknown_pause_reason(migrated_url: URL) -> None:
+async def test_the_check_refuses_an_unknown_pause_reason(fresh_migrated_url: URL) -> None:
     with pytest.raises(DBAPIError, match="ck_contacts_pause_reason_allowed"):
         await execute(
-            migrated_url,
+            fresh_migrated_url,
             "INSERT INTO contacts (tg_id, status, pause_reason) "  # noqa: S608
             f"VALUES ({FAKE_TELEGRAM_ID}, 'paused', 'not_a_reason')",
         )
 
 
 async def test_the_single_row_check_refuses_a_second_schedule_profile_row(
-    migrated_url: URL,
+    fresh_migrated_url: URL,
 ) -> None:
     with pytest.raises(DBAPIError, match="ck_schedule_profile_single_row"):
         await execute(
-            migrated_url, "INSERT INTO schedule_profile (id, data) VALUES (2, '{}'::jsonb)"
+            fresh_migrated_url, "INSERT INTO schedule_profile (id, data) VALUES (2, '{}'::jsonb)"
         )
 
 
-async def test_the_schedule_profile_data_is_jsonb_and_not_null(migrated_url: URL) -> None:
+async def test_the_schedule_profile_data_is_jsonb_and_not_null(fresh_migrated_url: URL) -> None:
     rows = await fetch_all(
-        migrated_url,
+        fresh_migrated_url,
         "SELECT data_type, is_nullable FROM information_schema.columns "
         "WHERE table_name = 'schedule_profile' AND column_name = 'data'",
     )
@@ -746,21 +746,23 @@ async def _sender_state_rows(url: URL) -> list[tuple[object, ...]]:
 
 
 async def test_the_sender_state_row_is_seeded_once_and_idempotently(
-    migrated_url: URL, alembic_config: Config
+    fresh_migrated_url: URL, alembic_config: Config
 ) -> None:
     revision = ScriptDirectory.from_config(alembic_config).get_revision("0004")
     assert revision is not None
     seed: str = revision.module.SEED_SENDER_STATE
 
-    await execute(migrated_url, seed)
-    await execute(migrated_url, seed)
+    await execute(fresh_migrated_url, seed)
+    await execute(fresh_migrated_url, seed)
 
-    assert await _sender_state_rows(migrated_url) == [(1, None, None, False, None)]
+    assert await _sender_state_rows(fresh_migrated_url) == [(1, None, None, False, None)]
 
 
-async def test_the_single_row_check_refuses_a_second_sender_state_row(migrated_url: URL) -> None:
+async def test_the_single_row_check_refuses_a_second_sender_state_row(
+    fresh_migrated_url: URL,
+) -> None:
     with pytest.raises(DBAPIError, match="ck_sender_state_single_row"):
-        await execute(migrated_url, "INSERT INTO sender_state (id) VALUES (2)")
+        await execute(fresh_migrated_url, "INSERT INTO sender_state (id) VALUES (2)")
 
 
 async def test_revision_0003_downgrades_to_0002_and_upgrades_again(
@@ -778,9 +780,11 @@ async def test_revision_0003_downgrades_to_0002_and_upgrades_again(
     assert await _tables(database_url) == TABLES
 
 
-async def test_the_outbox_unique_index_covers_only_rows_with_a_trigger(migrated_url: URL) -> None:
+async def test_the_outbox_unique_index_covers_only_rows_with_a_trigger(
+    fresh_migrated_url: URL,
+) -> None:
     rows = await fetch_all(
-        migrated_url,
+        fresh_migrated_url,
         "SELECT indexdef FROM pg_indexes WHERE indexname = :name",
         {"name": PARTIAL_UNIQUE_INDEX},
     )
@@ -791,9 +795,9 @@ async def test_the_outbox_unique_index_covers_only_rows_with_a_trigger(migrated_
     assert "WHERE (trigger_message_id IS NOT NULL)" in definition
 
 
-async def test_style_columns_have_the_expected_types(migrated_url: URL) -> None:
+async def test_style_columns_have_the_expected_types(fresh_migrated_url: URL) -> None:
     rows = await fetch_all(
-        migrated_url,
+        fresh_migrated_url,
         "SELECT table_name, column_name, data_type FROM information_schema.columns "
         "WHERE table_schema = 'public' AND table_name IN ('persona', 'style_examples')",
     )
@@ -806,32 +810,36 @@ async def test_style_columns_have_the_expected_types(migrated_url: URL) -> None:
     assert types[("persona", "updated_at")] == "timestamp with time zone"
 
 
-async def test_alembic_check_reports_no_drift(migrated_url: URL, alembic_config: Config) -> None:
+async def test_alembic_check_reports_no_drift(
+    fresh_migrated_url: URL, alembic_config: Config
+) -> None:
     await asyncio.to_thread(command.check, alembic_config)
 
 
-async def test_alembic_check_detects_drift(migrated_url: URL, alembic_config: Config) -> None:
-    await execute(migrated_url, "DROP INDEX ix_contacts_status")
+async def test_alembic_check_detects_drift(fresh_migrated_url: URL, alembic_config: Config) -> None:
+    await execute(fresh_migrated_url, "DROP INDEX ix_contacts_status")
 
     with pytest.raises(AutogenerateDiffsDetected):
         await asyncio.to_thread(command.check, alembic_config)
 
 
-async def test_enum_labels_match_the_domain(migrated_url: URL) -> None:
-    assert await _enum_labels(migrated_url, "contact_status") == [s.value for s in ContactStatus]
-    assert await _enum_labels(migrated_url, "message_direction") == [
+async def test_enum_labels_match_the_domain(fresh_migrated_url: URL) -> None:
+    assert await _enum_labels(fresh_migrated_url, "contact_status") == [
+        s.value for s in ContactStatus
+    ]
+    assert await _enum_labels(fresh_migrated_url, "message_direction") == [
         d.value for d in MessageDirection
     ]
 
 
-async def test_constraint_and_index_names_follow_the_convention(migrated_url: URL) -> None:
+async def test_constraint_and_index_names_follow_the_convention(fresh_migrated_url: URL) -> None:
     constraints = await fetch_all(
-        migrated_url,
+        fresh_migrated_url,
         "SELECT c.conname FROM pg_constraint c JOIN pg_namespace n ON n.oid = c.connamespace "
         "WHERE n.nspname = 'public' AND c.conname <> 'alembic_version_pkc'",
     )
     indexes = await fetch_all(
-        migrated_url,
+        fresh_migrated_url,
         "SELECT indexname FROM pg_indexes WHERE schemaname = 'public' AND indexname LIKE 'ix_%'",
     )
 
@@ -839,9 +847,9 @@ async def test_constraint_and_index_names_follow_the_convention(migrated_url: UR
     assert {row[0] for row in indexes} == EXPECTED_INDEXES
 
 
-async def test_every_timestamp_column_is_timestamptz(migrated_url: URL) -> None:
+async def test_every_timestamp_column_is_timestamptz(fresh_migrated_url: URL) -> None:
     rows = await fetch_all(
-        migrated_url,
+        fresh_migrated_url,
         "SELECT table_name, column_name, data_type FROM information_schema.columns "
         "WHERE table_schema = 'public' AND data_type LIKE 'timestamp%'",
     )
@@ -850,8 +858,10 @@ async def test_every_timestamp_column_is_timestamptz(migrated_url: URL) -> None:
     assert {row[2] for row in rows} == {"timestamp with time zone"}
 
 
-async def test_default_mode_is_seeded_once_with_an_empty_examples_list(migrated_url: URL) -> None:
-    rows = await _default_mode_rows(migrated_url)
+async def test_default_mode_is_seeded_once_with_an_empty_examples_list(
+    fresh_migrated_url: URL,
+) -> None:
+    rows = await _default_mode_rows(fresh_migrated_url)
 
     assert len(rows) == 1
     name, prompt_fragment, few_shot_examples, enabled = rows[0]
@@ -861,15 +871,15 @@ async def test_default_mode_is_seeded_once_with_an_empty_examples_list(migrated_
     assert enabled is True
 
 
-async def test_seed_is_idempotent(migrated_url: URL, alembic_config: Config) -> None:
+async def test_seed_is_idempotent(fresh_migrated_url: URL, alembic_config: Config) -> None:
     first = ScriptDirectory.from_config(alembic_config).get_revision("0001")
     assert first is not None
     seed: str = first.module.SEED_DEFAULT_MODE
 
-    await execute(migrated_url, seed)
-    await execute(migrated_url, seed)
+    await execute(fresh_migrated_url, seed)
+    await execute(fresh_migrated_url, seed)
 
-    assert len(await _default_mode_rows(migrated_url)) == 1
+    assert len(await _default_mode_rows(fresh_migrated_url)) == 1
 
 
 def test_offline_upgrade_prints_sql_without_secrets_or_log_lines(full_env: dict[str, str]) -> None:

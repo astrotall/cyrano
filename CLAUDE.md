@@ -413,6 +413,10 @@ one shared resolution step in `TelethonAdapter` for `send_text`, `show_typing` a
 one refresh per `ENTITY_REFRESH_MIN_INTERVAL_SECONDS`, a deadline, a failed refresh never a send failure) before it
 reports `PeerNotFound`, `Userbot.warm_up_entities` started once by `main.run` after the catch-up and cancelled first on
 shutdown, `tests/userbot/test_entity_refresh.py`, and the new scans in `tests/test_one_sender.py`.
+CYR-56 brought the CI run time down: the database tests clone a per-session template database that Alembic
+migrated once (`tests/db/template.py`, the `template_database` fixture and `cloned_database` in `tests/db/conftest.py`,
+`tests/db/test_template_database.py`, `tests/db/test_template_usage.py`); only the two migration test modules keep their
+own empty database and run Alembic; the CI workflow runs `static` and `test` as two parallel jobs.
 
 ## Detailed guides
 

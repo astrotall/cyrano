@@ -129,6 +129,7 @@ class ReplyGenerator:
             messages_offered=prompt.messages_offered,
             messages_kept=prompt.messages_kept,
             prompt_characters=prompt.characters,
+            message_refs=prompt.message_refs,
         )
 
     async def _resolve_mode(self, mode_id: int | None, mode_name: str | None) -> Mode:

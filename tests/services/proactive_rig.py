@@ -47,10 +47,12 @@ class ProactiveRig:
             clock=self.rig.clock,
         )
 
-    def policy(self, client: LLMClient, *, budget: int = 1_000_000) -> GenerationPolicy:
+    def policy(
+        self, client: LLMClient, *, budget: int = 1_000_000, quote_enabled: bool = False
+    ) -> GenerationPolicy:
         return GenerationPolicy(
             state=self.rig.state,
-            generator=self.rig.generator(client, budget=budget),
+            generator=self.rig.generator(client, budget=budget, quote_enabled=quote_enabled),
             hand_over=self.rig.hand_over(),
             notifier=self.rig.notifier,
             notices=AUTOPILOT_NOTICES,
@@ -65,12 +67,13 @@ class ProactiveRig:
         budget: int = 1_000_000,
         schedule: ScheduleService | None = None,
         seed: int = PROACTIVE_SEED,
+        quote_enabled: bool = False,
     ) -> ProactiveJobRunner:
         return ProactiveJobRunner(
             eligibility=self.eligibility(),
             proactive=self.proactive,
             outbox=self.rig.outbox,
-            policy=self.policy(client, budget=budget),
+            policy=self.policy(client, budget=budget, quote_enabled=quote_enabled),
             schedule=schedule if schedule is not None else self.rig.schedule,
             enqueuer=OutboxService(
                 self.rig.contacts, self.rig.outbox, SendGuard(self.rig.guard_switch)

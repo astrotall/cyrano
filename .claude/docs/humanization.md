@@ -42,6 +42,7 @@ refused. Errors give the JSON path and the rule, never a value and never the unk
 | `early_read_seconds` | `[0, 1]` | `[lo, hi]`, integers, 0 to 30 (`MAX_EARLY_READ_SECONDS`), `lo <= hi`; `[0, 0]` means strictly immediate. The delay of the early read mark, drawn uniformly (a float) from the range with the injected generator (CYR-44). A profile stored before the field existed reads with the default; no migration |
 | `wrapup_soft_minutes` | `60` | Integer, 5 to 240. How long before the next night or busy window the conversation is steered to an end ([wrapping up](#wrapping-up-before-a-window), CYR-23). A profile stored before the field existed reads with the default |
 | `wrapup_hard_minutes` | `20` | Integer, 1 to `wrapup_soft_minutes` (the error names only the path `wrapup_hard_minutes`). The last minutes before the window, in which the reply says goodnight or that the owner has to go |
+| `quote_late_seconds` | `300` | Integer, 0 to 86400 (`MAX_QUOTE_LATE_SECONDS`); `0` switches the late-answer rule off. How late the first part of a reply may go out before it quotes the message it answers ([the late-answer rule](#the-late-answer-rule), CYR-48). A profile stored before the field existed reads with the default; no migration. `schedule show` prints `quote late: 300 s` |
 | `proactive_window` | `["10:00", "22:00"]` | `[start, end]`, `HH:MM`, start strictly before end on one day (`PROACTIVE_WINDOW_RULE`, the error names only the path). When a proactive message may go out, local time, half-open: the start is inside, the end is not (CYR-23, [proactive.md](proactive.md)). A profile stored before the field existed reads with the default; no migration |
 
 A sample with invented values: `examples/schedule.sample.json`. The worked examples below use it.
@@ -110,6 +111,28 @@ short reaction.
 
 `ScheduleService` gives the rest of the code `get_profile()` (stored or default, with the time zone
 filled in) and `blocked_until(now)`.
+
+### The late-answer rule
+
+CYR-48. A person who answers long after a message quotes it, so the answer is tied to it. After the reply
+job has the plan, `with_late_target` (`services/reply_quotes.py`, pure) gives the **first** part the
+effective trigger message as its Telegram reply target when all of these hold:
+
+- `REPLY_QUOTE_ENABLED` is on and the profile's `quote_late_seconds` is above 0 (read through
+  `HumanizationPlanner.quote_late_seconds()` only then);
+- no part already has a target from the model's marker (a reply never gets a second target);
+- the trigger is an incoming message of this contact (checked again in the function);
+- the planned `send_at` of the first part minus the trigger's `created_at` is **at least**
+  `quote_late_seconds`: exactly the threshold counts, one second less does not.
+
+The effective trigger is the message the row answers: the trigger of the job, or the newest message a burst
+adopted after the maximum wait ([autopilot.md](autopilot.md#the-maximum-wait)). The planned time is used,
+not the actual send; a row that is moved later by a flood wait, a limit or a window keeps the decision made
+when it was written. The wrap-up path (a wrap-up context exists, either phase), the proactive job (its rows
+have no incoming trigger) and the owner's test rows never use the rule. Example: the message came at
+14:00:00, the reaction is 40 s and the night pushed the reply to 09:07 the next morning: the reply quotes
+the message; with the default 300 s, a reply planned for 14:04:59 does not, and one planned for 14:05:00
+does.
 
 ### Proactive messages
 

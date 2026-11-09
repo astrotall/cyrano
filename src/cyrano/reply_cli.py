@@ -18,13 +18,13 @@ from cyrano.domain.errors import (
     PromptTooLarge,
     ReplyInvalid,
 )
-from cyrano.domain.reply import BuiltPrompt
+from cyrano.domain.reply import BuiltPrompt, MessageRef, ReplyPart
 from cyrano.domain.schedule import UnavailableSoon
 from cyrano.services.gender import GenderResolver
 from cyrano.services.humanization import ScheduleService
 from cyrano.services.prompt_builder import wrapup_reason_text
 from cyrano.services.reply_generator import ReplyGenerator
-from cyrano.services.reply_split import split_reply
+from cyrano.services.reply_quotes import quote_label, split_reply_with_targets
 from cyrano.services.repositories import ContactRepository
 
 REPLY_PREVIEW_COMMAND = "reply-preview"
@@ -40,6 +40,7 @@ WRAPUP_PREVIEW_LINE = "wrap-up: {phase}, {minutes} min, {reason}"
 AT_FORMAT = "%Y-%m-%d %H:%M"
 BAD_AT_LINE = 'reply-preview failed: bad --at, use "YYYY-MM-DD HH:MM"'
 PART_LINE = "[{number}/{total}] {text}"
+QUOTED_PART_LINE = "[{number}/{total} {quote}] {text}"
 GENDER_LINE = "gender: {gender} ({source})"
 STATS_LINE = (
     "model={model} input_tokens={input_tokens} output_tokens={output_tokens} "
@@ -108,18 +109,32 @@ def _print_prompt(prompt: BuiltPrompt) -> None:
         print(message.content)
 
 
-def _reply_lines(text: str, *, needs_owner: bool, skipped: bool = False) -> list[str]:
+def _part_line(number: int, total: int, part: ReplyPart) -> str:
+    if part.quote_number is None:
+        return PART_LINE.format(number=number, total=total, text=part.text)
+    return QUOTED_PART_LINE.format(
+        number=number, total=total, quote=quote_label(part.quote_number), text=part.text
+    )
+
+
+def _reply_lines(
+    text: str,
+    refs: dict[int, MessageRef],
+    *,
+    needs_owner: bool,
+    skipped: bool = False,
+) -> list[str]:
     if needs_owner:
         return [NEEDS_OWNER_LINE]
     if skipped:
         return [SKIP_LINE]
-    parts = split_reply(text)
-    if len(parts) <= 1:
+    parts = split_reply_with_targets(text, refs)
+    quoted = any(part.quote_number is not None for part in parts)
+    if not parts:
         return [text]
-    return [
-        PART_LINE.format(number=number, total=len(parts), text=part)
-        for number, part in enumerate(parts, start=1)
-    ]
+    if len(parts) == 1 and not quoted:
+        return [parts[0].text]
+    return [_part_line(number, len(parts), part) for number, part in enumerate(parts, start=1)]
 
 
 class PreviewClock:
@@ -191,7 +206,9 @@ class ReplyPreviewCommand:
         except DomainError as exc:
             print(_failure_line(exc), file=sys.stderr)
             return EXIT_ERROR
-        for line in _reply_lines(reply.text, needs_owner=reply.needs_owner, skipped=reply.skipped):
+        for line in _reply_lines(
+            reply.text, reply.message_refs, needs_owner=reply.needs_owner, skipped=reply.skipped
+        ):
             print(line)
         print(gender_line)
         if wrapup is not None:

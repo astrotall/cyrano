@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from pydantic import BaseModel, ConfigDict, Field
 
-from cyrano.domain.enums import ContactGender, ReplyPurpose
+from cyrano.domain.enums import ContactGender, MessageDirection, ReplyPurpose
 from cyrano.domain.llm import LLMMessage, LLMUsage
 
 MIN_HISTORY_MESSAGES = 4
@@ -32,6 +32,17 @@ class ContactFacts(_Frozen):
     gender: ContactGender | None = None
 
 
+class MessageRef(_Frozen):
+    tg_message_id: int = Field(repr=False)
+    direction: MessageDirection
+
+
+class ReplyPart(_Frozen):
+    text: str = Field(repr=False)
+    quote_number: int | None = None
+    reply_to_tg_message_id: int | None = Field(default=None, repr=False)
+
+
 class BuiltPrompt(_Frozen):
     messages: tuple[LLMMessage, ...]
     examples_offered: int = Field(ge=0)
@@ -41,6 +52,7 @@ class BuiltPrompt(_Frozen):
     characters: int = Field(ge=0)
     purpose: ReplyPurpose = ReplyPurpose.REPLY
     wrap_up: bool = False
+    message_refs: dict[int, MessageRef] = Field(default_factory=dict, repr=False)
 
 
 class GeneratedReply(_Frozen):
@@ -54,3 +66,4 @@ class GeneratedReply(_Frozen):
     messages_offered: int = Field(ge=0)
     messages_kept: int = Field(ge=0)
     prompt_characters: int = Field(ge=0)
+    message_refs: dict[int, MessageRef] = Field(default_factory=dict, repr=False)

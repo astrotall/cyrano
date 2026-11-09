@@ -317,6 +317,25 @@ async def test_show_prints_the_default_wrapup_minutes(
     assert "wrap-up: soft 60 min, hard 20 min" in capsys.readouterr().out.splitlines()
 
 
+async def test_show_prints_the_default_quote_late_seconds(
+    commands: ScheduleCommands, capsys: pytest.CaptureFixture[str]
+) -> None:
+    assert await commands.run(ScheduleRequest(action="show")) == 0
+
+    assert "quote late: 300 s" in capsys.readouterr().out.splitlines()
+
+
+async def test_show_prints_a_stored_quote_late_value(
+    commands: ScheduleCommands, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    await commands.run(_import(_file(tmp_path, {**VALID, "quote_late_seconds": 0})))
+    capsys.readouterr()
+
+    assert await commands.run(ScheduleRequest(action="show")) == 0
+
+    assert "quote late: 0 s" in capsys.readouterr().out.splitlines()
+
+
 async def test_show_prints_the_default_proactive_window(
     commands: ScheduleCommands, capsys: pytest.CaptureFixture[str]
 ) -> None:

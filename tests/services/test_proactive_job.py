@@ -106,6 +106,19 @@ async def test_a_normal_run_writes_one_proactive_chain_inside_the_window(
     assert client.calls == 1
 
 
+async def test_a_proactive_row_never_carries_a_reply_target(prig: ProactiveRig) -> None:
+    contact, last = await prig.silent_contact()
+    client = _Watching(llm_result(f"↩1 {FOLLOW_UP_TEXT_ZQ}"))
+
+    await prig.runner(client, quote_enabled=True).run(contact.id, last.id)
+
+    rows = await prig.rig.outbox.list_rows(None, 10)
+    assert [row.reply_to_tg_message_id for row in rows] == [None]
+    system, user = client.seen
+    assert "#1 " not in user
+    assert "The messages of the dialogue are numbered." not in system
+
+
 async def test_the_model_receives_the_proactive_prompt(prig: ProactiveRig) -> None:
     contact, last = await prig.silent_contact()
     client = _Watching(llm_result(FOLLOW_UP_TEXT_ZQ))

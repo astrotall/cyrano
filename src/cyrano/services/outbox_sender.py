@@ -26,6 +26,7 @@ from cyrano.domain.errors import (
     SendFailure,
     SendFloodWait,
     SendRejected,
+    SendReplyTargetGone,
 )
 from cyrano.domain.models import Contact
 from cyrano.domain.outbox import (
@@ -191,6 +192,7 @@ class OutboxSender:
         self._stale_contact_ids: list[int] = []
         self._stale_notified_at: datetime | None = None
         self._stop_noticed_at: datetime | None = None
+        self._reply_target_fallbacks = 0
 
     async def run(self) -> None:
         await self._step(self.sweep_interrupted)
@@ -320,9 +322,19 @@ class OutboxSender:
             return
         deadline = asyncio.timeout(self._timings.send_deadline)
         started = self._clock()
+        reply_to = row.reply_to_tg_message_id
         try:
             async with deadline:
-                sent = await self._transport.send_text(contact.tg_id, row.text)
+                while True:
+                    try:
+                        sent = await self._transport.send_text(contact.tg_id, row.text, reply_to)
+                    except SendReplyTargetGone:
+                        if reply_to is None:
+                            raise
+                        reply_to = None
+                        self._log_reply_target_fallback(row)
+                        continue
+                    break
         except SendFailure as exc:
             self._log_step(row, SendStep.SEND, StepOutcome.FAILED, started, error=exc)
             await self._handle_failure(row, exc)
@@ -343,6 +355,17 @@ class OutboxSender:
         logger.info("outbox row sent", extra={"row_id": row.id, "contact_id": row.contact_id})
         pause = self._rng.uniform(*profile.split_pause_seconds)
         await self._outbox.schedule_followers(row.id, self._clock() + timedelta(seconds=pause))
+
+    def _log_reply_target_fallback(self, row: ScheduledMessage) -> None:
+        self._reply_target_fallbacks += 1
+        logger.info(
+            "outbox row resent without its reply target",
+            extra={
+                "row_id": row.id,
+                "contact_id": row.contact_id,
+                "fallbacks": self._reply_target_fallbacks,
+            },
+        )
 
     async def _is_superseded(self, row: ScheduledMessage) -> bool:
         if row.source not in AUTOMATIC_SOURCES or row.follows_id is not None:

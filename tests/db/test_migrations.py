@@ -279,13 +279,19 @@ async def test_revision_0013_follows_0012(alembic_config: Config) -> None:
     assert revision.down_revision == "0012"
 
 
-async def test_revision_0014_is_the_head_and_follows_0013(alembic_config: Config) -> None:
-    script = ScriptDirectory.from_config(alembic_config)
-
-    assert script.get_heads() == ["0014"]
-    revision = script.get_revision("0014")
+async def test_revision_0014_follows_0013(alembic_config: Config) -> None:
+    revision = ScriptDirectory.from_config(alembic_config).get_revision("0014")
     assert revision is not None
     assert revision.down_revision == "0013"
+
+
+async def test_revision_0015_is_the_head_and_follows_0014(alembic_config: Config) -> None:
+    script = ScriptDirectory.from_config(alembic_config)
+
+    assert script.get_heads() == ["0015"]
+    revision = script.get_revision("0015")
+    assert revision is not None
+    assert revision.down_revision == "0014"
 
 
 async def _media_kind_columns(url: URL) -> list[tuple[object, ...]]:
@@ -996,3 +1002,49 @@ def test_alembic_without_configuration_exits_with_the_readable_error(
 
     with pytest.raises(SystemExit, match="Missing required environment variables"):
         command.upgrade(alembic_config, "head")
+
+
+async def _reply_target_columns(url: URL) -> list[tuple[object, ...]]:
+    return await fetch_all(
+        url,
+        "SELECT is_nullable, data_type FROM information_schema.columns "
+        "WHERE table_name = 'scheduled_messages' AND column_name = 'reply_to_tg_message_id'",
+    )
+
+
+async def test_revision_0015_adds_the_reply_target_and_downgrades_to_0014_keeping_the_rows(
+    database_url: URL, alembic_config: Config
+) -> None:
+    await asyncio.to_thread(command.upgrade, alembic_config, "0014")
+    await execute(
+        database_url,
+        "INSERT INTO contacts (id, tg_id, status) "  # noqa: S608
+        f"VALUES (1, {FAKE_TELEGRAM_ID}, 'active')",
+    )
+    await execute(
+        database_url,
+        "INSERT INTO scheduled_messages "
+        "(id, contact_id, trigger_message_id, text, source, send_at, due_at, state) "
+        "VALUES (1, 1, 1, 'invented quoted text', 'autopilot', "
+        "'2026-11-04 12:00:00+00', '2026-11-04 12:00:00+00', 'scheduled')",
+    )
+
+    await asyncio.to_thread(command.upgrade, alembic_config, "0015")
+    assert await _reply_target_columns(database_url) == [("YES", "bigint")]
+    assert await fetch_all(
+        database_url, "SELECT reply_to_tg_message_id FROM scheduled_messages"
+    ) == [(None,)]
+    await execute(
+        database_url, "UPDATE scheduled_messages SET reply_to_tg_message_id = 9223372036854775807"
+    )
+
+    await asyncio.to_thread(command.downgrade, alembic_config, "0014")
+    assert await _reply_target_columns(database_url) == []
+    assert await fetch_all(database_url, "SELECT text FROM scheduled_messages") == [
+        ("invented quoted text",)
+    ]
+
+    await asyncio.to_thread(command.upgrade, alembic_config, "head")
+    assert await fetch_all(
+        database_url, "SELECT reply_to_tg_message_id FROM scheduled_messages"
+    ) == [(None,)]

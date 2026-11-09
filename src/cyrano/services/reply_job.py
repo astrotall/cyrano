@@ -52,7 +52,7 @@ from cyrano.services.outbox_sender import OWNER_NOTIFY_DEADLINE
 from cyrano.services.outbox_service import OutboxService
 from cyrano.services.owner_notifier import OwnerNotifier
 from cyrano.services.reply_generator import ReplyGenerator
-from cyrano.services.reply_split import split_reply
+from cyrano.services.reply_quotes import split_reply_with_targets, with_late_target
 from cyrano.services.repositories import (
     AutopilotStateRepository,
     ContactRepository,
@@ -268,9 +268,11 @@ class ReplyJobRunner:
         clock: Callable[[], datetime],
         notify_deadline: float = OWNER_NOTIFY_DEADLINE,
         wrapup_enabled: bool = False,
+        quote_enabled: bool = False,
     ) -> None:
         self._contacts = contacts
         self._wrapup_enabled = wrapup_enabled
+        self._quote_enabled = quote_enabled
         self._messages = messages
         self._outbox = outbox
         self._state = state
@@ -310,6 +312,7 @@ class ReplyJobRunner:
                 "detail": result.detail,
                 "row_id": result.row_id,
                 "parts": result.parts,
+                "quoted": result.quoted,
             },
         )
         return result
@@ -378,7 +381,7 @@ class ReplyJobRunner:
             await self._contacts.set_reply_after(contact_id, trigger.created_at)
             return _skip(ReplyJobReason.MODEL_SKIP)
         return await self._enqueue(
-            contact_id, trigger.id, generated, now, adopted=adopted, wrapup=wrapup
+            contact_id, trigger, generated, now, adopted=adopted, wrapup=wrapup
         )
 
     async def _wrapup(self, now: datetime) -> UnavailableSoon | None:
@@ -389,35 +392,41 @@ class ReplyJobRunner:
     async def _enqueue(
         self,
         contact_id: int,
-        trigger_id: int,
+        trigger: Message,
         reply: GeneratedReply,
         now: datetime,
         *,
         adopted: bool,
         wrapup: UnavailableSoon | None,
     ) -> ReplyJobResult:
-        parts = split_reply(reply.text)
+        refs = reply.message_refs if self._quote_enabled else {}
+        parts = split_reply_with_targets(reply.text, refs)
         try:
             plan = await self._planner.plan(
                 contact_id,
-                trigger_id,
+                trigger.id,
                 now,
                 ongoing=True if adopted else None,
                 wrapup=wrapup,
-                first_part=parts[0] if parts else "",
+                first_part=parts[0].text if parts else "",
             )
         except PlanNotPossible:
             return _skip(ReplyJobReason.PLAN_NOT_POSSIBLE)
+        if self._quote_enabled and wrapup is None:
+            parts = with_late_target(
+                parts, trigger, contact_id, plan.send_at, await self._planner.quote_late_seconds()
+            )
         await self._outbox.cancel_superseded_autopilot_rows(
-            contact_id, trigger_id, CANCEL_REASON_SUPERSEDED
+            contact_id, trigger.id, CANCEL_REASON_SUPERSEDED
         )
         try:
             rows = await self._enqueuer.enqueue_sequence(
                 contact_id,
-                parts,
+                [part.text for part in parts],
                 plan.send_at,
                 OutboxSource.AUTOPILOT,
-                trigger_id,
+                trigger.id,
+                reply_to=[part.reply_to_tg_message_id for part in parts],
             )
         except EnqueueRefused as exc:
             return _skip(ReplyJobReason.ENQUEUE_REFUSED, exc.reason)
@@ -427,4 +436,5 @@ class ReplyJobRunner:
             detail=plan.reason.value,
             row_id=rows[0].id,
             parts=len(rows),
+            quoted=any(row.reply_to_tg_message_id is not None for row in rows),
         )

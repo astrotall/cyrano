@@ -19,6 +19,8 @@ REFUSED_AUTOPILOT_DISABLED = "autopilot_disabled"
 REFUSED_PROACTIVE_DISABLED = "proactive_disabled"
 REFUSED_TEXT_EMPTY = "text_empty"
 REFUSED_TEXT_TOO_LONG = "text_too_long"
+REFUSED_REPLY_TARGET_INVALID = "reply_target_invalid"
+REFUSED_REPLY_TARGETS_MANY = "reply_targets_many"
 CANCEL_REASON_OWNER = "cancelled_by_owner"
 CANCEL_REASON_STALE = "stale"
 CANCEL_REASON_SEND_REJECTED = "send_rejected"
@@ -64,6 +66,7 @@ class ScheduledMessage(BaseModel):
     created_at: UtcDatetime
     updated_at: UtcDatetime
     follows_id: int | None = None
+    reply_to_tg_message_id: int | None = Field(default=None, repr=False)
 
 
 class SentMessage(BaseModel):

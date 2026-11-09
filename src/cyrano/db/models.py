@@ -231,6 +231,7 @@ class ScheduledMessageRow(Base):
     follows_id: Mapped[int | None] = mapped_column(
         BigInteger, ForeignKey("scheduled_messages.id"), index=True
     )
+    reply_to_tg_message_id: Mapped[int | None] = mapped_column(BigInteger)
 
 
 class SenderStateRow(Base):

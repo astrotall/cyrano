@@ -223,6 +223,7 @@ def test_every_setting_is_either_logged_or_deliberately_withheld() -> None:
         "autopilot_enabled",
         "early_read_enabled",
         "wrapup_enabled",
+        "reply_quote_enabled",
         "default_contact_gender",
         "autopilot_debounce_seconds",
         "autopilot_debounce_ongoing_seconds",
@@ -999,3 +1000,33 @@ def test_a_nonsense_wrapup_switch_is_readable_without_the_value(
 
     assert "WRAPUP_ENABLED" in str(raised.value)
     assert "wrapup-marker-zq" not in str(raised.value)
+
+
+def test_the_reply_quotes_are_on_by_default_and_stay_unlogged(full_env: dict[str, str]) -> None:
+    settings = load_settings(env_file=None)
+
+    assert settings.reply_quote_enabled is True
+    assert "reply_quote_enabled" not in LOGGED_SETTINGS
+    assert "reply_quote_enabled" not in settings.safe_summary()
+
+
+@pytest.mark.parametrize(("raw", "expected"), [("false", False), ("0", False), ("true", True)])
+def test_the_reply_quote_switch_reads_a_boolean(
+    full_env: dict[str, str], monkeypatch: pytest.MonkeyPatch, raw: str, expected: bool
+) -> None:
+    monkeypatch.setenv("REPLY_QUOTE_ENABLED", raw)
+
+    assert load_settings(env_file=None).reply_quote_enabled is expected
+
+
+def test_a_nonsense_reply_quote_switch_is_readable_without_the_value(
+    full_env: dict[str, str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("REPLY_QUOTE_ENABLED", "quote-marker-zq")
+
+    with pytest.raises(ConfigError) as raised:
+        load_settings(env_file=None)
+
+    assert "REPLY_QUOTE_ENABLED" in str(raised.value)
+    assert "quote-marker-zq" not in str(raised.value)
+    assert "Traceback" not in str(raised.value)

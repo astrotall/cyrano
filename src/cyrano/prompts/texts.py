@@ -100,6 +100,16 @@ PROACTIVE_INSTRUCTIONS = (
     "nothing else."
 )
 PROACTIVE_HOUR_UNIT = "hour"
+QUOTE_MARKER = "↩"
+MESSAGE_NUMBER_PREFIX = "#{number} "
+QUOTE_INSTRUCTIONS = (
+    "The messages of the dialogue are numbered. When one of your lines answers a specific earlier "
+    "message of the contact instead of the latest one, start that line with the marker "
+    f"{QUOTE_MARKER}N, where N is the number of that message. Use the marker only when it helps, "
+    "for example when several messages of the contact are waiting and the line answers one that "
+    "is not the last; use it at most once per reply and never for a plain answer to the latest "
+    "message."
+)
 WRAPUP_LINE = "The owner becomes unavailable in about {minutes} {unit} ({reason})."
 WRAPUP_MINUTE_UNIT = "minute"
 WRAPUP_MINUTES_UNIT = "minutes"

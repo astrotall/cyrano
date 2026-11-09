@@ -588,10 +588,12 @@ class SqlOutboxRepository:
         send_at: datetime,
         source: OutboxSource,
         trigger_message_id: int | None = None,
+        reply_to: Sequence[int | None] = (),
     ) -> list[ScheduledMessage]:
         _require_aware(send_at)
-        if not texts:
+        if not texts or (reply_to and len(reply_to) != len(texts)):
             raise OutboxRowInvalid
+        targets = list(reply_to) or [None] * len(texts)
         first_part = (
             insert(ScheduledMessageRow)
             .values(
@@ -601,6 +603,7 @@ class SqlOutboxRepository:
                 source=source,
                 send_at=send_at,
                 due_at=send_at,
+                reply_to_tg_message_id=targets[0],
             )
             .on_conflict_do_nothing(
                 index_elements=[
@@ -619,7 +622,7 @@ class SqlOutboxRepository:
                 if first is None:
                     return await _stored_chain(session, contact_id, trigger_message_id)
                 chain = [first]
-                for text in texts[1:]:
+                for text, target in zip(texts[1:], targets[1:], strict=True):
                     part = await session.scalar(
                         insert(ScheduledMessageRow)
                         .values(
@@ -630,6 +633,7 @@ class SqlOutboxRepository:
                             send_at=send_at,
                             due_at=send_at,
                             follows_id=chain[-1].id,
+                            reply_to_tg_message_id=target,
                         )
                         .returning(ScheduledMessageRow)
                     )

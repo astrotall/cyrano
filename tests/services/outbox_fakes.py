@@ -96,6 +96,7 @@ class ScriptedTransport:
         typing_errors: Sequence[BaseException] = (),
     ) -> None:
         self.calls: list[tuple[int, str]] = []
+        self.reply_tos: list[int | None] = []
         self.steps: list[str] = []
         self.typing_seconds: list[float] = []
         self.read_ids: list[int] = []
@@ -119,9 +120,10 @@ class ScriptedTransport:
         if self._typing_errors:
             raise self._typing_errors.pop(0)
 
-    async def send_text(self, tg_id: int, text: str) -> SentMessage:
+    async def send_text(self, tg_id: int, text: str, reply_to: int | None = None) -> SentMessage:
         self.steps.append(SEND_TEXT_STEP)
         self.calls.append((tg_id, text))
+        self.reply_tos.append(reply_to)
         number = len(self.calls)
         self._active += 1
         self.max_active = max(self.max_active, self._active)
@@ -148,7 +150,7 @@ class HangingTransport:
     async def show_typing(self, tg_id: int, seconds: float) -> None:
         return None
 
-    async def send_text(self, tg_id: int, text: str) -> SentMessage:
+    async def send_text(self, tg_id: int, text: str, reply_to: int | None = None) -> SentMessage:
         self.calls += 1
         self.started.set()
         try:
@@ -265,6 +267,7 @@ class InMemoryOutbox:
         source: OutboxSource,
         trigger_message_id: int | None = None,
         follows_id: int | None = None,
+        reply_to: int | None = None,
     ) -> ScheduledMessage:
         if trigger_message_id is not None:
             for stored in self.rows.values():
@@ -289,6 +292,7 @@ class InMemoryOutbox:
             created_at=FAKE_NOW,
             updated_at=FAKE_NOW,
             follows_id=follows_id,
+            reply_to_tg_message_id=reply_to,
         )
         self.rows[row.id] = row
         return row
@@ -300,15 +304,21 @@ class InMemoryOutbox:
         send_at: datetime,
         source: OutboxSource,
         trigger_message_id: int | None = None,
+        reply_to: Sequence[int | None] = (),
     ) -> list[ScheduledMessage]:
+        targets = list(reply_to) or [None] * len(texts)
         before = len(self.rows)
-        first = await self.enqueue(contact_id, texts[0], send_at, source, trigger_message_id)
+        first = await self.enqueue(
+            contact_id, texts[0], send_at, source, trigger_message_id, reply_to=targets[0]
+        )
         if len(self.rows) == before:
             return self._chain_from(first)
         chain = [first]
-        for text in texts[1:]:
+        for text, target in zip(texts[1:], targets[1:], strict=True):
             chain.append(
-                await self.enqueue(contact_id, text, send_at, source, follows_id=chain[-1].id)
+                await self.enqueue(
+                    contact_id, text, send_at, source, follows_id=chain[-1].id, reply_to=target
+                )
             )
         return chain
 

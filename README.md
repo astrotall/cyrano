@@ -298,7 +298,7 @@ errors and rules: [.claude/docs/outbox-and-sender.md](.claude/docs/outbox-and-se
 
 ```sh
 make outbox-enqueue CONTACT=<contact id> TEXT="..." [IN=<seconds>]   # default 5 seconds
-make outbox-list [STATE=<state>] [LIMIT=<n>]                         # ids, states, send_at, due_at, error, cancel_reason; never a text
+make outbox-list [STATE=<state>] [LIMIT=<n>]                         # ids, states, send_at, due_at, error, cancel_reason, quoted=yes/no; never a text
 make outbox-cancel ID=<row id>                                       # scheduled rows only
 make outbox-retry ID=<row id> [IN=<seconds>] YES=1                   # failed rows only; check the chat first
 make outbox-status                                                   # sender state, counters against limits, rows per state
@@ -371,6 +371,15 @@ set the wrap-up, and every busy window may carry a `label` (at most 40 character
 ([Wrapping up](#wrapping-up-before-the-night-or-a-class)). If a part
 fails or is cancelled, or the contact writes in between, the rest of that reply is not sent. Every part
 counts toward the send limits.
+
+**Quoted replies (CYR-48).** A part of a reply can go out as a Telegram reply to one of the contact's
+messages, so it is visibly tied to it. The model marks it when several messages are waiting and a line
+answers one that is not the last; and when the first part goes out at least `quote_late_seconds` after
+the message it answers (whole seconds in the schedule profile, 0 to 86400, default 300; 0 switches this
+off; `make schedule-show` prints `quote late: 300 s`; a profile imported before the field existed uses the
+default), that part quotes the message. At most one part of a reply is quoted; if the quoted message is
+gone, the part is sent once more without the quote. `REPLY_QUOTE_ENABLED=false` switches the whole
+feature off. Details: [.claude/docs/reply-generation.md](.claude/docs/reply-generation.md#quoting-a-message).
 
 **The early read (CYR-44).** While a conversation is lively, a message of an `active` contact is marked
 read soon after it arrives, not only when the reply starts, as a person sitting in the chat does. The
@@ -568,7 +577,7 @@ What exists now:
 ├── alembic.ini                   # points at migrations/; no URL, it comes from Settings
 ├── migrations/
 │   ├── env.py                    # async environment, URL from Settings
-│   └── versions/                 # 0001 creates the contacts, messages and modes tables and seeds the default mode; 0002 creates persona and style_examples; 0003 creates scheduled_messages (the outbox); 0004 creates sender_state and the index of the send limits; 0005 adds due_at to scheduled_messages; 0006 creates schedule_profile; 0007 adds contacts.pause_reason; 0008 allows stop_trigger as a pause reason; 0009 adds contacts.reply_after and creates autopilot_state; 0010 adds scheduled_messages.follows_id (the parts of a reply); 0011 adds contacts.summary_failed_at; 0012 adds contacts.gender (the owner's choice of the grammatical gender); 0013 allows the outbox source proactive and adds contacts.proactive_not_before; 0014 adds messages.media_kind (the kind of media of an incoming message)
+│   └── versions/                 # 0001 creates the contacts, messages and modes tables and seeds the default mode; 0002 creates persona and style_examples; 0003 creates scheduled_messages (the outbox); 0004 creates sender_state and the index of the send limits; 0005 adds due_at to scheduled_messages; 0006 creates schedule_profile; 0007 adds contacts.pause_reason; 0008 allows stop_trigger as a pause reason; 0009 adds contacts.reply_after and creates autopilot_state; 0010 adds scheduled_messages.follows_id (the parts of a reply); 0011 adds contacts.summary_failed_at; 0012 adds contacts.gender (the owner's choice of the grammatical gender); 0013 allows the outbox source proactive and adds contacts.proactive_not_before; 0014 adds messages.media_kind (the kind of media of an incoming message); 0015 adds scheduled_messages.reply_to_tg_message_id (the message a part answers as a Telegram reply)
 ├── examples/                     # invented sample persona, style examples and schedule (the real files go to data/, never to git)
 ├── .dockerignore
 ├── .gitignore
@@ -940,7 +949,9 @@ judge the style before the autopilot is switched on. It needs a complete `.env` 
 database up and an imported persona. It sends nothing to Telegram and writes nothing to the
 database. `--show-prompt` prints the two messages of the prompt first, with a warning: they contain
 personal data. A reply of several lines prints one numbered line per message the autopilot would send
-(`[1/2] ...`, `[2/2] ...`); a one-line reply prints as before. If the model asks to hand the
+(`[1/2] ...`, `[2/2] ...`); a one-line reply prints as before. A part the model quotes shows the number
+of the quoted message in the dialogue block (`[2/2 ↩12] ...`, also `[1/1 ↩12] ...` for one line); the
+Telegram id is never printed. If the model asks to hand the
 conversation over (a sensitive topic, see above), the first line is `needs owner (model signal)`
 instead of a reply. `--proactive` (`PROACTIVE=1`) asks for the proactive follow-up the assistant would
 write now after a silence ([Proactive messages](#proactive-messages)) and prints its parts, or
@@ -1002,6 +1013,7 @@ the default applies.
 | `AUTOPILOT_MAX_BURST_WAIT_SECONDS` | no | `30` | How long a burst of messages may go unanswered before a reply job answers its newest message instead of waiting for the contact to stop, from 1 to 300 and not below `AUTOPILOT_DEBOUNCE_SECONDS` |
 | `SUMMARY_ENABLED` | no | `true` | `false` stops the app's sweep from putting summary jobs on the queue; `summary update` still works. Restart the app after a change |
 | `SUMMARY_EVERY_MESSAGES` | no | `12` | How many new messages (both directions) after the last summary make a contact due for the next one, from 4 to 200 |
+| `REPLY_QUOTE_ENABLED` | no | `true` | `false` stops quoted replies (CYR-48): the dialogue is no longer numbered, the model is not asked for a marker and no part goes out as a Telegram reply; a stray marker is still removed from the text. Nothing changes while `AUTOPILOT_ENABLED` is `false`. Not printed in the startup line. Restart the worker after a change; `reply-preview` reads it on every run |
 | `WRAPUP_ENABLED` | no | `true` | `false` stops the wrap-up before the night or a busy window: replies then simply stop when the window begins. Nothing changes while `AUTOPILOT_ENABLED` is `false`. Not printed in the startup line. Restart the worker after a change |
 | `PROACTIVE_ENABLED` | no | `false` | `true` switches proactive messages on (CYR-23): the app's sweep enqueues follow-up jobs, the worker writes `proactive` rows and the sender sends them. Works only with `AUTOPILOT_ENABLED=true`. Restart the app and the worker after a change. Not printed in the startup line |
 | `PROACTIVE_AFTER_HOURS` | no | `6` | Hours of silence after your last message (or after the last resume) before a follow-up, from 1 to 72 |

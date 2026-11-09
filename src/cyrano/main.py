@@ -484,6 +484,7 @@ async def _run_reply_preview_command(settings: Settings, request: ReplyPreviewRe
                 budget_chars=settings.reply_prompt_budget_chars,
                 timezone=settings.tzinfo,
                 clock=clock,
+                quote_enabled=settings.reply_quote_enabled,
             ),
             client=client,
             history_limit=settings.reply_history_messages,

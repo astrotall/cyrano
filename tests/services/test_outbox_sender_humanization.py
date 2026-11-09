@@ -176,9 +176,9 @@ class _Concurrency(ScriptedTransport):
         await super().show_typing(tg_id, seconds)
         await self._occupy()
 
-    async def send_text(self, tg_id: int, text: str) -> SentMessage:
+    async def send_text(self, tg_id: int, text: str, reply_to: int | None = None) -> SentMessage:
         await self._occupy()
-        return await super().send_text(tg_id, text)
+        return await super().send_text(tg_id, text, reply_to)
 
 
 class _PausesDuringTyping(ScriptedTransport):
@@ -217,9 +217,9 @@ class _Timed(ScriptedTransport):
         self.fake_clock.advance(seconds)
         await super().show_typing(tg_id, seconds)
 
-    async def send_text(self, tg_id: int, text: str) -> SentMessage:
+    async def send_text(self, tg_id: int, text: str, reply_to: int | None = None) -> SentMessage:
         self.fake_clock.advance(SEND_TOOK)
-        return await super().send_text(tg_id, text)
+        return await super().send_text(tg_id, text, reply_to)
 
 
 class _TimedSleep(_RecordingSleep):
@@ -233,7 +233,7 @@ class _TimedSleep(_RecordingSleep):
 
 
 class _HangingSend(ScriptedTransport):
-    async def send_text(self, tg_id: int, text: str) -> SentMessage:
+    async def send_text(self, tg_id: int, text: str, reply_to: int | None = None) -> SentMessage:
         self.steps.append(SEND_TEXT_STEP)
         await asyncio.sleep(3600)
         raise AssertionError

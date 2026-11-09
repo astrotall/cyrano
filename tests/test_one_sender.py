@@ -39,6 +39,7 @@ EARLY_READ_FUNCTIONS = frozenset({"run_early_reads", "execute_early_reads", EARL
 EARLY_READ_FORBIDDEN_RECEIVERS = frozenset({"_outbox", "_limiter"})
 INTAKE_HANDLE = "handle"
 INTAKE_STOP_CHECK = "_check_stop_triggers"
+INTAKE_MEDIA_CHECK = "_check_media"
 ON_INCOMING = "on_incoming"
 STOP_TRIGGER_DETECTOR_MODULE = "services/stop_triggers.py"
 STOP_CHECK_MODULE = "stop_check_cli.py"
@@ -916,6 +917,38 @@ def test_the_intake_asks_the_early_read_scheduler_last() -> None:
         and isinstance(node.func.value, ast.Attribute)
     ]
     assert receivers == ["_scheduler", "_early_read"]
+
+
+def test_the_intake_runs_the_media_gate_after_the_stop_trigger_gate_and_before_the_schedulers() -> (
+    None
+):
+    tree = ast.parse((SOURCE_ROOT / INTAKE_MODULE).read_text())
+
+    [stop_check] = _call_lines(tree, INTAKE_HANDLE, INTAKE_STOP_CHECK)
+    [media_check] = _call_lines(tree, INTAKE_HANDLE, INTAKE_MEDIA_CHECK)
+    asks = _call_lines(tree, INTAKE_HANDLE, ON_INCOMING)
+    assert len(asks) == 2
+    assert stop_check < media_check < asks[0] < asks[1]
+
+
+def test_the_media_gate_hands_over_only_with_the_media_source_and_never_raises() -> None:
+    tree = ast.parse((SOURCE_ROOT / INTAKE_MODULE).read_text())
+    gate = next(
+        node
+        for node in ast.walk(tree)
+        if isinstance(node, ast.AsyncFunctionDef) and node.name == INTAKE_MEDIA_CHECK
+    )
+
+    sources = {
+        node.attr
+        for node in ast.walk(gate)
+        if isinstance(node, ast.Attribute)
+        and isinstance(node.value, ast.Name)
+        and node.value.id == "TriggerSource"
+    }
+    assert sources == {"MEDIA"}
+    assert any(isinstance(node, ast.ExceptHandler) for node in ast.walk(gate))
+    assert _attributes_used(gate).isdisjoint(TRANSPORT_METHODS | TELETHON_WRITE_METHODS)
 
 
 REFRESH_METHOD = "refresh_entities"

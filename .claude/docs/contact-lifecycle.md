@@ -42,6 +42,7 @@ The triggers marked "exists" are implemented; the others are planned. Changing t
 | `pending` | `ignored` | Owner presses Ignore | owner, through the card | CYR-12 (exists) |
 | `active` | `paused` | Telegram refused a send because of the recipient (blocked, privacy, deactivated, not found, forbidden) | sender | CYR-22 (exists) |
 | `active` | `paused` | A stop-trigger fires on a new incoming message (`pause_reason = stop_trigger`) | `HandOverService` | CYR-20 (exists) |
+| `active` | `paused` | A voice message, a circle, a photo, a video or another attachment arrives; the assistant cannot see it (`pause_reason = stop_trigger`, source `media`) | `HandOverService`, through the media gate of the intake | CYR-58 (exists, interim) |
 | `active` | `paused` | The owner writes a manual message in the chat from the second account | manual-message detector | CYR-21 (exists) |
 | `active` | `paused` | The owner pauses the contact (`pause_reason = owner` exists in the enum; nothing sets it yet) | owner | none yet |
 | `active` | `ignored` | The owner ignores the contact | owner | none yet |
@@ -88,6 +89,7 @@ otherwise the `default` mode. If `default` itself is missing or disabled they ra
 | 3 | The card announcer sends the owner a card with a Reply button per enabled mode and an Ignore button through the control bot; after the card is delivered the contact becomes `pending`. It starts from the `ContactReadyEvent` or from the sweep. Exists, see [Card announcement](#card-announcement-cyr-12) | CYR-12 |
 | 4 | On Reply the contact becomes `active` with the chosen mode; on Ignore it becomes `ignored`. Exists | CYR-12 |
 | 5 | Stop-triggers: the new incoming message of an `active` contact is checked right after it is stored; on a hit the contact becomes `paused`, its scheduled rows are cancelled, the owner is notified and nothing is enqueued. Exists, see [Stop-triggers](#stop-triggers-cyr-20) | CYR-20 |
+| 5a | Media gate: right after the stop-trigger check, a new incoming message of an `active` contact with a voice message, a circle, a photo, a video or another attachment (not a sticker) hands the contact over the same way, with the source `media`; the autopilot and the early read that follow find the contact paused and do nothing. Exists, see [Media messages](#media-messages-cyr-58) | CYR-58 |
 | 6 | Each incoming message from an `active` contact enqueues one delayed Arq job (`AUTOPILOT_DEBOUNCE_ONGOING_SECONDS` in an ongoing conversation, otherwise `AUTOPILOT_DEBOUNCE_SECONDS`, CYR-43); of a burst one job generates, the others find a newer message and skip until the burst has waited `AUTOPILOT_MAX_BURST_WAIT_SECONDS`, after which a job answers the newest message; a row that an earlier job already wrote is cancelled as `superseded` by the newer job and by the sender while it has not started. A sweep every 60 s enqueues what was lost. Exists, behind `AUTOPILOT_ENABLED`, see [autopilot.md](autopilot.md) | CYR-17 |
 | 7 | When the job runs it re-checks the switch, the autopilot state, the status, `reply_after`, the age, supersession and an existing row, runs the stop-trigger detector on the burst again, and only then generates; anything but `active` ends the job with no reply. The model signal hands the contact over | CYR-17, CYR-20 |
 | 8 | The layered prompt is built: persona, mode fragment with few-shot examples, contact summary, last N messages | CYR-14, CYR-15, CYR-16, CYR-25 |
@@ -129,8 +131,12 @@ Steps of `IntakeService.handle`:
   status is (`pending`, `active`, `paused`, `ignored`); only registration is stored here, nothing
   decides about a reply.
 - **Media-only messages.** A photo, sticker, voice message and so on still registers the contact and
-  is stored. The text is the caption, or an empty string (`messages.text` allows it). Media is not
-  downloaded.
+  is stored. The text is the caption, or an empty string (`messages.text` allows it); a sticker's text
+  is its emoji (empty without one). Media is not downloaded. Since CYR-58 the kind of media is stored
+  with the message in `messages.media_kind`: `voice`, `video_note`, `photo`, `video`, `sticker` or
+  `other`, empty for a plain text message (a web page preview is plain text). The userbot detects it
+  from the read attributes of the Telethon message; the precedence is voice, circle (`video_note`),
+  sticker, photo, video (a GIF or an animation counts as video), then any other media.
 - **Idempotency.** A repeated or redelivered message creates nothing twice, keeps its original text
   and publishes nothing, because the event is published only by the call that created the contact.
 - **Race.** Two simultaneous first messages from one sender both find no contact; one `create`
@@ -392,6 +398,20 @@ keeps its first reason and gets no second notice. A failing notice never undoes 
 gate never raises into the intake. Nothing is ever sent to the contact. Details:
 [stop-triggers.md](stop-triggers.md).
 
+## Media messages (CYR-58)
+
+Exists, interim: until voice messages, circles and photos are understood (later tickets), the assistant
+never answers a message it cannot see. After the stop-trigger check, `IntakeService` runs the media gate
+on the new incoming message of an `active` contact: a `media_kind` of `voice`, `video_note`, `photo`,
+`video` or `other` calls `HandOverService.hand_over` with the class `media`, the source `media` and the
+kind. It is the same hand-over: `paused` with `pause_reason = stop_trigger`, the scheduled rows cancelled,
+one notice («Контакт #N прислал …») with the three buttons; only a real change notifies, so a second
+media message while paused, a redelivered one, or a photo whose caption already tripped a text trigger
+notifies once. A sticker never hands over: it is stored as its emoji and handled as text. The gate runs
+before the autopilot scheduler and the early read, never raises into the intake and never causes a
+retry. The media is not downloaded, forwarded or processed; the pause also stops text replies until the
+owner presses Resume. Details: [stop-triggers.md](stop-triggers.md#media-messages-cyr-58).
+
 ## The grammatical gender (CYR-46)
 
 The gender changes no status. It decides one thing: whether the Reply buttons of a card are shown and
@@ -425,8 +445,9 @@ Fixed in CYR-9. Table `contacts`:
 | `created_at`, `updated_at` | `updated_at` moves only when a row really changes |
 
 Message history is in table `messages` (the "last N messages" come from here), one row per Telegram
-message: `contact_id`, `direction` (`incoming`, `outgoing`), `text`, `tg_message_id`, `created_at`.
-`incoming` rows are written by the registration above, with Telegram's send time as `created_at`; `outgoing` rows by the sender's
+message: `contact_id`, `direction` (`incoming`, `outgoing`), `text`, `tg_message_id`, `created_at`, `media_kind`.
+`media_kind` (CYR-58, migration `0014`) holds the kind of media of an incoming message or `NULL`; a check
+constraint allows only the six values. `incoming` rows are written by the registration above, with Telegram's send time as `created_at`; `outgoing` rows by the sender's
 `complete_send`, in one transaction with marking the outbox row sent, with the Telegram message id and
 Telegram's send time (CYR-19), and, for messages the owner wrote by hand, by the manual-message
 detector with the resolved send time (Telegram's, or now by the rule of [Message times](#message-times)) as `created_at` and without moving `last_message_at` (CYR-21, CYR-40).

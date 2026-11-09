@@ -18,6 +18,7 @@ from cyrano.db.session import SessionFactory
 from cyrano.domain.enums import (
     ContactStatus,
     HandOverOutcome,
+    MediaKind,
     MessageDirection,
     OutboxSource,
     OutboxState,
@@ -476,3 +477,68 @@ async def test_logs_carry_ids_classes_and_the_source_and_never_a_text_or_a_name(
     assert handed.__dict__["contact_id"] == contact.id
     assert handed.__dict__["classes"] == ["meeting", "photo"]
     assert handed.__dict__["source"] == "text"
+
+
+async def test_the_media_kind_reaches_the_notice_and_a_text_hand_over_has_none(rig: Rig) -> None:
+    media_contact = await rig.contact(ContactStatus.ACTIVE)
+    text_contact = await rig.contact(ContactStatus.ACTIVE, FAKE_TELEGRAM_ID + 1)
+
+    media = await rig.service().hand_over(
+        media_contact.id, (TriggerClass.MEDIA,), TriggerSource.MEDIA, MediaKind.PHOTO
+    )
+    text = await rig.service().hand_over(text_contact.id, CLASSES, TriggerSource.TEXT)
+
+    assert (media, text) == (HandOverOutcome.HANDED_OVER, HandOverOutcome.HANDED_OVER)
+    first, second = rig.notifier.notices
+    assert (first.source, first.classes, first.media_kind) == (
+        TriggerSource.MEDIA,
+        (TriggerClass.MEDIA,),
+        MediaKind.PHOTO,
+    )
+    assert second.media_kind is None
+
+
+async def test_a_media_message_in_the_history_is_shown_with_its_label_and_caption(
+    rig: Rig,
+) -> None:
+    contact = await rig.contact(ContactStatus.ACTIVE)
+    await rig.messages.append(
+        MessageCreate(
+            contact_id=contact.id,
+            direction=MessageDirection.INCOMING,
+            text="handover-caption-marker-zq",
+            tg_message_id=1,
+            created_at=FAKE_NOW,
+            media_kind=MediaKind.PHOTO,
+        )
+    )
+    await rig.messages.append(
+        MessageCreate(
+            contact_id=contact.id,
+            direction=MessageDirection.INCOMING,
+            text="",
+            tg_message_id=2,
+            created_at=FAKE_NOW + timedelta(seconds=1),
+            media_kind=MediaKind.VOICE,
+        )
+    )
+    await rig.messages.append(
+        MessageCreate(
+            contact_id=contact.id,
+            direction=MessageDirection.INCOMING,
+            text="",
+            tg_message_id=3,
+            created_at=FAKE_NOW + timedelta(seconds=2),
+        )
+    )
+
+    await rig.service().hand_over(
+        contact.id, (TriggerClass.MEDIA,), TriggerSource.MEDIA, MediaKind.VOICE
+    )
+
+    [notice] = rig.notifier.notices
+    assert [line.text for line in notice.lines] == [
+        "[фото] handover-caption-marker-zq",
+        "[голосовое сообщение]",
+        "",
+    ]

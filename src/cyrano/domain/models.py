@@ -19,6 +19,7 @@ from cyrano.domain.enums import (
     ContactStatus,
     GenderOutcome,
     LeomatchNameSource,
+    MediaKind,
     MessageDirection,
     PauseReason,
 )
@@ -122,6 +123,7 @@ class Message(_Stored):
     text: str
     tg_message_id: int
     created_at: UtcDatetime
+    media_kind: MediaKind | None = None
 
 
 class MessageCreate(_Input):
@@ -130,6 +132,7 @@ class MessageCreate(_Input):
     text: str
     tg_message_id: TelegramId
     created_at: UtcDatetime | None = None
+    media_kind: MediaKind | None = None
 
 
 class Mode(_Stored):
@@ -156,6 +159,7 @@ class IncomingMessage(_Input):
     tg_message_id: TelegramId
     text: str
     sent_at: OptionalMessageTime = None
+    media_kind: MediaKind | None = None
 
 
 class OutgoingMessage(_Input):

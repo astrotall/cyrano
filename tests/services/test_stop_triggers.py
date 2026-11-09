@@ -27,6 +27,7 @@ from cyrano.stop_trigger_patterns import (
 from tests.services.stop_trigger_phrases import ACCEPTED_FALSE_POSITIVES, NEGATIVES, POSITIVES
 
 MIN_PHRASES_PER_CLASS = 15
+NON_TEXT_CLASSES = frozenset({TriggerClass.MEDIA})
 FUZZ_SEED = 20261106
 FUZZ_ROUNDS = 300
 FUZZ_ALPHABET = (
@@ -39,9 +40,19 @@ def _cases(table: dict[TriggerClass, tuple[str, ...]]) -> list[tuple[TriggerClas
 
 
 def test_every_class_has_enough_positive_and_negative_phrases() -> None:
-    for trigger in TriggerClass:
+    for trigger in set(TriggerClass) - NON_TEXT_CLASSES:
         assert len(POSITIVES[trigger]) >= MIN_PHRASES_PER_CLASS
         assert len(NEGATIVES[trigger]) >= MIN_PHRASES_PER_CLASS
+
+
+def test_the_media_class_is_never_detected_from_a_text() -> None:
+    phrases = [
+        phrase for table in (POSITIVES, NEGATIVES) for items in table.values() for phrase in items
+    ]
+
+    assert phrases
+    for phrase in phrases:
+        assert TriggerClass.MEDIA not in detect(phrase).classes
 
 
 @pytest.mark.parametrize(("trigger", "phrase"), _cases(POSITIVES))
@@ -326,7 +337,7 @@ def test_random_input_never_raises() -> None:
 
 
 def test_every_class_has_compiled_word_patterns() -> None:
-    assert set(CLASS_PATTERNS) == set(TriggerClass)
+    assert set(CLASS_PATTERNS) == set(TriggerClass) - NON_TEXT_CLASSES
     for patterns in CLASS_PATTERNS.values():
         assert patterns.full is not None
         assert patterns.single is not None

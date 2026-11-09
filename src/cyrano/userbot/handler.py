@@ -8,9 +8,11 @@ from typing import Protocol
 
 from telethon import events
 
+from cyrano.domain.enums import MediaKind
 from cyrano.domain.models import IncomingMessage
 from cyrano.services.intake import IntakeResult
 from cyrano.userbot.filters import Rejection, event_rejection, sender_rejection
+from cyrano.userbot.media_kind import media_kind_of, sticker_emoji_of
 from cyrano.userbot.protocols import EventCallback, IncomingEvent, SenderLike, UserbotClient
 
 logger = logging.getLogger("cyrano.userbot.handler")
@@ -27,14 +29,23 @@ def display_name_of(sender: SenderLike) -> str | None:
     return " ".join(part for part in parts if part) or None
 
 
+def text_of(event: IncomingEvent, media_kind: MediaKind | None) -> str:
+    text = event.raw_text or ""
+    if text or media_kind is not MediaKind.STICKER:
+        return text
+    return sticker_emoji_of(event) or ""
+
+
 def to_incoming_message(event: IncomingEvent, sender: SenderLike) -> IncomingMessage:
+    media_kind = media_kind_of(event)
     return IncomingMessage(
         tg_id=sender.id,
         username=sender.username or None,
         display_name=display_name_of(sender),
         tg_message_id=event.id,
-        text=event.raw_text or "",
+        text=text_of(event, media_kind),
         sent_at=event.date,
+        media_kind=media_kind,
     )
 
 

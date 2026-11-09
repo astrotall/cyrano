@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from cyrano.domain.enums import MediaKind
 from cyrano.domain.reply import MAX_REPLY_PARTS
 
 INSTRUCTIONS_HEADER = "=== INSTRUCTIONS ==="
@@ -66,6 +67,15 @@ OWNER_LABEL = "Me"
 LABEL_SEPARATOR = ": "
 CONTINUATION_INDENT = "    "
 NO_TEXT_PLACEHOLDER = "[no text]"
+MEDIA_LABEL_SEPARATOR = " "
+MEDIA_LABELS = {
+    MediaKind.VOICE: "[голосовое сообщение]",
+    MediaKind.VIDEO_NOTE: "[кружок]",
+    MediaKind.PHOTO: "[фото]",
+    MediaKind.VIDEO: "[видео]",
+    MediaKind.STICKER: "[стикер]",
+    MediaKind.OTHER: "[вложение]",
+}
 
 DIALOGUE_BOUNDARY = "<<<CYRANO-DIALOGUE-7Q4K9X2M>>>"
 DIALOGUE_BEGIN = f"{DIALOGUE_BOUNDARY} BEGIN DIALOGUE"

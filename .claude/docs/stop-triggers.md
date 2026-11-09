@@ -10,16 +10,17 @@ on a hand-over.
 
 | File | What it holds |
 | --- | --- |
-| `domain/enums.py` | `TriggerClass`, `TriggerSource` (`text`, `model`), `HandOverOutcome`, `IgnoreOutcome`, `PauseReason.STOP_TRIGGER` |
-| `domain/stop_triggers.py` | `StopDecision`, `DialogueLine`, `HandOverNotice`, the limits (4096 characters per checked text, 5 lines, 200 characters per line, 60 for the name) |
+| `domain/enums.py` | `TriggerClass` (with `media` since CYR-58), `TriggerSource` (`text`, `model`, `media`), `MediaKind`, `HandOverOutcome`, `IgnoreOutcome`, `PauseReason.STOP_TRIGGER` |
+| `domain/stop_triggers.py` | `StopDecision`, `DialogueLine`, `HandOverNotice` (with the optional `media_kind`), `MEDIA_HAND_OVER_KINDS`, the limits (4096 characters per checked text, 5 lines, 200 characters per line, 60 for the name) |
+| `userbot/media_kind.py` | The read-only detection of the kind of media of a Telethon message (CYR-58) |
 | `stop_trigger_patterns.py` | All pattern data: the phrases per class, the messenger and request-verb lists, the digit, handle and currency rules, the link hosts |
 | `services/stop_triggers.py` | The pure detector: `normalize`, `compile_phrase`, `classes_of`, `detect`. No IO; imports only `domain` and the pattern data |
-| `services/hand_over.py` | `HandOverService.hand_over(contact_id, classes, source)` |
+| `services/hand_over.py` | `HandOverService.hand_over(contact_id, classes, source, media_kind=None)` |
 | `services/hand_over_notifier.py` | `HandOverNotifier`, a single-method Protocol (`notify_hand_over`) |
-| `services/intake.py` | The gate on every new incoming message |
+| `services/intake.py` | The text gate and the media gate on every new incoming message |
 | `services/reply_postprocess.py`, `services/reply_generator.py` | The model signal (`NEEDS_OWNER`) |
 | `services/reply_job.py` | The second check on the burst and the hand-over on the model signal (CYR-17) |
-| `bot/notifier.py`, `bot/rendering.py`, `bot/messages.py` | `TelegramHandOverNotifier`, the notice text and keyboard, the Russian texts |
+| `bot/notifier.py`, `bot/rendering.py`, `bot/messages.py` | `TelegramHandOverNotifier`, the notice text and keyboard (the media notice too), the Russian texts |
 | `bot/handlers.py`, `services/pause_actions.py` | The three buttons: resume, keep, ignore |
 | `stop_check_cli.py` | The `stop-check` dry-run command |
 | `migrations/versions/0008_allow_stop_trigger_pause_reason.py` | Adds `stop_trigger` to the check constraint on `contacts.pause_reason` |
@@ -38,6 +39,7 @@ settings, and the data is constants, not settings (hard rule 4 allows a dedicate
 | Bot question | `bot_question` | ты бот?, ты нейросеть, ты живой человек?, chatgpt, это ИИ |
 | Exes | `exes` | твой бывший, мы расстались, развод, бывшая жена |
 | Crisis | `crisis` | не хочу жить, покончить с собой, суицид, порезать вены |
+| Media | `media` | a voice message, a circle, a photo, a video or another attachment (CYR-58). Never detected from a text: the media gate sets it, see [Media messages](#media-messages-cyr-58) |
 
 The locked hand-over list ([decisions.md](decisions.md)) names meetings, contact exchange, money,
 photos, the bot question and low model confidence. Exes and crisis are added by CYR-20 on the same
@@ -90,6 +92,8 @@ number.
 
 ## Where it is checked
 
+0. **The media gate.** Exists since CYR-58, right after the intake gate below and before the autopilot
+   scheduler and the early read. See [Media messages](#media-messages-cyr-58).
 1. **The intake gate.** Exists. `IntakeService` runs `detect` on the text of the new incoming
    message only, right after the message is stored, and only when the contact is `active`. Older
    messages are never re-checked, so a resume does not fire again on the text that caused the
@@ -125,7 +129,8 @@ when a reply is truncated twice, invalid twice, or the prompt is too large.
 
 ## The hand-over
 
-`HandOverService.hand_over(contact_id, classes, source)`:
+`HandOverService.hand_over(contact_id, classes, source, media_kind=None)` (the kind is only for the media
+source and only goes into the notice):
 
 | Step | What happens |
 | --- | --- |
@@ -133,7 +138,7 @@ when a reply is truncated twice, invalid twice, or the prompt is too large.
 | 2 | `set_status(paused, pause_reason=stop_trigger)`. A refused transition is `not_active`. If the status did not really change (another writer paused it first, the `changed` flag), `already_paused` with no notice |
 | 3 | One INFO line with the contact id, the class values and the source |
 | 4 | The scheduled rows of the contact are cancelled with the reason `stop_trigger`. A row already `sending` is refused by the second guard of the sender because the contact is no longer `active` |
-| 5 | The last 5 messages are loaded, each cut to 200 characters with `…` |
+| 5 | The last 5 messages are loaded, each cut to 200 characters with `…`. A message with a `media_kind` shows its bracketed label before its caption (CYR-58, [reply-generation.md](reply-generation.md#media-labels-cyr-58)) |
 | 6 | One `HandOverNotice` goes to the notifier under a 15 s deadline (`OWNER_NOTIFY_DEADLINE`) |
 | 7 | `handed_over` |
 
@@ -161,6 +166,45 @@ A Telegram error is logged with the error class only.
 The notice is the one place where message texts and the name leave the database for the owner
 ([S9](safety-rules.md)). They go to the owner's own chat through the owner-only control bot, never
 to a log.
+
+## Media messages (CYR-58)
+
+Interim, until voice messages, circles and photos are understood (later tickets): the assistant never
+answers a message it cannot see ([S3](safety-rules.md)). The media is not downloaded, forwarded or
+processed; only its kind is stored (`messages.media_kind`).
+
+**The gate order in `IntakeService.handle`.** The message is stored; then, only for an `active` contact,
+(1) the text gate on the text of the new message, (2) the media gate, (3) the autopilot scheduler, (4)
+the early read scheduler. The media gate runs after the text gate and before both schedulers, so the
+schedulers find a paused contact and enqueue nothing. A structural test pins the order.
+
+**The media gate.** A `media_kind` of `voice`, `video_note`, `photo`, `video` or `other` calls
+`HandOverService.hand_over(contact_id, {media}, source media, kind)`. `sticker` and no kind never hand
+over. It never raises into the intake (a failure is logged with the contact id and the error class and
+the intake result is the same) and never makes the userbot retry. It acts only on the new message.
+
+- **Once.** Only a real `active` to `paused` change notifies (the rule above). A second media message
+  while paused, a redelivered message and an already paused contact give no notice; the gate is not even
+  entered for a contact that is not `active`.
+- **A caption that trips a text trigger.** The text gate runs first and hands over with its text classes;
+  the media gate then finds the contact already paused (`already_paused`), so there is exactly one notice,
+  the text one.
+- **The pause stops text replies too** until the owner presses Resume (or ignores the contact). That is
+  the price of never answering blind.
+- **Stickers are text.** A sticker is stored as its emoji (empty without one) and handled like any text
+  message: no hand-over, the label `[стикер]` in prompts.
+- **Detection precedence** (`userbot/media_kind.py`, read attributes of the Telethon message only): a web
+  page preview makes the message plain text; then `voice`, `video_note`, `sticker`, `photo`, `video` (a
+  GIF or an animation counts as video), then any other media (documents, audio files, locations, contacts,
+  polls, venues, dice, games, invoices, unsupported media) as `other`. It never raises: an attribute that
+  fails is read as absent.
+
+**The notice.** For the source `media` the notice reads «Контакт #N прислал голосовое сообщение» (or
+«кружок», «фото», «видео», «вложение»), the name if there is one, that the assistant is paused for this
+contact, that nothing was sent to it and that the media can be looked at in the chat of the second
+account, the last lines (the media message as «[голосовое сообщение]», «[фото] подпись» and so on, same
+escaping and truncation) and the same three buttons. It never contains a file name, the media content or
+a Telegram id. `stop-check` does not report media: it is not a text class.
 
 ## The buttons
 

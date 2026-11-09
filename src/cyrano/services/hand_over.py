@@ -7,6 +7,7 @@ from collections.abc import Awaitable, Iterable
 from cyrano.domain.enums import (
     ContactStatus,
     HandOverOutcome,
+    MediaKind,
     PauseReason,
     TriggerClass,
     TriggerSource,
@@ -23,6 +24,7 @@ from cyrano.domain.stop_triggers import (
     StopDecision,
     truncate_line,
 )
+from cyrano.prompts.render import media_text
 from cyrano.services.hand_over_notifier import HandOverNotifier
 from cyrano.services.outbox_sender import OWNER_NOTIFY_DEADLINE
 from cyrano.services.repositories import ContactRepository, MessageRepository, OutboxRepository
@@ -32,7 +34,8 @@ logger = logging.getLogger("cyrano.services.hand_over")
 
 def _line(message: Message) -> DialogueLine:
     return DialogueLine(
-        direction=message.direction, text=truncate_line(message.text, HAND_OVER_LINE_MAX_CHARS)
+        direction=message.direction,
+        text=truncate_line(media_text(message.text, message.media_kind), HAND_OVER_LINE_MAX_CHARS),
     )
 
 
@@ -59,7 +62,11 @@ class HandOverService:
         self._notify_deadline = notify_deadline
 
     async def hand_over(
-        self, contact_id: int, classes: Iterable[TriggerClass], source: TriggerSource
+        self,
+        contact_id: int,
+        classes: Iterable[TriggerClass],
+        source: TriggerSource,
+        media_kind: MediaKind | None = None,
     ) -> HandOverOutcome:
         contact = await self._contacts.get_by_id(contact_id)
         if contact is None:
@@ -90,7 +97,12 @@ class HandOverService:
         await self._guarded("cancel", self._cancel_scheduled(contact_id), contact_id)
         lines = await self._recent_lines(contact_id)
         notice = HandOverNotice(
-            contact_id=contact_id, name=_name(contact), classes=ordered, source=source, lines=lines
+            contact_id=contact_id,
+            name=_name(contact),
+            classes=ordered,
+            source=source,
+            media_kind=media_kind,
+            lines=lines,
         )
         await self._guarded("notify", self._notify(notice), contact_id)
         return HandOverOutcome.HANDED_OVER

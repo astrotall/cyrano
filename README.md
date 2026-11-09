@@ -111,8 +111,9 @@ Details: [.claude/docs/contact-lifecycle.md](.claude/docs/contact-lifecycle.md).
 Does:
 
 - listens on the second account and handles only real private messages from real users;
-- registers an unknown sender as a contact with status `new` and stores the message (a photo or
-  sticker counts too: the text is the caption or empty, the media is not downloaded);
+- registers an unknown sender as a contact with status `new` and stores the message (a voice message,
+  circle, photo, video, sticker or other attachment counts too: the text is the caption or empty, the
+  kind of media is stored with the message, the media itself is never downloaded);
 - processes messages that arrived while the app was down (catch-up on start); a redelivered message
   is stored once.
 - reads the profile of a new contact (username, name, bio, photo, the matching-bot text) for the
@@ -256,6 +257,29 @@ make stop-check CONTACT=<id>              # the classes of the contact's last 3 
 
 It prints class names only, never a message text. The lists, the rules and the known false positives:
 [.claude/docs/stop-triggers.md](.claude/docs/stop-triggers.md).
+
+### When a contact sends a voice message, a circle, a photo or a video
+
+The assistant cannot listen to a voice message or a circle or look at a photo or a video yet, and it
+never answers a message it cannot see (CYR-58, interim; the later tickets will understand media).
+When a contact in status `active` sends one (or any other attachment: a file, an audio file, a
+location, a contact card, a poll):
+
+- the contact becomes `paused` (the reason is stored as `stop_trigger`) and its planned messages are
+  cancelled, exactly as for a sensitive topic. **Nothing is sent to the contact**, and automatic text
+  replies stop too until you press **Возобновить автоответы**;
+- you get **one** message in the control bot: «Контакт #<id> прислал голосовое сообщение» (or
+  «кружок», «фото», «видео», «вложение»), with the contact's name, the last 5 messages of the chat
+  (the media message appears as «[голосовое сообщение]», «[фото] подпись» and so on) and the same three
+  buttons. Look at the media in the chat of the second account, answer yourself, then press a button;
+- the media is not downloaded, forwarded or processed, and the notice contains no file name or media
+  content;
+- a sticker is not media for this rule: it is stored as its emoji and handled as text. A contact that
+  is not `active`, or is already paused, gets no notice; a second media message after the pause, or a
+  redelivered one, notifies nothing more. A photo whose caption touches a sensitive topic is handed
+  over once, with the topic.
+
+Details: [.claude/docs/stop-triggers.md](.claude/docs/stop-triggers.md#media-messages-cyr-58).
 
 ### The outbox and the sender
 
@@ -544,7 +568,7 @@ What exists now:
 ├── alembic.ini                   # points at migrations/; no URL, it comes from Settings
 ├── migrations/
 │   ├── env.py                    # async environment, URL from Settings
-│   └── versions/                 # 0001 creates the contacts, messages and modes tables and seeds the default mode; 0002 creates persona and style_examples; 0003 creates scheduled_messages (the outbox); 0004 creates sender_state and the index of the send limits; 0005 adds due_at to scheduled_messages; 0006 creates schedule_profile; 0007 adds contacts.pause_reason; 0008 allows stop_trigger as a pause reason; 0009 adds contacts.reply_after and creates autopilot_state; 0010 adds scheduled_messages.follows_id (the parts of a reply); 0011 adds contacts.summary_failed_at; 0012 adds contacts.gender (the owner's choice of the grammatical gender); 0013 allows the outbox source proactive and adds contacts.proactive_not_before
+│   └── versions/                 # 0001 creates the contacts, messages and modes tables and seeds the default mode; 0002 creates persona and style_examples; 0003 creates scheduled_messages (the outbox); 0004 creates sender_state and the index of the send limits; 0005 adds due_at to scheduled_messages; 0006 creates schedule_profile; 0007 adds contacts.pause_reason; 0008 allows stop_trigger as a pause reason; 0009 adds contacts.reply_after and creates autopilot_state; 0010 adds scheduled_messages.follows_id (the parts of a reply); 0011 adds contacts.summary_failed_at; 0012 adds contacts.gender (the owner's choice of the grammatical gender); 0013 allows the outbox source proactive and adds contacts.proactive_not_before; 0014 adds messages.media_kind (the kind of media of an incoming message)
 ├── examples/                     # invented sample persona, style examples and schedule (the real files go to data/, never to git)
 ├── .dockerignore
 ├── .gitignore
@@ -584,7 +608,7 @@ What exists now:
 │   ├── config.py                 # Settings, load_settings, ConfigError
 │   ├── logging.py                # JSON-lines logging
 │   ├── health.py                 # heartbeat file and the app healthcheck
-│   ├── userbot/                  # Telethon: protocols, filters, handler, client, adapter (the only send), login, runner, profile and Leomatch readers
+│   ├── userbot/                  # Telethon: protocols, filters, handler, media_kind (read-only detection of the kind of media), client, adapter (the only send), login, runner, profile and Leomatch readers
 │   ├── bot/                      # aiogram: owner-only middleware, handlers, card rendering, card sender, owner notifiers (outbox, manual pause, hand-over), polling
 │   ├── llm/                      # DeepSeek client, retrying transport, factory (the only package that imports httpx)
 │   ├── prompts/                  # prompt texts and their pure rendering (imports only domain)

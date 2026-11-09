@@ -5,7 +5,7 @@ control bot with the contact card, the LLM client, the persona with the style ex
 layered reply prompt with the reply generator and the outbox with the one sender, its limits, its
 pause, its stop and its pre-send part exist, and so does the send time planner. Since CYR-21 a message the owner writes by hand from the second account pauses the contact, and the owner can resume it from the notice; since CYR-20 stop-triggers hand the contact over. Since CYR-17 the autopilot exists behind `AUTOPILOT_ENABLED`: the app enqueues a reply job per incoming message of an `active` contact, the Arq worker generates the reply with the LLM client, the persona, the examples and the reply generator and writes an `autopilot` row, and the app's sender sends it ([autopilot.md](autopilot.md)). The app itself still builds no LLM client. Since CYR-25 the worker also keeps a summary of every `active` and `paused` contact, which the reply prompt shows as a layer ([summaries.md](summaries.md)). Anything else is marked **planned** with its ticket.
 
-The state marker is CYR-23, the latest ticket whose change these guides describe as existing (the proactive messages, in [proactive.md](proactive.md) and [decisions.md](decisions.md)). It was established from the guides and the migrations, not from git: the newest migration is `0013` (CYR-23, the `proactive` outbox source and `contacts.proactive_not_before`); before it `0012` (CYR-46, `contacts.gender`, the owner's choice of the grammatical gender) and `0011` (CYR-25, `contacts.summary_failed_at`) and `0010` (CYR-36, `scheduled_messages.follows_id`). CYR-41 (the supersession of `autopilot` rows) added no migration. CYR-40 (the shared time rule of a message) and CYR-39 (the documents in sync with the code) are described here as well.
+The state marker is CYR-58, the latest ticket whose change these guides describe as existing (the interim media hand-over, in [stop-triggers.md](stop-triggers.md#media-messages-cyr-58) and [decisions.md](decisions.md)); before it CYR-23 (the proactive messages, in [proactive.md](proactive.md)). It was established from the guides and the migrations, not from git: the newest migration is `0014` (CYR-58, `messages.media_kind`); before it `0013` (CYR-23, the `proactive` outbox source and `contacts.proactive_not_before`) and `0012` (CYR-46, `contacts.gender`, the owner's choice of the grammatical gender) and `0011` (CYR-25, `contacts.summary_failed_at`) and `0010` (CYR-36, `scheduled_messages.follows_id`). CYR-41 (the supersession of `autopilot` rows) added no migration. CYR-40 (the shared time rule of a message) and CYR-39 (the documents in sync with the code) are described here as well.
 Product and decisions: [CLAUDE.md](../../CLAUDE.md). Reasons: [decisions.md](decisions.md).
 
 ## Layers
@@ -198,6 +198,7 @@ one module, `adapter.py`, also sends, and only on behalf of `OutboxSender`. No o
 | `protocols.py` | The small surface of Telethon that the code uses, as Protocols: `SenderLike`, `IncomingEvent`, `UserbotClient`, `LoginClient`. `UserbotClient` has `connect`, `disconnect`, `is_user_authorized`, `catch_up`, `add_event_handler`, `remove_event_handler`, `disconnected` and, since CYR-11, only the read members `get_entity`, `get_full_user`, `download_profile_photo`, `download_media` and `iter_messages`; no write method and no generic request call; a test enforces that list |
 | `filters.py` | Pure functions: `event_rejection(event)`, `sender_rejection(sender)` and, since CYR-21, `outgoing_event_rejection(event)` return a `Rejection` or `None` |
 | `handler.py` | `IncomingHandler`: registers one `events.NewMessage(incoming=True)` handler, converts an event into `IncomingMessage`, calls the intake, catches and counts failures |
+| `media_kind.py` | `media_kind_of(event)` and `sticker_emoji_of(event)` (CYR-58): the pure, read-only detection of the kind of media of a message from the Telethon read attributes, never raising; used by `handler.py` (`IncomingEvent` gained the read member `message`) |
 | `outgoing_handler.py` | `OutgoingHandler` (CYR-21): registers one `events.NewMessage(outgoing=True)` handler, filters, converts an event into `OutgoingMessage`, calls the `ManualMessageDetector`, catches and counts failures; see [Manual intervention](#manual-intervention-cyr-21) |
 | `adapter.py` | `TelethonAdapter`, since CYR-19 the only module that touches the Telethon client directly: delegates the `UserbotClient` members, builds the one request (`GetFullUserRequest`) and implements `MessageTransport` (`send_text`, and since CYR-18 `show_typing` and `mark_read`, the only uses of `action` and `send_read_acknowledge`), mapping Telegram failures to the send errors with one function. Resolves every peer through one shared step that refreshes the entity cache once (`refresh_entities`: read-only `iter_dialogs`, a lock, one refresh per 60 s, a 60 s deadline) before it reports `PeerNotFound` (CYR-55); logs only the counters and class names of that refresh. `Userbot.warm_up_entities` in `runner.py` makes the same call once after the start. See [Outbox and sender](#outbox-and-sender-cyr-19) |
 | `client.py` | `build_access` returns a `UserbotAccess` (the read client and the transport, both the adapter) from `Settings`; session file naming and mode, `connect_authorized` with the timeout, `disconnect_client` |
@@ -296,9 +297,9 @@ userbot with both handlers. The classification, the order of the steps and the r
 | --- | --- |
 | `stop_trigger_patterns.py` | The pattern data, constants only |
 | `services/stop_triggers.py` | The pure detector: `normalize`, `compile_phrase`, `classes_of`, `detect`; the patterns are compiled once at import |
-| `services/hand_over.py` | `HandOverService.hand_over(contact_id, classes, source)`: pause, cancel, history, one notice under the deadline |
+| `services/hand_over.py` | `HandOverService.hand_over(contact_id, classes, source, media_kind=None)`: pause, cancel, history, one notice under the deadline |
 | `services/hand_over_notifier.py` | `HandOverNotifier`, a single-method Protocol, `notify_hand_over(notice)`; implemented only by `bot/notifier.py` |
-| `services/intake.py` | The gate: the new message of an `active` contact, after it is stored |
+| `services/intake.py` | The gates: the new message of an `active` contact, after it is stored: the text gate, then (CYR-58) the media gate `_check_media`, then the schedulers |
 | `services/pause_actions.py` | `PauseActions.ignore(contact_id)` next to `resume` |
 | `bot/notifier.py`, `bot/rendering.py`, `bot/handlers.py`, `bot/callbacks.py` | The notice, its three buttons (`PauseAction.RESUME`, `KEEP`, `IGNORE`) and their handler |
 | `stop_check_cli.py` | The dry-run command |
@@ -308,6 +309,15 @@ The import direction is unchanged: the hand-over depends on repository and notif
 `PauseActions`. `main.py` builds the control bot before the intake, so the notifier exists when the
 intake is built. Nothing in the hand-over path touches the transport; `tests/test_one_sender.py`
 proves it. Behaviour: [stop-triggers.md](stop-triggers.md).
+
+CYR-58 added the media hand-over on the same path (interim): `MediaKind`, `TriggerClass.MEDIA` and
+`TriggerSource.MEDIA` in `domain/enums.py`, `MEDIA_HAND_OVER_KINDS` and the optional `media_kind` of
+`HandOverNotice` in `domain/stop_triggers.py`, the optional `media_kind` of `IncomingMessage`, `Message`
+and `MessageCreate`, `messages.media_kind` (migration `0014`, nullable, a check constraint on the six
+values), `userbot/media_kind.py`, the media gate in `services/intake.py`, `media_text` and `MEDIA_LABELS`
+in `prompts/` (the bracketed labels of the reply prompt, the proactive prompt and the summary input, and
+of the lines of the owner notice, which `services/hand_over.py` renders through `media_text`), and the
+media notice in `bot/rendering.py` and `bot/messages.py`. The import direction is unchanged.
 
 ## Intake and contact events (CYR-10)
 
@@ -788,7 +798,9 @@ repository holds no server runbook, by the owner's decision ([decisions.md](deci
   CYR-23 the outbox source `proactive` (the source check widened by migration `0013`, whose downgrade
   cancels waiting `proactive` rows with the reason `downgrade` and turns the source of every such row
   into `autopilot`) and `contacts.proactive_not_before` (nullable, the same migration); see
-  [proactive.md](proactive.md).
+  [proactive.md](proactive.md). Since CYR-58 `messages.media_kind` (migration `0014`, nullable string,
+  a check constraint on `voice`, `video_note`, `photo`, `video`, `sticker` and `other`, no backfill: an
+  older message has no kind).
 - **Names**: table names and enum type names live in `db/models.py`, enum values in
   `domain/enums.py`. `Base.metadata` has a naming convention, so constraint and index names are
   stable and need no spelling out. The migration repeats these strings on purpose: a revision is a

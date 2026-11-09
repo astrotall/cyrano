@@ -249,6 +249,7 @@ class SqlMessageRepository:
             "direction": data.direction,
             "text": data.text,
             "tg_message_id": data.tg_message_id,
+            "media_kind": data.media_kind,
         }
         if data.created_at is not None:
             values["created_at"] = data.created_at

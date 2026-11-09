@@ -47,6 +47,7 @@ ALLOWED_EVENT_MEMBERS = frozenset(
         "sender_id",
         "chat_id",
         "raw_text",
+        "message",
         "get_sender",
         "get_chat",
     }

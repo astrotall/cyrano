@@ -755,6 +755,21 @@ Rules, the eligibility conditions, the outcomes and the checklist for the reader
   `active` contact, a lateral join for the last incoming message, two correlated subqueries for the
   rows of the silence and the interval), then about six small reads per candidate for the snapshot.
 
+## Deployment (CYR-45)
+
+One VPS runs the whole Compose stack: `app`, `worker`, `postgres`, `redis` and the one-shot `migrate`.
+Only `docker-compose.yml` is used there; `docker-compose.override.yml` is for development and is never
+loaded on the server. The path of a change: a push to `main`, then CI, then `.github/workflows/deploy.yml`
+(a `workflow_run` of CI that ran for a push to `main`, or a manual run with a sha; the GitHub environment
+`production`, no checkout, no third-party action), then SSH, then `scripts/deploy.sh <sha>` in `/opt/cyrano`.
+The script validates the sha, takes a lock, accepts only a commit reachable from `origin/main`, builds on the
+server with `docker compose up -d --build --remove-orphans`, waits a bounded time for the healthchecks and
+the exit code of `migrate`, and on failure checks out the previous commit and starts it once. The rollback
+is of code only, so a migration must stay compatible with the previous code. The Telethon session is created
+on the server and never copied. The new files are `scripts/deploy.sh`, `.github/workflows/deploy.yml` and
+`tests/test_deploy.py` (fake `git`, `docker` and `flock` on `PATH`, the workflow checked as text). The
+repository holds no server runbook, by the owner's decision ([decisions.md](decisions.md)).
+
 ## Persistence
 
 - **Tables**: `contacts`, `messages`, `modes`; native enums `contact_status` and

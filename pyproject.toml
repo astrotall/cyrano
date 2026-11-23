@@ -16,7 +16,7 @@ dependencies = [
     "asyncpg>=0.30",
     "alembic>=1.14",
     # MTProto client for the userbot on the second account; untyped, so mypy has an override.
-    "telethon>=1.45",
+    "telethon>=1.46.0",
     # Control bot on the owner's main account; ships type information.
     "aiogram>=3.31,<4",
     # Plain HTTP client for the LLM provider; imported only inside llm/. No provider SDK.
